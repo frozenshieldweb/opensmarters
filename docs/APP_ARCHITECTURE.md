@@ -347,15 +347,17 @@ match session.movie_request(id, ext.as_deref(), &title, Some(subtitle), poster, 
   growing duration on live TS). Always show the catalogue title, never mpv's `media-title`.
 - Aspect/zoom presets persist (prefs + mpv global options).
 
-Channel keys, one convention everywhere (`playback/keys.rs`, TV remotes): **PageUp /
-Ctrl+↑ / media "next" = channel +1**, **PageDown / Ctrl+↓ / media "previous" = channel −1**.
+Channel keys (`playback/keys.rs`). In the fullscreen player they follow the TV remote:
+**PageUp / Ctrl+↑ / media "next" = channel +1**, **PageDown / Ctrl+↓ / media "previous" =
+channel −1**. On Live TV the list is on screen, so Ctrl+↓ means the **next row** (+1) and
+Ctrl+↑ the previous row (−1).
 Player keys (documented in `screens/player.rs`): Space play/pause; with the OSD hidden
 ←/→ seek ∓10 s (Shift ∓60 s, the scrubber gets the focus) on VOD or zap −/+ on live, ↑/↓
 zap +/− on live; the channel keys above; digits = channel number entry (zaps after 1.5 s or
 Enter; the current list, else All); M mute, F window fullscreen, I show/hide OSD, A/S next
 audio/subtitle, +/− volume; Esc closes the track sheet, then hides the OSD, then leaves
-the player. Live TV: PageUp/PageDown **page the list**; Ctrl+↑/↓ and the media keys zap the
-preview; the same digits; M mute, F fullscreen, I channel banner.
+the player. Live TV: PageUp/PageDown **page the list**; Ctrl+↓/↑ (next/previous row) and
+the media keys zap the preview; the same digits; M mute, F fullscreen, I channel banner.
 
 ## 8. The focus system
 

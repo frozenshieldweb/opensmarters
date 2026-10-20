@@ -193,7 +193,7 @@ pub fn save_clip(cx: &mut AppCtx<'_>, minutes: u32) {
     });
     cx.toasts.info(format!(
         "Saving the last {}…",
-        crate::ui::text::duration_short(secs)
+        super::ui::length_label(secs)
     ));
 }
 
@@ -219,12 +219,12 @@ fn finish_clip(cx: &mut AppCtx<'_>, c: PendingClip, ok: bool) {
     cx.toasts.success(if asked_more {
         format!(
             "Saved a {} clip to Recordings (that's what the buffer held).",
-            crate::ui::text::duration_short(c.secs)
+            super::ui::length_label(c.secs)
         )
     } else {
         format!(
             "Saved the last {} to Recordings.",
-            crate::ui::text::duration_short(c.secs)
+            super::ui::length_label(c.secs)
         )
     });
     let now = Utc::now();

@@ -768,6 +768,10 @@ impl DetailScreen {
             ui.spacing_mut().item_spacing.x = 12.0;
             self.actions(cx, ui, &h);
         });
+        // p7b: the film's download state, under the actions.
+        if let DetailKind::Movie(id) = self.kind {
+            crate::dvr::ui::movie_status(cx, ui, id, x0);
+        }
 
         match self.kind {
             DetailKind::Movie(id) => {
@@ -893,6 +897,17 @@ impl DetailScreen {
         {
             self.toggle_favourite(cx);
         }
+        // p7b: Download / Play downloaded copy (logic in dvr::ui).
+        if let DetailKind::Movie(id) = self.kind {
+            let ext = self.movie_extension(id);
+            let target = crate::dvr::ui::MovieTarget {
+                stream_id: id,
+                title: &h.title,
+                extension: ext.as_deref(),
+                poster: h.poster.as_deref(),
+            };
+            crate::dvr::ui::movie_download(cx, ui, &target);
+        }
     }
 
     fn similar_rail(
@@ -966,6 +981,8 @@ impl DetailScreen {
         let name = series_name(&info);
         let artwork = self.header.as_ref().and_then(|h| h.poster.clone());
         let watch = self.watch.value().cloned();
+        // p7b: which episodes are downloaded / downloading.
+        let downloads = crate::dvr::ui::episode_downloads(cx, info_series_id(self.kind));
         let e = Episodes {
             info: &info,
             watch: watch.as_deref(),
@@ -975,6 +992,7 @@ impl DetailScreen {
             images: &images,
             margin: cx.layout.margin,
             thresholds: session.resume_thresholds(),
+            downloads: &downloads, // p7b
         };
         let action = episodes::show(ui, &e, &mut self.season);
         if before.is_some() && self.season != before {
@@ -983,8 +1001,25 @@ impl DetailScreen {
         match action {
             Some(EpisodeAction::Play { id, resume }) => self.play_episode(cx, id, resume),
             Some(EpisodeAction::SetWatched { id, watched }) => self.set_watched(cx, id, watched),
+            // p7b: episode / season downloads.
+            Some(EpisodeAction::Download(a)) => crate::dvr::ui::episode_action(
+                cx,
+                &info,
+                info_series_id(self.kind),
+                artwork.as_deref(),
+                a,
+            ),
             None => {}
         }
+        crate::dvr::ui::detail_dialogs(cx); // p7b
+    }
+}
+
+/// p7b: the series id of a series page (0 for a film).
+fn info_series_id(kind: DetailKind) -> u64 {
+    match kind {
+        DetailKind::Series(id) => id,
+        DetailKind::Movie(_) => 0,
     }
 }
 

@@ -501,6 +501,7 @@ impl Screen for PlayerScreen {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
         self.overlays(cx, ui);
+        crate::dvr::ui::player_overlay(cx, ui); // p7b: ● REC badge, clip dialog
     }
 }
 
@@ -730,6 +731,10 @@ impl PlayerScreen {
                 .activated
             {
                 cx.nav.back();
+            }
+            // p7b: Record / Stop recording and Save clip (live), left of the clock.
+            if live {
+                crate::dvr::ui::player_buttons(cx, ui, right - 110.0, top_y);
             }
             // Scrubber (VOD).
             if !live {

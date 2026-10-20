@@ -150,6 +150,21 @@ pub struct Status {
     pub fraction: Option<f32>,
 }
 
+/// A length for clips: "45 s", "2 min 13 s", "5 min", "1 h 05".
+pub fn length_label(secs: f64) -> String {
+    if !secs.is_finite() || secs <= 0.0 {
+        return "0 s".to_owned();
+    }
+    let total = secs.round() as u64;
+    let (m, s) = (total / 60, total % 60);
+    match (m, s) {
+        (0, s) => format!("{s} s"),
+        (m, 0) if m < 60 => format!("{m} min"),
+        (m, s) if m < 60 => format!("{m} min {s} s"),
+        _ => text::duration_short(secs),
+    }
+}
+
 fn rate_label(bps: f64) -> Option<String> {
     (bps >= 1.0).then(|| format!("{}/s", human_bytes(bps as u64)))
 }
@@ -263,10 +278,7 @@ pub fn status(cx: &AppCtx<'_>, r: &Recording, p: Option<&Progress>) -> Status {
             fraction,
         },
         RecordingState::Done => {
-            let dur = r
-                .duration_secs
-                .map(text::duration_short)
-                .filter(|d| !d.is_empty());
+            let dur = r.duration_secs.filter(|d| *d > 0.0).map(length_label);
             let line = vod::meta_line([Some("Saved".to_owned()), size, dur].into_iter().flatten());
             Status {
                 glyph: icons::CHECK_CIRCLE,
@@ -444,9 +456,23 @@ pub fn movie_status(cx: &mut AppCtx<'_>, ui: &mut Ui, stream_id: u64, x: f32) {
 // Series detail
 // ---------------------------------------------------------------------------------------
 
-/// The download state of each episode of a series (episode id → row id, state,
-/// progress).
-pub type EpisodeDownloads = HashMap<u64, (RecordingId, RecordingState, Option<f32>)>;
+/// The download state of the episodes of a series (episode id → row id, state,
+/// progress). Empty and disabled when downloads aren't available (no engine, M3U).
+#[derive(Debug, Clone, Default)]
+pub struct EpisodeDownloads {
+    enabled: bool,
+    map: HashMap<u64, (RecordingId, RecordingState, Option<f32>)>,
+}
+
+impl EpisodeDownloads {
+    fn get(&self, episode_id: u64) -> Option<&(RecordingId, RecordingState, Option<f32>)> {
+        self.map.get(&episode_id)
+    }
+
+    fn contains(&self, episode_id: u64) -> bool {
+        self.map.contains_key(&episode_id)
+    }
+}
 
 /// What an episode download control asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -465,8 +491,11 @@ pub enum DownloadAction {
 
 /// The episodes of `series_id` that have a download.
 pub fn episode_downloads(cx: &AppCtx<'_>, series_id: u64) -> EpisodeDownloads {
+    let enabled =
+        cx.dvr.engine().is_some() && cx.session().is_some_and(|s| s.is_xtream()) && series_id > 0;
     let sid = series_id.to_string();
-    cx.dvr
+    let map = cx
+        .dvr
         .rows()
         .iter()
         .filter(|r| r.kind == RecordingKind::Episode && r.series_id.as_deref() == Some(&sid))
@@ -480,7 +509,19 @@ pub fn episode_downloads(cx: &AppCtx<'_>, series_id: u64) -> EpisodeDownloads {
                 .map(|f| f as f32);
             Some((id, (r.id, r.state, frac)))
         })
-        .collect()
+        .collect();
+    EpisodeDownloads { enabled, map }
+}
+
+/// Splits an episode row: the row itself, and room for its download control on the
+/// right (nothing when downloads aren't available).
+pub fn split_episode_row(d: &EpisodeDownloads, rect: Rect) -> (Rect, Rect) {
+    if !d.enabled {
+        return (rect, Rect::NOTHING);
+    }
+    let button =
+        Rect::from_center_size(pos2(rect.right() - 26.0, rect.center().y), vec2(44.0, 44.0));
+    (rect.with_max_x(rect.right() - 60.0), button)
 }
 
 /// The small download control of an episode row (at `rect`, 44 pt).
@@ -490,8 +531,11 @@ pub fn episode_button(
     episode_id: u64,
     rect: Rect,
 ) -> Option<DownloadAction> {
+    if !downloads.enabled || !rect.is_positive() {
+        return None;
+    }
     let id = Id::unique(("detail.ep.download", episode_id));
-    let (glyph, caption, tint, action) = match downloads.get(&episode_id) {
+    let (glyph, caption, tint, action) = match downloads.get(episode_id) {
         None => (
             icons::DOWNLOAD_SIMPLE,
             None,
@@ -531,25 +575,37 @@ pub fn episode_button(
     b.show_at(ui, rect).activated.then_some(action)
 }
 
-/// "Download season" next to the season tabs (at `rect`).
-pub fn season_button(ui: &mut Ui, season: u32, rect: Rect) -> Option<DownloadAction> {
+/// "Download season" on the season header row (`head`), right-aligned left of the
+/// episode count that ends at `right`.
+pub fn season_button(
+    ui: &mut Ui,
+    downloads: &EpisodeDownloads,
+    head: Rect,
+    right: f32,
+    season: u32,
+    episodes: usize,
+) -> Option<DownloadAction> {
+    if !downloads.enabled || episodes == 0 {
+        return None;
+    }
+    let count = format!("{episodes} episode{}", if episodes == 1 { "" } else { "s" });
+    let count_w = text::width(ui.painter(), &count, font::caption());
     let b = Button::ghost("Download season")
         .icon(icons::DOWNLOAD_SIMPLE)
         .small()
         .id(Id::unique("detail.season.download"));
+    let size = b.size(ui);
+    let rect = Rect::from_min_size(
+        pos2(
+            right - count_w - 16.0 - size.x,
+            head.center().y + 2.0 - size.y / 2.0,
+        ),
+        size,
+    );
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
     b.show(&mut child)
         .activated
         .then_some(DownloadAction::Season(season))
-}
-
-/// Width [`season_button`] needs.
-pub fn season_button_width(ui: &Ui) -> f32 {
-    Button::ghost("Download season")
-        .icon(icons::DOWNLOAD_SIMPLE)
-        .small()
-        .size(ui)
-        .x
 }
 
 fn episode_new(
@@ -603,7 +659,7 @@ pub fn episode_action(
                 .map(Vec::as_slice)
                 .unwrap_or_default()
                 .iter()
-                .filter(|e| !have.contains_key(&e.id))
+                .filter(|e| !have.contains(e.id))
                 .filter_map(|e| {
                     let mut n = episode_new(info, series_id, e.id, poster.clone())?;
                     n.icon_url = session.safe_url(n.icon_url.as_deref());
@@ -928,5 +984,20 @@ pub fn live_row_badge(painter: &egui::Painter, logo: Rect, recording: bool) {
             pos2(logo.right() + 4.0, logo.bottom() + 6.0),
             Align2::RIGHT_BOTTOM,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lengths_read_naturally() {
+        assert_eq!(length_label(9.6), "10 s");
+        assert_eq!(length_label(60.0), "1 min");
+        assert_eq!(length_label(133.0), "2 min 13 s");
+        assert_eq!(length_label(300.2), "5 min");
+        assert_eq!(length_label(3900.0), "1 h 05");
+        assert_eq!(length_label(f64::NAN), "0 s");
     }
 }

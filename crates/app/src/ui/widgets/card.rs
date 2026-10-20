@@ -407,31 +407,40 @@ impl<'a> ChannelTile<'a> {
             },
         );
         Badge::live_dot(&painter, pos2(r.left() + 12.0, r.top() + 15.0));
-        let logo_h = (r.height() * 0.5).round();
+        // Logo plate in the 120×68 box (the logo itself fills ~85 % of it).
+        let logo_h = (r.height() * 0.46).round();
         let logo = Rect::from_center_size(
             pos2(r.center().x, r.top() + 8.0 + logo_h / 2.0),
             vec2(logo_h * 120.0 / 68.0, logo_h),
         );
         ChannelLogo::paint(ui, &painter, logo, self.name, self.logo);
-        let line = match self.now {
-            Some(n) if !n.is_empty() => format!("{} · {}", self.name, n),
-            _ => self.name.to_owned(),
-        };
+        // Name (body-strong) and programme (caption) on two lines.
         text::line(
             &painter,
-            pos2(r.left() + 12.0, r.bottom() - 22.0),
-            Align2::LEFT_BOTTOM,
-            &line,
-            font::caption(),
-            if f.focused {
-                color::TEXT
-            } else {
-                color::TEXT_2
-            },
+            pos2(r.left() + 12.0, r.bottom() - 42.0),
+            Align2::LEFT_CENTER,
+            self.name,
+            font::body_strong(),
+            color::TEXT,
             r.width() - 24.0,
         );
+        if let Some(n) = self.now.filter(|n| !n.is_empty()) {
+            text::line(
+                &painter,
+                pos2(r.left() + 12.0, r.bottom() - 22.0),
+                Align2::LEFT_CENTER,
+                n,
+                font::caption(),
+                if f.focused {
+                    color::TEXT
+                } else {
+                    color::TEXT_2
+                },
+                r.width() - 24.0,
+            );
+        }
         let bar = Rect::from_min_size(
-            pos2(r.left() + 12.0, r.bottom() - 14.0),
+            pos2(r.left() + 12.0, r.bottom() - 10.0),
             vec2(r.width() - 24.0, 3.0),
         );
         paint::progress_bar(

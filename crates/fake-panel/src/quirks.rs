@@ -42,6 +42,10 @@ pub struct Quirks {
     /// (`YYYY-MM-DD:HH:MM:SS`) plays; the standard `YYYY-MM-DD:HH-MM` form gets `503`
     /// (exercises a client's format fallback).
     pub timeshift_smarters_only: bool,
+    /// `stall`: live `.ts` streams send the first 40 % of their clip, then keep the
+    /// connection open without sending another byte (a frozen stream that never closes,
+    /// like a real panel after a zap). Exercises a client's stall detection.
+    pub stall: bool,
 }
 
 impl Default for Quirks {
@@ -58,6 +62,7 @@ impl Default for Quirks {
             malformed_item: false,
             timeshift_503: false,
             timeshift_smarters_only: false,
+            stall: false,
         }
     }
 }
@@ -76,6 +81,7 @@ impl Quirks {
         "malformed-item",
         "timeshift-503",
         "timeshift-smarters-only",
+        "stall",
     ];
 
     /// No quirks at all (note: also turns `category-all-literal` off).
@@ -99,6 +105,7 @@ impl Quirks {
             "malformed-item" => &mut self.malformed_item,
             "timeshift-503" => &mut self.timeshift_503,
             "timeshift-smarters-only" => &mut self.timeshift_smarters_only,
+            "stall" => &mut self.stall,
             _ => return None,
         })
     }

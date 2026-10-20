@@ -2,11 +2,22 @@
 //! Live TV (§8.3): categories (All, Favourites, provider categories / M3U groups) with a
 //! filter, a virtualised channel list with now/next and progress, the inline preview
 //! player with the Now/Next card, sort, favourites, parental locks (PIN), channel-number
-//! entry and PageUp/PageDown zapping.
+//! entry and zapping.
 //!
 //! Behaviour: moving the focus never switches the stream. Enter on a row plays it in the
-//! preview; Enter on the playing row (or the Fullscreen button) opens the player.
+//! preview; Enter on the playing row (or the Fullscreen button) opens the player. Before
+//! anything plays, Enter on the preview (or its "Watch" button) plays the highlighted
+//! row (else the first one).
+//!
+//! Keys (see [`crate::playback::keys`]): PageUp/PageDown page the list; **Ctrl+↑ / media
+//! "next" = channel +1**, **Ctrl+↓ / media "previous" = channel −1** in the preview
+//! (stopping at the ends of the list); digits = channel number (the current list, else
+//! All); M mute, F fullscreen, I channel banner.
+//!
+//! The visible list (filter by category and parental locks, sort) is computed off the UI
+//! thread: a real provider has ~10 000 channels (50 000 with the `huge` demo quirk).
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,18 +25,19 @@ use eframe::egui::{
     self, Align2, Color32, CornerRadius, Id, Key, Modifiers, Rect, Sense, Stroke, StrokeKind, Ui,
     pos2, vec2,
 };
-use opensmarters_core::catalog::{
-    CatalogItem, CategorySelection, SearchQuery, SortOrder, sorted_indices,
-};
+use opensmarters_core::catalog::{CatalogItem, CategorySelection, SearchQuery, SortOrder};
 use opensmarters_core::chrono::Local;
 use opensmarters_core::{CategoryId, chrono};
 use opensmarters_store::{ContentKind, ItemSnapshot, PinOutcome};
 
+use super::common::channel_list;
+use super::player::{NumberMatch, paint_number_box};
 use super::{AppCtx, Screen, shell};
 use crate::error::AppError;
 use crate::focus::{self, FocusOpts};
 use crate::nav::{PlayerRoute, Route, Section};
-use crate::playback::{PlaybackItem, PlaybackStatus, ZapContext};
+use crate::playback::keys::{self, Surface};
+use crate::playback::{PlaybackItem, PlaybackStatus, ZapContext, ZapOutcome};
 use crate::services::catalog::{LiveCatalog, LiveChannel, Programme, split_tag};
 use crate::services::epg::EpgState;
 use crate::services::{ImageSize, Session};
@@ -38,7 +50,7 @@ use crate::ui::widgets::callout::Badge;
 use crate::ui::widgets::feedback::skeleton;
 use crate::ui::widgets::{
     Button, ChannelLogo, Chip, Dialog, EmptyState, IconButton, MenuRow, PinPad, PinPadEvent,
-    SearchField, VirtualList,
+    SearchField, VirtualList, chip::ChipRow, zap_banner,
 };
 use crate::ui::{paint, text};
 
@@ -53,6 +65,118 @@ fn list_id() -> Id {
 
 fn row_id(key: &str) -> Id {
     Id::unique(("live.row", key))
+}
+
+fn video_id() -> Id {
+    Id::unique("live.video")
+}
+
+/// The preview's primary button ("Fullscreen", or "Watch …" before anything plays).
+fn primary_id() -> Id {
+    Id::unique("live.fullscreen")
+}
+
+fn preview_button_ids() -> [Id; 3] {
+    [
+        primary_id(),
+        Id::unique("live.guide"),
+        Id::unique("live.fav"),
+    ]
+}
+
+/// Parental control for channel lists: a channel is hidden while **any** of its
+/// categories is locked (and not unlocked with the PIN in this session) — the same rule
+/// as [`super::common::locks`] (SR-15). Cached per category, so a 50 000-channel list
+/// costs one lock check per category, not one per channel.
+pub(crate) struct LockFilter<'a> {
+    session: &'a Session,
+    catalog: &'a LiveCatalog,
+    enabled: bool,
+    cache: HashMap<CategoryId, bool>,
+}
+
+impl<'a> LockFilter<'a> {
+    /// A filter for the session's current locks.
+    pub(crate) fn new(session: &'a Session, catalog: &'a LiveCatalog) -> Self {
+        Self {
+            session,
+            catalog,
+            enabled: session.parental_enabled(),
+            cache: HashMap::new(),
+        }
+    }
+
+    /// True if `ch` must stay hidden.
+    pub(crate) fn is_locked(&mut self, ch: &LiveChannel) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        for id in &ch.categories {
+            let locked = match self.cache.get(id) {
+                Some(l) => *l,
+                None => {
+                    let l = self.session.is_category_locked(
+                        ContentKind::Live,
+                        id,
+                        self.catalog.category_name(id).unwrap_or(""),
+                    );
+                    self.cache.insert(id.clone(), l);
+                    l
+                }
+            };
+            if locked {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Every channel parental control allows, sorted by number (the "All" zap list for a
+/// channel number that isn't in the current list).
+pub(crate) fn all_by_number(session: &Session, cat: &LiveCatalog) -> Vec<LiveChannel> {
+    let mut locks = LockFilter::new(session, cat);
+    let picked: Vec<LiveChannel> = cat
+        .channels
+        .iter()
+        .filter(|c| !locks.is_locked(c))
+        .cloned()
+        .collect();
+    channel_list::sorted(picked, SortOrder::NumberAsc)
+}
+
+/// The visible list for a selection (off the UI thread).
+#[derive(Debug)]
+struct ListResult {
+    key: ListKey,
+    channels: Arc<Vec<LiveChannel>>,
+    /// Channels in "All" that parental control allows (the count shown next to "All").
+    all_count: usize,
+}
+
+fn compute_list(
+    session: &Session,
+    cat: &LiveCatalog,
+    key: ListKey,
+    favs: &HashSet<String>,
+) -> ListResult {
+    let mut locks = LockFilter::new(session, cat);
+    let in_server_category = key.selection.server_category().is_some();
+    let picked: Vec<LiveChannel> = cat
+        .select(&key.selection, favs)
+        .into_iter()
+        .filter_map(|i| cat.channels.get(i))
+        // Channels of locked categories stay out of All/Favourites.
+        .filter(|c| in_server_category || !locks.is_locked(c))
+        .cloned()
+        .collect();
+    let picked = channel_list::sorted(picked, key.sort);
+    let all_count = cat.channels.iter().filter(|c| !locks.is_locked(c)).count();
+    ListResult {
+        key,
+        channels: Arc::new(picked),
+        all_count,
+    }
 }
 
 fn sort_label(s: SortOrder) -> &'static str {
@@ -97,11 +221,19 @@ pub struct LiveScreen {
     selection: CategorySelection,
     category_filter: String,
     sort: SortOrder,
+    /// The list on screen was computed for this key.
     list_key: Option<ListKey>,
+    /// The list being computed is for this key.
+    requested: Option<ListKey>,
+    list: Loader<ListResult>,
     visible: Arc<Vec<LiveChannel>>,
+    /// Channels in "All" that parental control allows.
+    all_count: Option<usize>,
     preview: Option<String>,
     scroll_to: Option<usize>,
     number_entry: Option<(String, Instant)>,
+    /// A channel number waiting for the "All" list (it isn't in the current one).
+    pending_number: Option<u64>,
     pin: Option<PinPrompt>,
     focus_playing_on_load: bool,
 }
@@ -121,13 +253,23 @@ impl LiveScreen {
             category_filter: String::new(),
             sort: SortOrder::NumberAsc,
             list_key: None,
+            requested: None,
+            list: Loader::new(),
             visible: Arc::new(Vec::new()),
+            all_count: None,
             preview: None,
             scroll_to: None,
             number_entry: None,
+            pending_number: None,
             pin: None,
             focus_playing_on_load: true,
         }
+    }
+
+    /// Recompute the visible list (favourites, sort or locks changed).
+    fn invalidate_list(&mut self) {
+        self.list_key = None;
+        self.requested = None;
     }
 
     fn load(&mut self, cx: &AppCtx<'_>) {
@@ -147,8 +289,9 @@ impl LiveScreen {
         }
     }
 
-    /// Recomputes the visible list when the selection, sort, catalogue or favourites change.
-    fn refresh_list(&mut self, session: &Session, cat: &LiveCatalog) {
+    /// Starts recomputing the visible list (in the background) when the selection, sort,
+    /// catalogue or favourites changed. The old list stays on screen meanwhile.
+    fn refresh_list(&mut self, cx: &AppCtx<'_>, session: &Arc<Session>, cat: &Arc<LiveCatalog>) {
         let favs = session.favourite_ids(ContentKind::Live);
         let key = ListKey {
             selection: self.selection.clone(),
@@ -156,36 +299,80 @@ impl LiveScreen {
             generation: self.catalog.generation(),
             favourites: favs.len(),
         };
-        if self.list_key.as_ref() == Some(&key) {
+        if self.list_key.as_ref() == Some(&key) || self.requested.as_ref() == Some(&key) {
             return;
         }
-        let parental = session.parental_enabled();
-        let mut picked: Vec<LiveChannel> = cat
-            .select(&self.selection, &favs)
-            .into_iter()
-            .filter_map(|i| cat.channels.get(i))
-            .filter(|c| {
-                // Channels of locked categories stay out of All/Favourites.
-                !parental
-                    || self.selection.server_category().is_some()
-                    || !c.categories.iter().any(|id| {
-                        session.is_category_locked(
-                            ContentKind::Live,
-                            id,
-                            cat.category_name(id).unwrap_or(""),
-                        )
-                    })
-            })
-            .cloned()
-            .collect();
-        let order = sorted_indices(&picked, self.sort);
-        let mut slots: Vec<Option<LiveChannel>> = picked.drain(..).map(Some).collect();
-        let sorted: Vec<LiveChannel> = order
-            .into_iter()
-            .filter_map(|i| slots.get_mut(i).and_then(Option::take))
-            .collect();
-        self.visible = Arc::new(sorted);
-        self.list_key = Some(key);
+        self.requested = Some(key.clone());
+        let session = Arc::clone(session);
+        let cat = Arc::clone(cat);
+        self.list.start_blocking(cx.rt(), &cx.egui, move || {
+            Ok(compute_list(&session, &cat, key, &favs))
+        });
+    }
+
+    /// Applies a finished list computation.
+    fn poll_list(&mut self, cx: &mut AppCtx<'_>) {
+        if !self.list.poll() {
+            return;
+        }
+        let Some(res) = self.list.take() else { return };
+        if self.requested.as_ref() != Some(&res.key) {
+            return;
+        }
+        self.visible = res.channels;
+        self.all_count = Some(res.all_count);
+        self.list_key = Some(res.key);
+        if let Some(n) = self.pending_number.take() {
+            self.zap_number(cx, n);
+        }
+        if self.focus_playing_on_load {
+            self.focus_playing_on_load = false;
+            if let Some(i) = self
+                .preview
+                .as_ref()
+                .and_then(|k| self.visible.iter().position(|c| &c.key == k))
+            {
+                self.scroll_to = Some(i);
+                focus::request(&cx.egui, row_id(&self.visible[i].key));
+            }
+        }
+    }
+
+    /// Where a typed channel number leads: the current list, else All.
+    fn number_match(&self, session: Option<&Session>, n: u64) -> NumberMatch {
+        if let Some(c) = self.visible.iter().find(|c| c.number == Some(n)) {
+            return NumberMatch::Current(c.clone());
+        }
+        let Some(cat) = self.catalog.value() else {
+            return NumberMatch::Unknown;
+        };
+        match cat.channels.iter().position(|c| c.number == Some(n)) {
+            Some(i) => {
+                let ch = &cat.channels[i];
+                if session.is_some_and(|s| LockFilter::new(s, cat).is_locked(ch)) {
+                    NumberMatch::Missing
+                } else {
+                    NumberMatch::All(i, ch.clone())
+                }
+            }
+            None => NumberMatch::Missing,
+        }
+    }
+
+    /// The row Enter on the idle preview plays: the highlighted (or last highlighted)
+    /// row, else the first.
+    fn idle_target(&self, ctx: &egui::Context) -> Option<usize> {
+        if self.visible.is_empty() {
+            return None;
+        }
+        let focused = VirtualList::focused_index(ctx, list_id())
+            .filter(|i| *i < self.visible.len())
+            .or_else(|| {
+                // The focus memory of the list survives the focus moving to the preview.
+                let id = focus::scope_memory(ctx, list_id())?;
+                self.visible.iter().position(|c| row_id(&c.key) == id)
+            });
+        Some(focused.unwrap_or(0))
     }
 
     fn select(&mut self, cx: &mut AppCtx<'_>, sel: CategorySelection, name: &str) {
@@ -231,37 +418,28 @@ impl LiveScreen {
     }
 
     fn zap_number(&mut self, cx: &mut AppCtx<'_>, number: u64) {
-        let Some(cat) = self.catalog.value().cloned() else {
+        // Prefer the current list; fall back to All (computed in the background).
+        if let Some(i) = self.visible.iter().position(|c| c.number == Some(number)) {
+            self.play_preview(cx, i);
+            if let Some(ch) = self.visible.get(i) {
+                focus::request(&cx.egui, row_id(&ch.key));
+            }
+            self.scroll_to = Some(i);
             return;
-        };
-        // Prefer the current list; fall back to All.
-        let idx = self.visible.iter().position(|c| c.number == Some(number));
-        let idx = match idx {
-            Some(i) => Some(i),
-            None if cat.by_number(number).is_some() => {
+        }
+        let session = cx.session();
+        match self.number_match(session.as_deref(), number) {
+            NumberMatch::All(..) if self.selection != CategorySelection::All => {
                 self.selection = CategorySelection::All;
-                self.list_key = None;
-                if let Some(s) = cx.session() {
-                    self.refresh_list(&s, &cat);
-                }
-                self.visible.iter().position(|c| c.number == Some(number))
+                self.pending_number = Some(number);
             }
-            None => None,
-        };
-        match idx {
-            Some(i) => {
-                self.play_preview(cx, i);
-                if let Some(ch) = self.visible.get(i) {
-                    focus::request(&cx.egui, row_id(&ch.key));
-                }
-                self.scroll_to = Some(i);
-            }
-            None => cx.toasts.info(format!("There's no channel {number}.")),
+            NumberMatch::Unknown => self.pending_number = Some(number),
+            _ => cx.toasts.info("Channel not found"),
         }
     }
 
     fn zap(&mut self, cx: &mut AppCtx<'_>, delta: isize) {
-        if cx.playback.zap(delta).is_some()
+        if let ZapOutcome::Zapped(_) = cx.playback.zap(delta)
             && let Some(key) = cx.playback.live_key().map(str::to_owned)
         {
             self.preview = Some(key.clone());
@@ -291,7 +469,7 @@ impl LiveScreen {
                 let sel = p.selection.clone();
                 self.pin = None;
                 self.selection = sel;
-                self.list_key = None;
+                self.invalidate_list();
                 self.scroll_to = Some(0);
             }
             Some(PinOutcome::Wrong {
@@ -323,7 +501,8 @@ impl Screen for LiveScreen {
             self.preview = Some(key.to_owned());
             self.focus_playing_on_load = true;
         }
-        self.list_key = None;
+        // Locks or favourites may have changed elsewhere.
+        self.invalidate_list();
     }
 
     fn on_leave(&mut self, cx: &mut AppCtx<'_>) {
@@ -379,19 +558,38 @@ impl Screen for LiveScreen {
                 self.zap_number(cx, n);
             }
         }
-        // PageUp/PageDown zap the preview.
+        // Channel keys zap the preview (PageUp/PageDown stay with the list: they page it).
+        if let Some(step) = keys::take_channel_step(ctx, Surface::LiveList)
+            && step != 0
+            && cx.playback.live_key().is_some()
+        {
+            self.zap(cx, step.signum());
+        }
+        let consume = |k: Key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k));
+        // M mute, F fullscreen, I channel banner (like the player).
         if cx.playback.live_key().is_some() {
-            let (up, down) = ctx.input_mut(|i| {
-                (
-                    i.consume_key(Modifiers::NONE, Key::PageUp),
-                    i.consume_key(Modifiers::NONE, Key::PageDown),
-                )
-            });
-            if up {
-                self.zap(cx, -1);
-            } else if down {
-                self.zap(cx, 1);
+            if consume(Key::M) {
+                cx.playback.toggle_mute();
+                if cx.playback.state().muted {
+                    cx.toasts.info("Sound on");
+                } else {
+                    cx.toasts.info("Muted");
+                }
             }
+            if consume(Key::F) {
+                self.open_fullscreen(cx);
+            }
+            if consume(Key::I) {
+                cx.playback.show_banner();
+            }
+        }
+        // Explicit focus links around the preview: Down from the video goes to the primary
+        // button; Down from the button row goes nowhere (instead of jumping into the list).
+        let current = focus::current(ctx);
+        if current == Some(video_id()) && consume(Key::ArrowDown) {
+            focus::request(ctx, primary_id());
+        } else if current.is_some_and(|c| preview_button_ids().contains(&c)) {
+            let _ = consume(Key::ArrowDown);
         }
     }
 
@@ -411,6 +609,7 @@ impl Screen for LiveScreen {
 
     fn ui(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {
         self.catalog.poll();
+        self.poll_list(cx);
         self.poll_pin(cx);
         if let Some((buf, at)) = &self.number_entry
             && at.elapsed() >= NUMBER_ENTRY_TIMEOUT
@@ -461,18 +660,7 @@ impl Screen for LiveScreen {
                 let sel = std::mem::take(&mut self.selection);
                 self.select(cx, sel, &name);
             }
-            self.refresh_list(&session, cat);
-            if self.focus_playing_on_load {
-                self.focus_playing_on_load = false;
-                if let Some(i) = self
-                    .preview
-                    .as_ref()
-                    .and_then(|k| self.visible.iter().position(|c| &c.key == k))
-                {
-                    self.scroll_to = Some(i);
-                    focus::request(&cx.egui, row_id(&self.visible[i].key));
-                }
-            }
+            self.refresh_list(cx, &session, cat);
         }
 
         // Categories column (wide) or chips (medium/TV).
@@ -587,7 +775,7 @@ impl Screen for LiveScreen {
         .activated
         {
             self.sort = next_sort(self.sort);
-            self.list_key = None;
+            self.invalidate_list();
         }
         let rows_rect = Rect::from_min_max(
             pos2(list_area.left() - 8.0, list_area.top() + 36.0),
@@ -639,6 +827,8 @@ impl Screen for LiveScreen {
                     }
                 }
             }
+            // The first list is still being computed (a few ms to ~100 ms).
+            (Some(_), _) if self.visible.is_empty() && self.list_key.is_none() => {}
             (Some(_), _) if self.visible.is_empty() => {
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rows_rect));
                 let (ill, head, body) = if self.selection == CategorySelection::Favourites {
@@ -681,7 +871,7 @@ impl Screen for LiveScreen {
         painter.text(
             pos2(list_area.left() + 28.0, fy),
             Align2::LEFT_CENTER,
-            "Enter to watch · Type a channel number to jump",
+            "Enter to watch \u{b7} Ctrl+\u{2191}/\u{2193} change channel \u{b7} Type a number to jump",
             font::caption(),
             color::TEXT_3,
         );
@@ -737,7 +927,8 @@ impl LiveScreen {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 if q.is_empty() {
                     let f = MenuRow::new(Id::unique("live.cat.all"), "All")
-                        .count(Some(cat.channels.len()))
+                        // What "All" really shows (locked categories left out).
+                        .count(Some(self.all_count.unwrap_or(cat.channels.len())))
                         .selected(self.selection == CategorySelection::All)
                         .show(ui);
                     if f.activated {
@@ -789,48 +980,42 @@ impl LiveScreen {
     ) {
         let Some(cat) = catalog else { return };
         let mut picked: Option<(CategorySelection, String)> = None;
-        egui::ScrollArea::horizontal()
-            .id_salt("live.chips.scroll")
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .content_margin(egui::Margin::symmetric(8, 8))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    if Chip::new("All")
-                        .selected(self.selection == CategorySelection::All)
-                        .id(Id::unique("live.chip.all"))
-                        .show(ui)
-                        .activated
-                    {
-                        picked = Some((CategorySelection::All, "All".into()));
-                    }
-                    if Chip::new("Favourites")
-                        .selected(self.selection == CategorySelection::Favourites)
-                        .id(Id::unique("live.chip.favs"))
-                        .show(ui)
-                        .activated
-                    {
-                        picked = Some((CategorySelection::Favourites, "Favourites".into()));
-                    }
-                    for c in &cat.categories {
-                        let sel = CategorySelection::Category(c.id.clone());
-                        let label = if session.is_category_locked(ContentKind::Live, &c.id, &c.name)
-                        {
-                            format!("{} {}", icons::LOCK_SIMPLE, c.name)
-                        } else {
-                            c.name.clone()
-                        };
-                        if Chip::new(label)
-                            .selected(self.selection == sel)
-                            .id(Id::unique(("live.chip", c.id.as_str())))
-                            .show(ui)
-                            .activated
-                        {
-                            picked = Some((sel, c.name.clone()));
-                        }
-                    }
-                });
-            });
+        let row = ui.max_rect();
+        // Edge fade where more chips hide; the focused chip scrolls into view.
+        ChipRow::new(Id::unique("live.chips.row")).show(ui, row, |ui| {
+            if Chip::new("All")
+                .selected(self.selection == CategorySelection::All)
+                .id(Id::unique("live.chip.all"))
+                .show(ui)
+                .activated
+            {
+                picked = Some((CategorySelection::All, "All".into()));
+            }
+            if Chip::new("Favourites")
+                .selected(self.selection == CategorySelection::Favourites)
+                .id(Id::unique("live.chip.favs"))
+                .show(ui)
+                .activated
+            {
+                picked = Some((CategorySelection::Favourites, "Favourites".into()));
+            }
+            for c in &cat.categories {
+                let sel = CategorySelection::Category(c.id.clone());
+                let label = if session.is_category_locked(ContentKind::Live, &c.id, &c.name) {
+                    format!("{} {}", icons::LOCK_SIMPLE, c.name)
+                } else {
+                    c.name.clone()
+                };
+                if Chip::new(label)
+                    .selected(self.selection == sel)
+                    .id(Id::unique(("live.chip", c.id.as_str())))
+                    .show(ui)
+                    .activated
+                {
+                    picked = Some((sel, c.name.clone()));
+                }
+            }
+        });
         if let Some((sel, name)) = picked {
             self.select(cx, sel, &name);
         }
@@ -1015,7 +1200,7 @@ impl LiveScreen {
             && let Some(ch) = self.visible.get(i).cloned()
         {
             toggle_fav(cx, session, &ch);
-            self.list_key = None;
+            self.invalidate_list();
         }
         if let Some(i) = activated {
             let key = self.visible.get(i).map(|c| c.key.clone());
@@ -1042,6 +1227,13 @@ impl LiveScreen {
         let channel = playing_key
             .as_deref()
             .and_then(|k| self.catalog.value().and_then(|c| c.get(k)).cloned());
+        // Before anything plays, Enter on the preview plays the highlighted row.
+        let idle_target = if channel.is_none() {
+            self.idle_target(&cx.egui)
+        } else {
+            None
+        };
+        let idle_channel = idle_target.and_then(|i| self.visible.get(i).cloned());
         // Header.
         let hy = rect.top() + 16.0;
         if channel.is_some() {
@@ -1064,7 +1256,7 @@ impl LiveScreen {
         }
         if let Some(ch) = &channel {
             let label = match ch.number {
-                Some(n) => format!("{n:03} · {}", ch.name),
+                Some(n) => format!("{n:03} \u{b7} {}", ch.name),
                 None => ch.name.clone(),
             };
             text::line(
@@ -1082,8 +1274,7 @@ impl LiveScreen {
             pos2(rect.left(), rect.top() + 36.0),
             vec2(rect.width(), (rect.width() * 9.0 / 16.0).round()),
         );
-        let (vresp, vf) =
-            focus::focusable(ui, Id::unique("live.video"), video, FocusOpts::default());
+        let (vresp, vf) = focus::focusable(ui, video_id(), video, FocusOpts::default());
         if vf.anim > 0.0 {
             paint::focus_glow(&painter, video, radius::MD, vf.anim);
         }
@@ -1092,30 +1283,30 @@ impl LiveScreen {
         if channel.is_some() {
             // Round the video corners by painting it inset and covering with the frame.
             cx.playback.paint_video(ui, video);
+            let time = ui.input(|i| i.time);
             match &status {
                 PlaybackStatus::Opening | PlaybackStatus::Buffering => {
-                    paint::spinner(&painter, video.center(), 22.0, ui.input(|i| i.time), 3.0);
+                    // The last frame stays up under a scrim while the next channel opens.
+                    painter.rect_filled(video, 0.0, Color32::from_black_alpha(150));
+                    paint::spinner(&painter, video.center() - vec2(0.0, 8.0), 22.0, time, 3.0);
                     ui.ctx().request_repaint();
                 }
-                PlaybackStatus::Reconnecting { attempt } => {
-                    paint::spinner(
-                        &painter,
-                        video.center() - vec2(0.0, 12.0),
-                        22.0,
-                        ui.input(|i| i.time),
-                        3.0,
-                    );
+                PlaybackStatus::Reconnecting { .. } => {
+                    painter.rect_filled(video, 0.0, Color32::from_black_alpha(150));
+                    paint::spinner(&painter, video.center() - vec2(0.0, 18.0), 22.0, time, 3.0);
                     painter.text(
-                        video.center() + vec2(0.0, 30.0),
+                        video.center() + vec2(0.0, 24.0),
                         Align2::CENTER_CENTER,
-                        format!("Reconnecting… ({attempt})"),
+                        cx.playback
+                            .reconnect_message()
+                            .unwrap_or_else(|| "Reconnecting\u{2026}".to_owned()),
                         font::caption(),
                         color::TEXT_2,
                     );
                     if let Some(note) = cx.playback.notice() {
                         text::block(
                             &painter,
-                            pos2(video.left() + 24.0, video.center().y + 48.0),
+                            pos2(video.left() + 24.0, video.center().y + 44.0),
                             &note,
                             font::caption(),
                             color::WARNING,
@@ -1151,45 +1342,57 @@ impl LiveScreen {
                 }
                 _ => {}
             }
-            // Bottom strip: LIVE + name + volume state.
+            // Bottom strip: LIVE + name + volume state (under the zap banner while it's up).
             let strip = Rect::from_min_max(pos2(video.left(), video.bottom() - 56.0), video.max);
-            paint::v_gradient(
-                &painter,
-                strip,
-                &[
-                    (0.0, Color32::from_black_alpha(0)),
-                    (1.0, Color32::from_black_alpha(170)),
-                ],
-            );
-            let br = Badge::live(
-                &painter,
-                pos2(video.left() + 16.0, video.bottom() - 26.0),
-                Align2::LEFT_CENTER,
-            );
-            if let Some(ch) = &channel {
-                text::line(
+            let banner = cx.playback.banner().is_some();
+            if !banner {
+                paint::v_gradient(
                     &painter,
-                    pos2(br.right() + 12.0, video.bottom() - 26.0),
+                    strip,
+                    &[
+                        (0.0, Color32::from_black_alpha(0)),
+                        (1.0, Color32::from_black_alpha(170)),
+                    ],
+                );
+                let br = Badge::live(
+                    &painter,
+                    pos2(video.left() + 16.0, video.bottom() - 26.0),
                     Align2::LEFT_CENTER,
-                    &ch.name,
-                    font::body_strong(),
+                );
+                if let Some(ch) = &channel {
+                    text::line(
+                        &painter,
+                        pos2(br.right() + 12.0, video.bottom() - 26.0),
+                        Align2::LEFT_CENTER,
+                        &ch.name,
+                        font::body_strong(),
+                        color::TEXT,
+                        video.width() - 160.0,
+                    );
+                }
+                let st = cx.playback.state();
+                let vol_glyph = if st.muted {
+                    icons::SPEAKER_SLASH
+                } else {
+                    icons::SPEAKER_HIGH
+                };
+                icons::paint(
+                    &painter,
+                    pos2(video.right() - 30.0, video.bottom() - 26.0),
+                    vol_glyph,
+                    22.0,
+                    Style::Regular,
                     color::TEXT,
-                    video.width() - 160.0,
                 );
             }
-            let st = cx.playback.state();
-            let vol_glyph = if st.muted {
-                icons::SPEAKER_SLASH
-            } else {
-                icons::SPEAKER_HIGH
-            };
-            icons::paint(
+            // Zap banner over the preview.
+            zap_banner::show(
+                cx,
+                ui,
                 &painter,
-                pos2(video.right() - 30.0, video.bottom() - 26.0),
-                vol_glyph,
-                22.0,
-                Style::Regular,
-                color::TEXT,
+                pos2(video.left() + 12.0, video.bottom() - 12.0),
+                video.width() - 24.0,
+                true,
             );
         } else {
             if !assets::paint_cover(
@@ -1211,12 +1414,21 @@ impl LiveScreen {
                 sym,
                 Color32::WHITE.gamma_multiply(0.6),
             );
-            painter.text(
+            let hint = match &idle_channel {
+                Some(ch) => format!(
+                    "Press Enter to watch {}",
+                    text::cap(split_tag(&ch.name).1, 40)
+                ),
+                None => "Choose a channel and press Enter".to_owned(),
+            };
+            text::line(
+                &painter,
                 video.center() + vec2(0.0, 30.0),
                 Align2::CENTER_CENTER,
-                "Choose a channel and press Enter",
+                &hint,
                 font::body(),
                 color::TEXT_2,
+                video.width() - 48.0,
             );
         }
         paint::round_corners_mask(&painter, video, f32::from(radius::MD), color::BG);
@@ -1230,7 +1442,11 @@ impl LiveScreen {
             paint::focus_ring(&painter, video, radius::MD, 1.0);
         }
         if vf.activated || vresp.double_clicked() {
-            self.open_fullscreen(cx);
+            match (&channel, idle_target) {
+                (Some(_), _) => self.open_fullscreen(cx),
+                (None, Some(i)) => self.play_preview(cx, i),
+                (None, None) => {}
+            }
         }
 
         // Now / Next card.
@@ -1256,15 +1472,27 @@ impl LiveScreen {
         )));
         child.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
-            let enabled = channel.is_some();
-            if Button::primary("Fullscreen")
-                .icon(icons::CORNERS_OUT)
-                .enabled(enabled)
-                .id(Id::unique("live.fullscreen"))
-                .show(ui)
-                .activated
-            {
-                self.open_fullscreen(cx);
+            if channel.is_some() {
+                if Button::primary("Fullscreen")
+                    .icon(icons::CORNERS_OUT)
+                    .id(primary_id())
+                    .show(ui)
+                    .activated
+                {
+                    self.open_fullscreen(cx);
+                }
+            } else if let (Some(i), Some(ch)) = (idle_target, &idle_channel) {
+                // Nothing plays yet: the primary action is to watch the highlighted row
+                // (never a disabled primary button).
+                let label = format!("Watch {}", text::cap(split_tag(&ch.name).1, 24));
+                if Button::primary(label)
+                    .icon(icons::PLAY)
+                    .id(primary_id())
+                    .show(ui)
+                    .activated
+                {
+                    self.play_preview(cx, i);
+                }
             }
             if Button::secondary("Guide")
                 .icon(icons::ROWS)
@@ -1284,30 +1512,33 @@ impl LiveScreen {
                     .show(ui);
                 if f.activated {
                     toggle_fav(cx, session, ch);
-                    self.list_key = None;
+                    self.invalidate_list();
                 }
             }
         });
     }
 
     fn overlays(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {
-        // Channel-number entry box (top-right).
+        // Channel-number entry box (top-right): the digits and where they lead.
         if let Some((buf, _)) = &self.number_entry {
             let painter = ui.ctx().layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
                 Id::unique("live.number"),
             ));
             let content = cx.layout.content;
-            let g = painter.layout_no_wrap(buf.clone(), font::numeric_xl(), color::TEXT);
-            let w = (g.size().x + 48.0).max(140.0);
-            let r = Rect::from_min_size(
-                pos2(content.right() - cx.layout.margin - w, content.top() + 96.0),
-                vec2(w, 100.0),
+            let session = cx.session();
+            let target = buf
+                .parse::<u64>()
+                .ok()
+                .map(|n| self.number_match(session.as_deref(), n));
+            paint_number_box(
+                cx,
+                ui,
+                &painter,
+                pos2(content.right() - cx.layout.margin, content.top() + 96.0),
+                buf,
+                target.as_ref(),
             );
-            paint::shadow(&painter, r, radius::LG, crate::ui::theme::elevation::E2);
-            painter.rect_filled(r, CornerRadius::same(radius::LG), color::SURFACE_1);
-            painter.galley(r.center() - g.size() / 2.0, g, color::TEXT);
-            ui.ctx().request_repaint_after(Duration::from_millis(200));
         }
         // PIN dialog.
         if let Some(p) = &mut self.pin {

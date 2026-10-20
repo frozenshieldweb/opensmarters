@@ -13,8 +13,14 @@ use crate::ui::motion;
 use crate::ui::theme::{color, font, radius};
 use crate::ui::{paint, text};
 
-/// A channel logo: the provider logo on a `surface-3` plate, else a monogram tile with a
-/// stable muted hue, else the placeholder symbol.
+/// The logo plate: a neutral grey that stays distinct from every row state (rest on
+/// `bg`, playing `surface-2`, focused `surface-3`) and lets both light and dark
+/// transparent logos read.
+pub const LOGO_PLATE: Color32 = Color32::from_rgb(0x52, 0x4B, 0x50);
+
+/// A channel logo: the provider logo contain-fit on a [`LOGO_PLATE`] (4 pt padding, so
+/// wide logos use the whole width), else a monogram tile with a stable muted hue, else
+/// the placeholder symbol.
 #[derive(Debug)]
 pub struct ChannelLogo;
 
@@ -23,8 +29,8 @@ impl ChannelLogo {
     pub fn paint(ui: &Ui, painter: &Painter, rect: Rect, name: &str, image: &ImageSlot) {
         let r = CornerRadius::same(radius::SM);
         if let ImageSlot::Ready(tex) = image {
-            painter.rect_filled(rect, r, color::SURFACE_3);
-            let inner = rect.shrink(8.0_f32.min(rect.height() * 0.15));
+            painter.rect_filled(rect, r, LOGO_PLATE);
+            let inner = rect.shrink(4.0_f32.min(rect.height() * 0.1));
             let size = tex.size_vec2();
             let target = paint::contain_rect(size, inner);
             painter.image(
@@ -37,7 +43,7 @@ impl ChannelLogo {
         }
         let mono = monogram(name);
         if mono.is_empty() {
-            painter.rect_filled(rect, r, color::SURFACE_3);
+            painter.rect_filled(rect, r, LOGO_PLATE);
             assets::paint_contain(
                 ui,
                 painter,

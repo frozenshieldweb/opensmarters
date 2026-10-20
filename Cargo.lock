@@ -1607,6 +1607,7 @@ dependencies = [
  "chrono",
  "clap",
  "flate2",
+ "futures-util",
  "image",
  "percent-encoding",
  "reqwest",

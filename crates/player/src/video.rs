@@ -97,6 +97,9 @@ struct ViewState {
     bind_request: Option<Arc<Core>>,
     egui_ctx: Option<egui::Context>,
     has_frame: bool,
+    /// Keep showing the last frame while the player has no video
+    /// ([`VideoView::set_hold_last_frame`]).
+    hold_last_frame: bool,
     destroyed: bool,
     error: Option<String>,
     stats: VideoStats,
@@ -272,7 +275,10 @@ impl ViewState {
         let (Some(rc), Some(target)) = (&self.render, &self.target) else {
             return;
         };
-        if rc.needs_render() || resized {
+        // While holding, the FBO keeps the last frame: don't let mpv redraw it (black)
+        // until the next file has video again.
+        let holding = self.hold_last_frame && self.has_frame && !has_video && !resized;
+        if (rc.needs_render() || resized) && !holding {
             match rc.render(target.fbo.0.get(), w, h, true) {
                 Ok(()) => {
                     self.has_frame = true;
@@ -282,7 +288,7 @@ impl ViewState {
             }
         }
 
-        if has_video && self.has_frame {
+        if self.has_frame && (has_video || self.hold_last_frame) {
             let clip = info.clip_rect_in_pixels();
             // SAFETY: GL context current (paint callback). mpv may have
             // changed scissor/framebuffer state, so set what the blit needs:
@@ -357,6 +363,7 @@ impl VideoView {
                 bind_request: None,
                 egui_ctx: None,
                 has_frame: false,
+                hold_last_frame: false,
                 destroyed: false,
                 error: None,
                 stats: VideoStats::default(),
@@ -424,6 +431,20 @@ impl VideoView {
     /// Diagnostic counters.
     pub fn stats(&self) -> VideoStats {
         self.lock().stats
+    }
+
+    /// When on, the view keeps showing the last rendered frame while the
+    /// player has no video (after a stop, while the next stream opens),
+    /// instead of going black, until the next file renders its first frame.
+    /// Off by default. Use [`VideoView::forget_frame`] when the next item is
+    /// unrelated (the old picture must not show under it).
+    pub fn set_hold_last_frame(&self, hold: bool) {
+        self.lock().hold_last_frame = hold;
+    }
+
+    /// Drops the held frame: black until the next frame is rendered.
+    pub fn forget_frame(&self) {
+        self.lock().has_frame = false;
     }
 
     /// Frees the render context and GL objects. Call from

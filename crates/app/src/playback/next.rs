@@ -16,6 +16,10 @@ use opensmarters_core::{Episode, SeriesInfo};
 use super::{PlaybackController, PlaybackItem, PlaybackRequest, PlaybackStatus};
 use crate::services::vod;
 
+/// The next episode is offered over the video during the playing episode's last
+/// seconds ([`PlaybackController::up_next_soon`]).
+pub const UP_NEXT_EARLY_SECS: f64 = 20.0;
+
 /// The series an episode belongs to.
 #[derive(Debug, Clone)]
 pub struct EpisodeQueue {
@@ -32,8 +36,13 @@ pub struct EpisodeQueue {
 /// The episode offered after the one that finished.
 #[derive(Debug, Clone)]
 pub struct UpNext {
-    /// The episode that finished (keys the countdown).
+    /// The episode that finished (or is about to).
     pub after: u64,
+    /// Keys the countdown: the finished episode **and** which finish this is, so
+    /// finishing the same episode again (Replay) starts a fresh countdown.
+    pub key: u64,
+    /// Seconds left in the playing episode (`None` once it finished or when unknown).
+    pub remaining: Option<f64>,
     /// The next episode.
     pub episode: Episode,
     /// Its season key.
@@ -120,6 +129,18 @@ impl PlaybackController {
         self.next_episode_after_current()
     }
 
+    /// The episode to offer while the playing one is in its last
+    /// [`UP_NEXT_EARLY_SECS`] (the player shows a small card over the video).
+    pub fn up_next_soon(&self) -> Option<UpNext> {
+        if self.status() != PlaybackStatus::Playing {
+            return None;
+        }
+        self.next_episode_after_current().filter(|n| {
+            n.remaining
+                .is_some_and(|r| r > 0.5 && r <= UP_NEXT_EARLY_SECS)
+        })
+    }
+
     /// The episode after the playing one, whatever the status.
     pub fn next_episode_after_current(&self) -> Option<UpNext> {
         let (series_id, episode_id) = playing_episode(self.request())?;
@@ -127,8 +148,23 @@ impl PlaybackController {
         let q = guard.as_ref().filter(|q| q.series_id == series_id)?;
         let next_id = vod::next_episode_id(&q.info, episode_id)?;
         let (season, number, ep) = vod::locate_episode(&q.info, next_id)?;
+        let finished = self.status() == PlaybackStatus::Finished;
+        let remaining = if finished {
+            None
+        } else {
+            let st = self.state();
+            let duration = st
+                .duration
+                .or_else(|| self.request().and_then(|r| r.duration_hint));
+            st.time_pos.zip(duration).map(|(pos, d)| (d - pos).max(0.0))
+        };
+        // The finish counter only moves when an item finishes: while playing, the key is
+        // the one the upcoming finish will have.
+        let finish = self.finish_count() + u64::from(!finished);
         Some(UpNext {
             after: episode_id,
+            key: eframe::egui::Id::unique(("up-next", episode_id, finish)).value(),
+            remaining,
             episode: ep.clone(),
             season,
             number,

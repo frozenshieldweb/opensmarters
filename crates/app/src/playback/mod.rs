@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use opensmarters_core::{DEFAULT_USER_AGENT, Redactor};
 use opensmarters_player::{
-    EndReason, Hwdec, LoadOptions, LogLevel, Player, PlayerConfig, PlayerEvent, PlayerState,
+    EndReason, Hwdec, LoadOptions, LogLevel, Op, Player, PlayerConfig, PlayerEvent, PlayerState,
     TrackKind, TrackSelection, UserAgent, VideoFit, VideoView,
 };
 use opensmarters_store::{ItemSnapshot, PlaybackSnapshot};
@@ -153,6 +153,8 @@ pub struct PlaybackController {
     audio_pref: Option<String>,
     tuning: PlayerTuning,
     purpose: Purpose,
+    /// p7b: dump-cache / stream-record results for `dvr::player` (see `take_dvr_events`).
+    dvr_events: Vec<PlayerEvent>,
 }
 
 impl std::fmt::Debug for PlaybackController {
@@ -193,7 +195,8 @@ impl PlaybackController {
                         Hwdec::Disabled
                     })
                     .cache_mib(tuning.buffer.forward_mib, tuning.buffer.back_mib)
-                    .network_timeout(Duration::from_secs(tuning.buffer.timeout_secs));
+                    .network_timeout(Duration::from_secs(tuning.buffer.timeout_secs))
+                    .seekable_cache(true); // p7b: until stream A lands (clips need dump-cache)
                 let config = match UserAgent::new(DEFAULT_USER_AGENT) {
                     Ok(ua) => config.user_agent(ua),
                     Err(_) => config,
@@ -233,7 +236,14 @@ impl PlaybackController {
             audio_pref: None,
             tuning,
             purpose: Purpose::Watch,
+            dvr_events: Vec::new(),
         }
+    }
+
+    /// p7b: drains the player's dump-cache / stream-record results (clips and recording
+    /// through the player, `dvr::player`). Called once per frame by `dvr::on_frame`.
+    pub fn take_dvr_events(&mut self) -> Vec<PlayerEvent> {
+        std::mem::take(&mut self.dvr_events)
     }
 
     /// Which connection-budget purpose this controller's streams use (default
@@ -590,7 +600,14 @@ impl PlaybackController {
                 PlayerEvent::PlaybackRestart | PlayerEvent::FileLoaded => restarted = true,
                 PlayerEvent::CommandFailed { op, error } => {
                     tracing::debug!(?op, %error, "mpv command failed");
+                    // p7b: forwarded to the DVR (clips, recording through the player).
+                    if matches!(op, Op::DumpCache | Op::Record) {
+                        self.dvr_events
+                            .push(PlayerEvent::CommandFailed { op, error });
+                    }
                 }
+                // p7b: a clip (dump-cache) finished writing.
+                ev @ PlayerEvent::CommandDone { .. } => self.dvr_events.push(ev),
                 _ => {}
             }
         }

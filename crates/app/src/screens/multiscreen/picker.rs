@@ -3,8 +3,10 @@
 //! provider categories), a virtualised channel list and channel-number entry. Keyboard
 //! first: arrows move, Enter picks, digits jump to a number, Esc closes.
 //!
-//! Like Live TV, All and Favourites leave out channels of locked categories; a locked
-//! category itself is opened in Live TV with the PIN (the picker says so).
+//! Parental control: every list leaves out channels of locked categories (also inside an
+//! unlocked category, when a channel is in a locked one too), so a tile's zap list never
+//! holds one; a locked category itself is opened in Live TV with the PIN (the picker says
+//! so), and a locked channel's number is refused.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,6 +19,7 @@ use opensmarters_store::ContentKind;
 
 use crate::focus::{self, FocusOpts};
 use crate::playback::ZapContext;
+use crate::playback::multi::LockedCategories;
 use crate::screens::AppCtx;
 use crate::services::catalog::{LiveCatalog, LiveChannel};
 use crate::services::{ImageSize, Session};
@@ -43,18 +46,6 @@ fn row_id(key: &str) -> Id {
     Id::unique(("multi.pick.row", key))
 }
 
-/// True when one of the channel's categories is locked (parental control).
-pub(super) fn is_locked(session: &Session, catalog: &LiveCatalog, ch: &LiveChannel) -> bool {
-    session.parental_enabled()
-        && ch.categories.iter().any(|id| {
-            session.is_category_locked(
-                ContentKind::Live,
-                id,
-                catalog.category_name(id).unwrap_or(""),
-            )
-        })
-}
-
 /// The loaded channel data the picker shows.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Channels<'a> {
@@ -62,8 +53,11 @@ pub(super) struct Channels<'a> {
     pub catalog: &'a Arc<LiveCatalog>,
     /// Its loader generation (the list is recomputed when it changes).
     pub generation: u64,
-    /// All channels (number entry outside the category on screen).
+    /// All playable channels (number entry outside the category on screen), built with
+    /// `multi::playable`.
     pub all: &'a Arc<Vec<LiveChannel>>,
+    /// The parental locks.
+    pub locks: &'a LockedCategories,
 }
 
 /// The open picker.
@@ -120,19 +114,24 @@ impl Picker {
 
     /// Recomputes the channel list when the category, the catalogue or the favourites
     /// change.
-    fn refresh(&mut self, session: &Session, catalog: &LiveCatalog, generation: u64) {
+    fn refresh(
+        &mut self,
+        session: &Session,
+        catalog: &LiveCatalog,
+        generation: u64,
+        locks: &LockedCategories,
+    ) {
         let favs = session.favourite_ids(ContentKind::Live);
         let key = (self.selection.clone(), generation, favs.len());
         if self.list_key.as_ref() == Some(&key) {
             return;
         }
-        let in_category = self.selection.server_category().is_some();
         let picked: Vec<LiveChannel> = catalog
             .select(&self.selection, &favs)
             .into_iter()
             .filter_map(|i| catalog.channels.get(i))
-            // Channels of locked categories stay out of All/Favourites.
-            .filter(|c| in_category || !is_locked(session, catalog, c))
+            // Never a channel of a locked category: this list becomes a tile's zap list.
+            .filter(|c| !locks.hides(c))
             .cloned()
             .collect();
         let order = sorted_indices(&picked, SortOrder::NumberAsc);
@@ -145,13 +144,14 @@ impl Picker {
         self.list_key = Some(key);
     }
 
-    /// The channel with `number`: in the list on screen first, else among all channels.
+    /// The channel with `number`: in the list on screen first, else among all playable
+    /// channels.
     fn by_number(
         &self,
         number: u64,
-        session: &Session,
         catalog: &LiveCatalog,
         all: &Arc<Vec<LiveChannel>>,
+        locks: &LockedCategories,
     ) -> Result<(LiveChannel, ZapContext), String> {
         if let Some(i) = self.visible.iter().position(|c| c.number == Some(number)) {
             return Ok((
@@ -163,14 +163,8 @@ impl Picker {
             ));
         }
         let Some(i) = all.iter().position(|c| c.number == Some(number)) else {
-            return Err(format!("There's no channel {number}."));
+            return Err(number_missing(number, catalog, locks));
         };
-        if is_locked(session, catalog, &all[i]) {
-            return Err(format!(
-                "Channel {number} is in a locked category. Open it in Live TV with your PIN \
-                 first."
-            ));
-        }
         Ok((
             all[i].clone(),
             ZapContext {
@@ -194,9 +188,10 @@ impl Picker {
             catalog: cat,
             generation,
             all,
+            locks,
         }) = catalog
         {
-            self.refresh(session, cat, generation);
+            self.refresh(session, cat, generation, locks);
             if !self.placed_focus {
                 // First frame with data: the tile's channel, else the first one.
                 self.placed_focus = true;
@@ -215,7 +210,7 @@ impl Picker {
                 self.commit = self.number.take().and_then(|(b, _)| b.parse().ok());
             }
             if let Some(n) = self.commit.take() {
-                match self.by_number(n, session, cat, all) {
+                match self.by_number(n, cat, all, locks) {
                     Ok(p) => picked = Some(p),
                     Err(msg) => cx.toasts.info(msg),
                 }
@@ -580,6 +575,23 @@ impl Picker {
                 index: i,
             },
         ))
+    }
+}
+
+/// Why number entry found nothing: no such channel, or it is in a locked category.
+pub(super) fn number_missing(
+    number: u64,
+    catalog: &LiveCatalog,
+    locks: &LockedCategories,
+) -> String {
+    if catalog
+        .channels
+        .iter()
+        .any(|c| c.number == Some(number) && locks.hides(c))
+    {
+        format!("Channel {number} is in a locked category. Open it in Live TV with your PIN first.")
+    } else {
+        format!("There's no channel {number}.")
     }
 }
 

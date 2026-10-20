@@ -15,6 +15,12 @@
 //!   stale for minutes and then answer 403 to everything.
 //! - **Audio follows the focus.** Only the last focused tile has sound
 //!   ([`follow_focus`]); M silences that one too. The others are muted.
+//! - **Parental control.** A tile never plays a channel of a locked category (this
+//!   session's PIN unlocks count). Every tile's zap list is built with [`playable`] from
+//!   [`LockedCategories`], and [`MultiView::place`], [`MultiView::zap`] and
+//!   [`MultiView::zap_to_number`] check the target again ([`sanitize`], [`step_playable`],
+//!   [`number_playable`]), so channel up/down and number entry can't reach a locked
+//!   channel even through a list built elsewhere.
 //! - **Tuning:** the Small network buffer, the main player's hardware decoding, and the
 //!   user's volume, aspect preset and audio language ([`TileSettings`]).
 //! - **Engines are kept.** A tile engine is created on first use and reused. Leaving the
@@ -25,12 +31,14 @@
 //!   changes. A tile whose session is no longer the open profile stops at the next
 //!   [`MultiView::update`].
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use opensmarters_core::Redactor;
+use opensmarters_core::{CategoryId, Redactor};
 use opensmarters_player::{GetProcAddress, LogLevel};
+use opensmarters_store::ContentKind;
 
 use super::{
     BufferPreset, PlaybackController, PlaybackItem, PlaybackRequest, PlaybackStatus, PlayerTuning,
@@ -160,6 +168,141 @@ pub fn after_remove(index: usize, removed: usize, len: usize) -> usize {
 /// The tile that has sound: the last focused one, unless everything is muted.
 pub fn audible(audio: usize, tiles: usize, muted: bool) -> Option<usize> {
     (!muted && audio < tiles).then_some(audio)
+}
+
+/// The live categories parental control locks right now (manual locks and keyword
+/// matches, minus this session's PIN unlocks), to check many channels quickly.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LockedCategories(HashSet<CategoryId>);
+
+impl LockedCategories {
+    /// The locks of `session` for the categories in `catalog`. Recompute after a PIN
+    /// unlock or a catalogue reload.
+    pub fn of(session: &Session, catalog: &LiveCatalog) -> Self {
+        if !session.parental_enabled() {
+            return Self::default();
+        }
+        // Every category a channel names, also those the category list lacks (no name:
+        // only a manual lock can apply).
+        let mut ids: HashSet<&CategoryId> = catalog.categories.iter().map(|c| &c.id).collect();
+        for ch in &catalog.channels {
+            ids.extend(ch.categories.iter());
+        }
+        Self(
+            ids.into_iter()
+                .filter(|id| {
+                    session.is_category_locked(
+                        ContentKind::Live,
+                        id,
+                        catalog.category_name(id).unwrap_or(""),
+                    )
+                })
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// Locks for exactly these categories (tests).
+    pub fn from_ids(ids: impl IntoIterator<Item = CategoryId>) -> Self {
+        Self(ids.into_iter().collect())
+    }
+
+    /// True if the channel is in a locked category.
+    pub fn hides(&self, ch: &LiveChannel) -> bool {
+        !self.0.is_empty() && ch.categories.iter().any(|c| self.0.contains(c))
+    }
+}
+
+/// `channels` without the ones `locked` hides. Every zap list a tile gets is built with
+/// this.
+pub fn playable(
+    channels: &[LiveChannel],
+    locked: impl Fn(&LiveChannel) -> bool,
+) -> Arc<Vec<LiveChannel>> {
+    Arc::new(channels.iter().filter(|c| !locked(c)).cloned().collect())
+}
+
+/// A zap list positioned on channel `key` (`None` if the list doesn't have it).
+pub fn zap_on(channels: &Arc<Vec<LiveChannel>>, key: &str) -> Option<ZapContext> {
+    let index = channels.iter().position(|c| c.key == key)?;
+    Some(ZapContext {
+        channels: Arc::clone(channels),
+        index,
+    })
+}
+
+/// A zap list a tile may use: unchanged when it holds no locked channel, else rebuilt
+/// with [`playable`] on the same channel. `None` when that channel itself is locked (or
+/// the index is out of range).
+pub fn sanitize(zap: ZapContext, locked: &dyn Fn(&LiveChannel) -> bool) -> Option<ZapContext> {
+    let current = zap.channels.get(zap.index)?;
+    if locked(current) {
+        return None;
+    }
+    if !zap.channels.iter().any(locked) {
+        return Some(zap);
+    }
+    let key = current.key.clone();
+    zap_on(&playable(&zap.channels, locked), &key)
+}
+
+/// The channel `delta` steps away in the list (wrapping), passing over any channel
+/// `locked` hides. `None` if no other playable channel is in the list.
+pub fn step_playable<'a>(
+    zap: &'a ZapContext,
+    delta: isize,
+    locked: &dyn Fn(&LiveChannel) -> bool,
+) -> Option<(usize, &'a LiveChannel)> {
+    let n = zap.channels.len();
+    if n == 0 || delta == 0 {
+        return None;
+    }
+    let n_i = isize::try_from(n).ok()?;
+    let start = isize::try_from(zap.index).ok()?;
+    let mut i = (start + delta).rem_euclid(n_i);
+    for _ in 0..n {
+        let idx = usize::try_from(i).ok()?;
+        if let Some(ch) = zap.channels.get(idx)
+            && !locked(ch)
+        {
+            return Some((idx, ch));
+        }
+        i = (i + delta.signum()).rem_euclid(n_i);
+    }
+    None
+}
+
+/// Channel `number` in the list, unless `locked` hides it.
+pub fn number_playable<'a>(
+    zap: &'a ZapContext,
+    number: u64,
+    locked: &dyn Fn(&LiveChannel) -> bool,
+) -> Option<(usize, &'a LiveChannel)> {
+    zap.find_number(number).filter(|(_, ch)| !locked(ch))
+}
+
+/// Why a channel couldn't go into a tile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaceError {
+    /// Four tiles already (or no player could be created).
+    Full,
+    /// The channel is in a locked category.
+    Locked,
+    /// The channel's address was refused (plain-language message).
+    NotPlayable(String),
+}
+
+impl PlaceError {
+    /// Plain-language text for a toast.
+    pub fn message(&self) -> String {
+        match self {
+            PlaceError::Full => "Multiscreen shows at most four channels at once.".to_owned(),
+            PlaceError::Locked => "This channel is in a locked category. Open it in Live TV \
+                                   with your PIN first."
+                .to_owned(),
+            PlaceError::NotPlayable(msg) => msg.clone(),
+        }
+    }
 }
 
 /// What new tile engines are created with (from the main player and the preferences).
@@ -353,41 +496,40 @@ impl MultiView {
         }
     }
 
-    /// Fills in the zap list of tiles whose request came without one (all channels).
-    pub fn resolve_channels(&mut self, catalog: &LiveCatalog, all: &Arc<Vec<LiveChannel>>) {
-        for t in &mut self.tiles {
-            if t.req.zap.is_some() {
-                continue;
-            }
-            if let PlaybackItem::Live { key, .. } = &t.req.item
-                && let Some(index) = catalog.index_of(key)
-            {
-                t.req.zap = Some(ZapContext {
-                    channels: Arc::clone(all),
-                    index,
-                });
-            }
-        }
-    }
-
-    /// Plays `req` in `slot`: a new tile when `slot` is the empty slot (returns its
-    /// index), else a channel change of that tile. `None` when no engine is free.
+    /// Plays the channel `zap` points at in `slot`: a new tile when `slot` is the empty
+    /// slot (returns its index), else a channel change of that tile. The zap list is
+    /// checked again ([`sanitize`]): a locked channel is refused and locked channels are
+    /// dropped from the list.
+    ///
+    /// # Errors
+    ///
+    /// [`PlaceError`]: locked, no free player, or the address was refused.
     pub fn place(
         &mut self,
         slot: usize,
         session: Arc<Session>,
-        req: PlaybackRequest,
-    ) -> Option<usize> {
+        zap: ZapContext,
+        locked: &dyn Fn(&LiveChannel) -> bool,
+    ) -> Result<usize, PlaceError> {
+        let zap = sanitize(zap, locked).ok_or(PlaceError::Locked)?;
+        let ch = zap
+            .channels
+            .get(zap.index)
+            .cloned()
+            .ok_or(PlaceError::Locked)?;
+        let req = session
+            .live_request(&ch, Some(zap))
+            .map_err(|e| PlaceError::NotPlayable(e.user_message()))?;
         if let Some(t) = self.tiles.get_mut(slot) {
             t.session = session;
             t.req = req;
             self.schedule(slot, Duration::ZERO);
-            return Some(slot);
+            return Ok(slot);
         }
         if self.tiles.len() >= MAX_TILES {
-            return None;
+            return Err(PlaceError::Full);
         }
-        let engine = self.free_engine()?;
+        let engine = self.free_engine().ok_or(PlaceError::Full)?;
         self.tiles.push(Tile {
             engine,
             session,
@@ -399,22 +541,33 @@ impl MultiView {
         });
         let slot = self.tiles.len() - 1;
         self.schedule(slot, Duration::ZERO);
-        Some(slot)
+        Ok(slot)
     }
 
-    /// Channel up/down in tile `slot` (its zap list, wrapping). Returns the channel name.
-    pub fn zap(&mut self, slot: usize, delta: isize) -> Option<String> {
+    /// Channel up/down in tile `slot` (its zap list, wrapping), passing over locked
+    /// channels. Returns the channel name.
+    pub fn zap(
+        &mut self,
+        slot: usize,
+        delta: isize,
+        locked: &dyn Fn(&LiveChannel) -> bool,
+    ) -> Option<String> {
         let zap = self.tiles.get(slot)?.req.zap.clone()?;
-        let (index, ch) = zap.step(delta)?;
+        let (index, ch) = step_playable(&zap, delta, locked)?;
         let ch = ch.clone();
         self.switch(slot, &ch, zap.channels, index)
     }
 
     /// Tile `slot` to channel `number` of its own zap list. Returns the channel name, or
-    /// `None` if the list has no such number.
-    pub fn zap_to_number(&mut self, slot: usize, number: u64) -> Option<String> {
+    /// `None` if the list has no such number or it is locked.
+    pub fn zap_to_number(
+        &mut self,
+        slot: usize,
+        number: u64,
+        locked: &dyn Fn(&LiveChannel) -> bool,
+    ) -> Option<String> {
         let zap = self.tiles.get(slot)?.req.zap.clone()?;
-        let (index, ch) = zap.find_number(number)?;
+        let (index, ch) = number_playable(&zap, number, locked)?;
         let ch = ch.clone();
         self.switch(slot, &ch, zap.channels, index)
     }
@@ -747,6 +900,107 @@ mod tests {
         assert_eq!(audible(1, 3, false), Some(1));
         assert_eq!(audible(1, 3, true), None, "M mutes every tile");
         assert_eq!(audible(0, 0, false), None, "no tile, no sound");
+    }
+
+    fn channel(n: u64, category: &str) -> LiveChannel {
+        LiveChannel {
+            key: n.to_string(),
+            number: Some(n),
+            name: format!("Channel {n}"),
+            logo: None,
+            epg_id: None,
+            categories: vec![CategoryId::from(category)],
+            archive: false,
+            archive_days: None,
+            added: None,
+            is_adult: false,
+            source: crate::services::catalog::ChannelSource::Xtream { stream_id: n },
+        }
+    }
+
+    /// Channels 1–6; 3 and 4 are in the locked "adult" category.
+    fn channels() -> Arc<Vec<LiveChannel>> {
+        Arc::new(
+            (1..=6)
+                .map(|n| channel(n, if n == 3 || n == 4 { "adult" } else { "news" }))
+                .collect(),
+        )
+    }
+
+    fn numbers(list: &[LiveChannel]) -> Vec<u64> {
+        list.iter().filter_map(|c| c.number).collect()
+    }
+
+    #[test]
+    fn tile_lists_never_hold_locked_channels() {
+        let locks = LockedCategories::from_ids([CategoryId::from("adult")]);
+        let hide = |c: &LiveChannel| locks.hides(c);
+        let all = channels();
+        let ok = playable(&all, hide);
+        assert_eq!(numbers(&ok), vec![1, 2, 5, 6]);
+        assert!(
+            zap_on(&ok, "3").is_none(),
+            "a locked channel isn't in the list"
+        );
+        assert_eq!(zap_on(&ok, "5").map(|z| z.index), Some(2));
+        // A list that still holds locked channels is rebuilt on the same channel...
+        let z = sanitize(
+            ZapContext {
+                channels: Arc::clone(&all),
+                index: 1,
+            },
+            &hide,
+        )
+        .unwrap_or_else(|| panic!("channel 2 is playable"));
+        assert_eq!(numbers(&z.channels), vec![1, 2, 5, 6]);
+        assert_eq!(z.channels[z.index].key, "2");
+        // ...and a locked channel is refused.
+        let on_locked = ZapContext {
+            channels: Arc::clone(&all),
+            index: 2,
+        };
+        assert!(sanitize(on_locked, &hide).is_none());
+        // A clean list is kept as it is.
+        let clean = ZapContext {
+            channels: Arc::clone(&ok),
+            index: 0,
+        };
+        let kept = sanitize(clean, &hide).unwrap_or_else(|| panic!("clean list"));
+        assert!(Arc::ptr_eq(&kept.channels, &ok));
+        // Without a PIN nothing is hidden.
+        assert!(!LockedCategories::default().hides(&all[2]));
+    }
+
+    #[test]
+    fn channel_up_down_and_numbers_skip_locked_channels() {
+        let locks = LockedCategories::from_ids([CategoryId::from("adult")]);
+        let hide = |c: &LiveChannel| locks.hides(c);
+        // Even on a list that still holds locked channels (defence in depth).
+        let at = |index: usize| ZapContext {
+            channels: channels(),
+            index,
+        };
+        let step = |index: usize, delta: isize| {
+            step_playable(&at(index), delta, &hide).map(|(_, c)| c.number)
+        };
+        assert_eq!(step(1, 1), Some(Some(5)), "2 → 5, over 3 and 4");
+        assert_eq!(step(4, -1), Some(Some(2)), "5 → 2, over 4 and 3");
+        assert_eq!(step(5, 1), Some(Some(1)), "wraps");
+        assert_eq!(step(1, 0), None);
+        for index in 0..6 {
+            for delta in [-7, -2, -1, 1, 2, 7] {
+                if let Some((_, c)) = step_playable(&at(index), delta, &hide) {
+                    assert!(!hide(c), "{index} {delta:+} reached channel {:?}", c.number);
+                }
+            }
+        }
+        assert!(number_playable(&at(0), 3, &hide).is_none());
+        assert!(number_playable(&at(0), 4, &hide).is_none());
+        assert_eq!(number_playable(&at(0), 5, &hide).map(|(i, _)| i), Some(4));
+        // Everything locked: nowhere to go.
+        let all_locked =
+            LockedCategories::from_ids([CategoryId::from("adult"), CategoryId::from("news")]);
+        assert!(step_playable(&at(0), 1, &|c| all_locked.hides(c)).is_none());
     }
 
     #[test]

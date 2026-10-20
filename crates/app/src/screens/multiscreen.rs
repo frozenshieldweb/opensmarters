@@ -9,6 +9,11 @@
 //! player's OSD ([`osd_button`]): the main player stops, freeing its connection, and its
 //! channel goes to tile 1. With a budget of one stream it doesn't open and explains why.
 //!
+//! Parental control: tiles never reach a channel of a locked category. The screen waits
+//! for the catalogue (the locks need the category names) before it places the carried
+//! channel or zaps, builds every tile list without locked channels
+//! ([`multi::playable`]), and `MultiView` checks every target again.
+//!
 //! ## Keys
 //!
 //! | Key | Action |
@@ -35,8 +40,8 @@ use opensmarters_core::chrono::Local;
 use super::{AppCtx, Chrome, Screen, shell};
 use crate::focus::{self, Focus, FocusOpts};
 use crate::nav::{Route, Section};
-use crate::playback::PlaybackStatus;
-use crate::playback::multi::{self, TileSettings};
+use crate::playback::multi::{self, LockedCategories, TileSettings};
+use crate::playback::{PlaybackItem, PlaybackRequest, PlaybackStatus, ZapContext};
 use crate::services::Session;
 use crate::services::catalog::{LiveCatalog, LiveChannel};
 use crate::task::Loader;
@@ -176,12 +181,26 @@ fn toggle_fullscreen(cx: &AppCtx<'_>) {
         .send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
 }
 
+/// The catalogue as tiles may use it: all channels without those of locked categories,
+/// and the locks themselves.
+#[derive(Debug, Clone)]
+struct ChannelData {
+    generation: u64,
+    catalog: Arc<LiveCatalog>,
+    /// Every channel except those of locked categories (a tile's list for number entry).
+    all: Arc<Vec<LiveChannel>>,
+    locks: LockedCategories,
+}
+
 /// The multiscreen screen.
 #[derive(Debug)]
 pub struct MultiscreenScreen {
     catalog: Loader<Arc<LiveCatalog>>,
-    /// All channels (number entry outside a tile's list), per catalogue generation.
-    all: Option<(u64, Arc<Vec<LiveChannel>>)>,
+    /// Playable channels and locks, per catalogue generation (recomputed when the screen
+    /// is entered again: a PIN unlock in Live TV changes them).
+    data: Option<ChannelData>,
+    /// The main player's channel, placed in tile 1 once the locks are known.
+    carried: Option<(Arc<Session>, PlaybackRequest)>,
     picker: Option<Picker>,
     enlarged: Option<usize>,
     /// The focused slot (kept while the focus is on a header button).
@@ -204,7 +223,8 @@ impl MultiscreenScreen {
     pub fn new() -> Self {
         Self {
             catalog: Loader::new(),
-            all: None,
+            data: None,
+            carried: None,
             picker: None,
             enlarged: None,
             focused: 0,
@@ -223,72 +243,98 @@ impl MultiscreenScreen {
         });
     }
 
-    fn all_channels(&mut self) -> Option<Arc<Vec<LiveChannel>>> {
+    /// The catalogue with the parental locks applied, once it has loaded.
+    fn channel_data(&mut self, session: &Session) -> Option<ChannelData> {
         let cat = self.catalog.value()?;
         let generation = self.catalog.generation();
-        if self.all.as_ref().is_none_or(|(g, _)| *g != generation) {
-            self.all = Some((generation, Arc::new(cat.channels.clone())));
+        if self
+            .data
+            .as_ref()
+            .is_none_or(|d| d.generation != generation)
+        {
+            let locks = LockedCategories::of(session, cat);
+            let all = multi::playable(&cat.channels, |c| locks.hides(c));
+            self.data = Some(ChannelData {
+                generation,
+                catalog: Arc::clone(cat),
+                all,
+                locks,
+            });
         }
-        self.all.as_ref().map(|(_, a)| Arc::clone(a))
+        self.data.clone()
     }
 
-    /// Plays `channel` in `slot` (a new tile on the empty slot).
+    /// Plays the channel `zap` points at in `slot` (a new tile on the empty slot).
+    /// `MultiView::place` refuses a locked channel and drops locked ones from the list.
     fn place(
         &mut self,
         cx: &mut AppCtx<'_>,
         session: &Arc<Session>,
         slot: usize,
-        channel: &LiveChannel,
-        zap: crate::playback::ZapContext,
+        zap: ZapContext,
+        locks: &LockedCategories,
     ) {
-        match session.live_request(channel, Some(zap)) {
-            Ok(req) => match cx.multi.place(slot, Arc::clone(session), req) {
-                Some(i) => {
-                    self.focused = i;
-                    self.focus_request = Some(i);
-                    cx.multi.focus(i);
-                }
-                None => cx
-                    .toasts
-                    .info("Multiscreen shows at most four channels at once."),
-            },
-            Err(e) => cx.toasts.error(e.user_message()),
+        match cx
+            .multi
+            .place(slot, Arc::clone(session), zap, &|c| locks.hides(c))
+        {
+            Ok(i) => {
+                self.focused = i;
+                self.focus_request = Some(i);
+                cx.multi.focus(i);
+            }
+            Err(e) => cx.toasts.info(e.message()),
+        }
+    }
+
+    /// Tile 1 gets the main player's channel, with its list (Live TV's category) when it
+    /// came with one, else all playable channels.
+    fn place_carried(
+        &mut self,
+        cx: &mut AppCtx<'_>,
+        session: &Arc<Session>,
+        req: PlaybackRequest,
+        data: &ChannelData,
+    ) {
+        let PlaybackItem::Live { key, .. } = &req.item else {
+            return;
+        };
+        let key = key.clone();
+        match req.zap.or_else(|| multi::zap_on(&data.all, &key)) {
+            Some(zap) => self.place(cx, session, 0, zap, &data.locks),
+            None if data.catalog.get(&key).is_some_and(|c| data.locks.hides(c)) => {
+                cx.toasts.info(multi::PlaceError::Locked.message());
+            }
+            None => {}
         }
     }
 
     /// A typed channel number for the focused slot: the tile's own list first, else all
-    /// channels.
+    /// playable channels.
     fn commit_number(&mut self, cx: &mut AppCtx<'_>, session: &Arc<Session>, number: u64) {
-        let slot = self.focused;
-        if slot < cx.multi.len() && cx.multi.zap_to_number(slot, number).is_some() {
-            return;
-        }
-        let (Some(cat), Some(all)) = (self.catalog.value().cloned(), self.all_channels()) else {
+        let Some(data) = self.channel_data(session) else {
             cx.toasts.info("The channel list is still loading.");
             return;
         };
-        let Some(i) = all.iter().position(|c| c.number == Some(number)) else {
-            cx.toasts.info(format!("There's no channel {number}."));
-            return;
-        };
-        if picker::is_locked(session, &cat, &all[i]) {
-            cx.toasts.info(format!(
-                "Channel {number} is in a locked category. Open it in Live TV with your PIN \
-                 first."
-            ));
+        let slot = self.focused;
+        if slot < cx.multi.len()
+            && cx
+                .multi
+                .zap_to_number(slot, number, &|c| data.locks.hides(c))
+                .is_some()
+        {
             return;
         }
-        let ch = all[i].clone();
-        self.place(
-            cx,
-            session,
-            slot,
-            &ch,
-            crate::playback::ZapContext {
-                channels: all,
-                index: i,
-            },
-        );
+        let Some(index) = data.all.iter().position(|c| c.number == Some(number)) else {
+            cx.toasts
+                .info(picker::number_missing(number, &data.catalog, &data.locks));
+            return;
+        };
+        let zap = ZapContext {
+            channels: Arc::clone(&data.all),
+            index,
+        };
+        self.place(cx, session, slot, zap, &data.locks);
     }
 
     fn open_picker(&mut self, cx: &AppCtx<'_>, slot: usize) {
@@ -318,15 +364,13 @@ impl Screen for MultiscreenScreen {
         } else {
             // A new multiscreen: forget old tiles, start with the handed-over channel.
             self.entered = true;
-            let carried = cx.multi.take_carried();
+            // Placed once the catalogue is loaded (the parental locks need it).
+            self.carried = cx.multi.take_carried();
             cx.multi.clear();
-            if let (Some((session, req)), Some(current)) = (carried, cx.session())
-                && Arc::ptr_eq(&session, &current)
-            {
-                cx.multi.place(0, session, req);
-            }
             self.focused = 0;
         }
+        // A PIN unlock in Live TV may have changed the locks.
+        self.data = None;
         self.focus_request = Some(self.focused);
     }
 
@@ -416,12 +460,17 @@ impl Screen for MultiscreenScreen {
         }
         let slot = self.focused;
         let playing = slot < cx.multi.len();
-        // PageUp/PageDown zap the focused tile (channel up = next in its list).
-        if consume(Key::PageUp) && playing {
-            cx.multi.zap(slot, 1);
-        }
-        if consume(Key::PageDown) && playing {
-            cx.multi.zap(slot, -1);
+        // PageUp/PageDown zap the focused tile (channel up = next in its list), never onto
+        // a locked channel.
+        let (up, down) = (consume(Key::PageUp), consume(Key::PageDown));
+        if (up || down) && playing {
+            match cx.session().and_then(|s| self.channel_data(&s)) {
+                Some(d) => {
+                    cx.multi
+                        .zap(slot, if up { 1 } else { -1 }, &|c| d.locks.hides(c));
+                }
+                None => cx.toasts.info("The channel list is still loading."),
+            }
         }
         push_digits(&mut self.number_entry, &take_digits(ctx));
         if self.number_entry.is_some()
@@ -438,9 +487,12 @@ impl Screen for MultiscreenScreen {
         self.catalog.poll();
         let Some(session) = cx.session() else { return };
         cx.multi.update(Some(&session));
-        let all = self.all_channels();
-        if let (Some(cat), Some(all)) = (self.catalog.value(), &all) {
-            cx.multi.resolve_channels(cat, all);
+        let data = self.channel_data(&session);
+        if let Some(d) = &data
+            && let Some((carried_session, req)) = self.carried.take()
+            && Arc::ptr_eq(&carried_session, &session)
+        {
+            self.place_carried(cx, &session, req, d);
         }
         if let Some((buf, at)) = &self.number_entry
             && at.elapsed() >= NUMBER_ENTRY_TIMEOUT
@@ -719,22 +771,18 @@ impl Screen for MultiscreenScreen {
             let keys: Vec<Option<String>> = (0..tiles)
                 .map(|i| cx.multi.channel_key(i).map(str::to_owned))
                 .collect();
-            let cat = self.catalog.value().cloned();
-            let generation = self.catalog.generation();
-            let data = match (&cat, &all) {
-                (Some(catalog), Some(all)) => Some(picker::Channels {
-                    catalog,
-                    generation,
-                    all,
-                }),
-                _ => None,
-            };
-            match p.show(cx, &session, data, &keys) {
-                Some((channel, zap)) => {
+            let channels = data.as_ref().map(|d| picker::Channels {
+                catalog: &d.catalog,
+                generation: d.generation,
+                all: &d.all,
+                locks: &d.locks,
+            });
+            match (p.show(cx, &session, channels, &keys), &data) {
+                (Some((_, zap)), Some(d)) => {
                     let slot = p.slot();
-                    self.place(cx, &session, slot, &channel, zap);
+                    self.place(cx, &session, slot, zap, &d.locks);
                 }
-                None => self.picker = Some(p),
+                _ => self.picker = Some(p),
             }
         }
     }

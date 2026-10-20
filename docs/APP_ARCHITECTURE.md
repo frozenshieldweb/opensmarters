@@ -28,8 +28,12 @@ cargo fmt; cargo clippy -p opensmarters --all-targets --all-features -- -D warni
 | `src/services/` | `Services` (runtime, store, redactor, images, paths, background-error queue), `Session` (provider: catalogue, EPG, favourites, parental, playback requests; Phase-4 additions in child modules `session/*.rs`), `catalog` (`LiveChannel`, `LiveCatalog`, `Programme`), `images`, `epg`, `prefs` (app-wide preferences), `parental` (PIN length, lockout/wrong-PIN texts, "forgot PIN" check), `backup` (export/import without secrets or machine-local settings), `search_history` (recent searches per profile), `demo` |
 | `src/platform.rs` | Safe OS queries: Windows *Animation effects* (`UISettings.AnimationsEnabled` via the `windows` crate's WinRT projection) for reduced motion; "open folder" |
 | `src/window_state.rs` | Window size/position/maximised remembered between runs (store setting `app.window`, physical px, debounced; never for `--ephemeral`/`--window-size`) |
-| `src/playback/tracks.rs` | Preferred audio/subtitle languages (ISO 639 normalisation, track choice), network buffer presets, `PlayerTuning` (hwdec + buffer at player start) |
+| `src/playback/tracks.rs` | Preferred audio/subtitle languages (ISO 639 normalisation, track choice) |
+| `src/playback/tuning.rs` | Buffering policy: `PlayerTuning` (hwdec, Buffering Auto/Small/Standard/Large, rewind window), `stream_tuning` (the `StreamTuning` of each load), `ChannelBoosts` (extra buffering per channel), the disk cache folder (`init_disk_cache`) |
+| `src/playback/stream.rs` | The controller's per-stream state and hooks: `set_tuning`, `health`, extra buffering for channels that run dry, held last picture, one-shot messages (`take_messages`) |
+| `src/playback/timeshift.rs` | Pause and rewind live TV: behind-live accounting, seek targets inside the buffer, `live_view` / `live_seek` / `go_live` |
 | `src/playback/` | `PlaybackController` (the one mpv player + video view, reconnect, progress), `PlaybackRequest` and header plumbing (`request.rs`) |
+| `src/screens/player/` | Parts of the fullscreen player: `timeshift.rs` (LIVE / −mm:ss badge, rewind bar, ←/→ in time, Go live), `health.rs` (stream details panel), `actions.rs` (`osd_icon` for feature buttons) |
 | `src/sessions.rs` | `SessionManager` (`cx.sessions`): open/switch profiles |
 | `src/task.rs` | `Loader<T>`: background work with staleness protection |
 | `src/logging.rs` | Redacted `tracing` (stderr + rotating log file) |
@@ -89,7 +93,7 @@ back. `ui` receives a `Ui` whose max rect is `cx.layout.content` (right of the r
 | `cx.playback` | the shared player (see §7) |
 | `cx.play(req, fullscreen)` | play a `PlaybackRequest` (fullscreen pushes the player route) |
 | `cx.toasts` | `info/success/warning/error` |
-| `cx.prefs` + `cx.save_prefs()` | TV mode, UI size, reduced motion (+ follow Windows), 12/24 h, aspect preset, volume, preferred audio/subtitle language, hardware decoding, network buffer |
+| `cx.prefs` + `cx.save_prefs()` | TV mode, UI size, reduced motion (+ follow Windows), 12/24 h, aspect preset, volume, preferred audio/subtitle language, hardware decoding, buffering, live rewind window |
 | `cx.sessions` | open/switch profiles, last failure |
 | `cx.layout` | breakpoint, `screen`, `content`, `margin`, `poster_width`, `tv`, card sizes, `safe_area()`, `grid_columns()` |
 | `cx.now` | `DateTime<Utc>` for EPG progress |
@@ -116,7 +120,7 @@ back. `ui` receives a `Ui` whose max rect is `cx.layout.content` (right of the r
 |---|---|---|
 | Account | `settings/account.rs` | "Edit account" asks for the PIN |
 | Profiles | `settings/profiles.rs` | switch / add / edit / delete (PIN) |
-| Playback | `settings/playback.rs` | this profile (save + reconnect) and every profile (languages, hwdec, buffer; the last two at next launch) |
+| Playback | `settings/playback.rs` | this profile (save + reconnect); simultaneous streams for this profile (Auto = the account's limit, or 1–4; applied at once to `session.connections()`); every profile: languages, hardware decoding, Buffering (Auto/Small/Standard/Large), Rewind live TV (Off/15/30/60 min), reset the extra buffering of channels that stalled (all applied at once) |
 | Parental control | `settings/parental.rs`, `pin_flow.rs` | the page opens only with the PIN; set/change (4–8 digits, confirm) / turn off; locked words; per-category Auto/Lock/Allow; forgot PIN |
 | Appearance | `settings/appearance.rs` | TV mode, UI size (desktop), motion (Follow Windows / Reduced / Full) |
 | Language & region | `settings/language.rs` | 12/24 h clock, display language (English only) |
@@ -282,13 +286,40 @@ match session.movie_request(id, ext.as_deref(), &title, Some(subtitle), poster, 
 - Live OSD: LIVE badge + EPG programme progress, **never a scrubber** (mpv reports a
   growing duration on live TS). Always show the catalogue title, never mpv's `media-title`.
 - Aspect/zoom presets persist (prefs + mpv global options).
+- **Buffering per stream** (`playback/tuning.rs`): every load carries a typed
+  `StreamTuning` (`Player::load_with`, sent as `loadfile` per-file options). Live: a short
+  start buffer (1 s with Auto; channels that ran dry get 3 s, then 6 s, remembered per
+  profile and channel in `app.channel_buffering`, capped at 300) and a seekable cache.
+  Films/episodes/catch-up: 3 s start buffer and a large cache ahead (1 GiB on disk with
+  Auto). Caches go to `<data>/cache/player` (emptied at startup, one file per stream,
+  deleted when it closes); `--ephemeral` without `--data-dir` keeps them in memory, capped.
+  Settings › Playback changes (hardware decoding, buffering) apply to what is playing
+  (`set_tuning`); the start buffer and a new rewind size apply from the next stream.
+- **libcurl reads `http(s)`** (streams and HLS segments) in this mpv build and has no read
+  timeout: the controller's stall detection is the only remedy for a silent stream (see
+  `docs/LIBMPV.md`). Films and HLS segments resume by themselves after network errors
+  (Range retries); live TS never does.
+- **Pause and rewind live TV** (`playback/timeshift.rs`): the cache behind and ahead of the
+  position holds the "Rewind live TV" window (sized for 8 Mbit/s). "Behind live" counts
+  what the viewer chose (pause, rewind), so the OSD says LIVE until then. A pause longer
+  than the window moves the paused position forward (the stream keeps flowing) and says so
+  on resume. Zapping starts at live; a reconnect while behind says the rewind buffer was
+  lost (`take_messages` → toasts).
+- **Held picture:** during a live zap or a reconnect the last picture stays, dimmed
+  (`VideoView::set_hold_last_frame`), under "Buffering…" / "Reconnecting…".
+- **Stream details** (D or the ⓘ button): resolution, fps, codecs, decoder, bitrates,
+  buffer ahead / to rewind, download speed, dropped frames, reconnects, "2 of 3"
+  connections, start buffer, extra buffering for this channel.
 
-Player keys (documented in `screens/player.rs`): Space play/pause; with the OSD hidden
-←/→ seek ∓10 s (Shift ∓60 s, the scrubber gets the focus) on VOD or zap on live, ↑/↓ zap on
-live; PageUp/PageDown zap; digits = channel number entry (zaps after 1.5 s or Enter);
-M mute, F window fullscreen, I show/hide OSD, A/S next audio/subtitle, +/− volume;
-Esc closes the track sheet, then hides the OSD, then leaves the player. Live TV has the
-same digits and PageUp/PageDown for the preview.
+Player keys (documented in `screens/player.rs`): Space play/pause (on live TV pausing
+starts rewinding); with the OSD hidden ←/→ seek ∓10 s (Shift ∓60 s, the scrubber gets the
+focus) on VOD, and on live TV move in the rewind buffer (the live bar gets the focus) or zap
+when rewind is off; ↑/↓ zap on live; PageUp/PageDown zap; L go live; D stream details;
+digits = channel number entry (zaps after 1.5 s or Enter); M mute, F window fullscreen,
+I show/hide OSD, A/S next audio/subtitle, +/− volume; Esc closes the track sheet or the
+stream details, then hides the OSD, then leaves the player. Live TV has the same digits and
+PageUp/PageDown for the preview. Other features add OSD buttons with
+`screens::player::actions::osd_icon` and keys in the marked blocks of `player.rs`.
 
 ## 8. The focus system
 

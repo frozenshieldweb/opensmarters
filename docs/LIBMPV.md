@@ -105,7 +105,7 @@ The library is never unloaded.
 1. Pick a newer `mpv-dev-x86_64-*.7z` that exists on **both** GitHub and SourceForge.
 2. Update `$ReleaseTag`, `$Version` and `$Sha256` in `tools/fetch-libmpv.ps1`.
 3. Run `tools/fetch-libmpv.ps1 -Force`.
-4. Run `cargo test -p opensmarters-player`. The integration tests in `crates/player/tests/mpv.rs` exercise the real DLL. Among other things, they fail if any best-effort hardening option is no longer recognised.
+4. Run `cargo test -p opensmarters-player`. The integration tests in `crates/player/tests/mpv.rs` and `tests/tuning.rs` exercise the real DLL. Among other things, they fail if any best-effort option is no longer recognised, and `a_stalled_live_stream_never_ends_by_itself` fails if libcurl gains a read timeout (then revisit the app's stall detection and this file).
 5. Run the spike, as described below.
 6. Update this file.
 
@@ -142,8 +142,10 @@ All options are applied with `mpv_set_option*` **before** `mpv_initialize`; they
 | `force-window` | `no` | — |
 | `keep-open` | `no` | When a VOD ends, mpv emits `END_FILE(reason=eof)` and goes idle. The crate surfaces this as `PlayerEvent::EndFile(EndReason::Eof)`, which means *finished*, not an error. |
 | `hwdec` | `auto-safe` | Default; `Hwdec::Disabled` sets `no`. NVDEC was selected on the test machine. |
-| `network-timeout` | `15` | Seconds; configurable from 1 to 600 |
-| `demuxer-max-bytes`, `demuxer-max-back-bytes` | `64MiB`, `16MiB` | Configurable cache caps |
+| `network-timeout` | `15` | Seconds; configurable from 1 to 600. Applies to FFmpeg's own protocols only (`rtmp`/`rtsp`/`udp` when enabled): `http(s)` goes through libcurl, which ignores it (see [Network](#network-libcurl-timeouts-and-reconnects)) |
+| `demuxer-max-bytes`, `demuxer-max-back-bytes` | `64MiB`, `16MiB` | Default cache caps; the app overrides them per load (`StreamTuning`) |
+| `demuxer-cache-dir` | the app's cache folder | Only with `PlayerConfig::cache_dir` (absolute, UTF-8, no control characters, not starting with `~`; `Player::new` refuses anything else). Where disk-backed caches go |
+| `demuxer-cache-unlink-files` | `whendone` | Only with a cache folder. mpv's default (`immediate`) deletes the file while it is open, which Windows refuses, so the file would stay; `whendone` deletes it when the stream closes (verified by `tests/tuning.rs`). The app also empties the folder at startup |
 | `volume` | `100` | Initial volume (configurable) |
 | `user-agent` | only if the config sets one | Validated `UserAgent`; overridden per load |
 | `ao` | `null` | Only with `audio_output(false)` (tests, muted previews) |
@@ -160,6 +162,8 @@ All options are applied with `mpv_set_option*` **before** `mpv_initialize`; they
 | `osd-level`, `osd-on-seek` | `0`, `no` | The app draws its own OSD |
 | `video-timing-offset` | `0` | Together with `BLOCK_FOR_TARGET_TIME=0`, rendering never blocks the UI thread |
 | `audio-client-name` | `opensmarters` | Name shown in the Windows volume mixer |
+| `curl-connect-timeout` | `10` | libcurl's connect timeout (mpv default 30 s): a dead host fails fast, so the app reconnects or says so sooner |
+| `curl-max-redirects` | `5` | mpv's default is 16; real panels redirect once or twice |
 
 ### The protocol whitelist
 
@@ -168,8 +172,8 @@ When libavformat opens a URL, mpv passes `protocol_whitelist` through `demuxer-l
 - **HLS:** the HLS demuxer opens variant playlists, segments and AES keys through the same context, so the whitelist applies to every nested open. A remote `.m3u8` cannot reach `file:`, `pipe:`, `subfile:`, `concat:` or other protocols.
 - **Verified:** a remote `.m3u8` whose segment is `file:///…/seg_000.ts` fails with `Protocol 'file' not on whitelist 'http,https,tls,tcp,crypto,data,httpproxy'!`. This is covered by the integration test `remote_playlist_cannot_reach_local_files`. The spike log shows the same.
 - **The list grows with the policy.** If the app enables `UrlPolicy { allow_rtmp | allow_rtsp | allow_udp }`, the matching FFmpeg protocols are added. `file` is added only with `PlayerConfig::allow_local_files(true)`, which is for development and tests.
-- **libcurl:** this mpv build has mpv's libcurl stream enabled, and the logs show plain `http(s)://` media fetched by `curl:` rather than by FFmpeg's `http` protocol.
-  - The FFmpeg whitelist therefore governs only what libavformat opens itself.
+- **libcurl:** this mpv build has mpv's libcurl stream enabled, and the logs show plain `http(s)://` media fetched by `curl:` rather than by FFmpeg's `http` protocol. **HLS playlists and segments too**: mpv routes libavformat's nested opens through its own stream layer, so with `--mpv-log debug` every segment shows `curl: Opening …/seg_001.ts`, and FFmpeg's HTTP options in `demuxer-lavf-o` are reported as `Could not set AVOption` (see [Network](#network-libcurl-timeouts-and-reconnects)).
+  - The FFmpeg whitelist is still checked for nested opens (the `file:` segment above is refused), but it no longer decides which *http* client is used.
   - The curl path is still constrained, in three ways:
     - Only `http`/`https` URLs reach mpv at all (`PlayableUrl`).
     - An HTTP `302` to `file:///…` is refused. The integration test `http_redirect_to_a_local_file_is_refused` covers this; an ordinary redirect still plays.
@@ -181,12 +185,49 @@ When libavformat opens a URL, mpv passes `protocol_whitelist` through `demuxer-l
 
 ### How URLs and headers reach mpv
 
-- **The URL** (`PlayableUrl`, http/https only by default) is passed as the single `url` argument of `loadfile`. The call goes through `mpv_command_node_async` with named arguments: `{name: loadfile, url, flags: replace, options: {start}}`.
+- **The URL** (`PlayableUrl`, http/https only by default) is passed as the single `url` argument of `loadfile`. The call goes through `mpv_command_node_async` with named arguments: `{name: loadfile, url, flags: replace, options: {…}}`.
   - Nothing is string-built.
-  - The only per-file option is the resume position, `start`, a number we format ourselves.
+  - The per-file `options` hold only names this crate defines, with values it formats itself: the resume position `start` (a number) and, with `Player::load_with`, the `StreamTuning` options below (numbers and `yes`/`no`/`auto`). No caller-supplied text becomes an option. Per-file options end with the file, so the next load starts from the player's defaults.
   - Named arguments are used instead of positional `argv` because mpv 0.38 inserted a positional `index` parameter before `options`. Named arguments cannot be misread.
 - **User-Agent and Referer** are validated (`UserAgent`, `Referrer`: printable ASCII, no CR/LF/control characters, at most 1 KiB, and the referrer must be an http(s) URL). They are set with `mpv_set_property_async("user-agent" / "referrer")` immediately before `loadfile`. libmpv processes a client's requests in order.
   - We use the async form of `mpv_set_property_string` because `load()` may run on the GL/render thread, where libmpv's synchronous calls can deadlock against the renderer.
+
+### Per-stream tuning and runtime setters
+
+`StreamTuning` (typed; `Player::load_with` sends it per file, `Player::set_tuning` applies it to the stream that is playing):
+
+| Field | mpv options | Notes |
+|---|---|---|
+| `start_buffer` | `cache-pause-initial`, `cache-pause-wait` | Media buffered before playback starts and again after the buffer runs dry. Zero: start at once (`no`), resume after 1 s. At most 60 s |
+| `forward_bytes` | `demuxer-max-bytes` | 1 MiB to 8 GiB. On a live stream it also bounds a pause: data received while paused sits ahead of the position |
+| `back_bytes` | `demuxer-max-back-bytes` | Up to 8 GiB: the live rewind window |
+| `seekable_cache` | `demuxer-seekable-cache=yes`, `force-seekable=yes` (else `auto`, `no`) | Seek inside what was received on a stream the server can't seek (live TS). Needed for pause/rewind and `dump-cache` |
+| `disk_cache` | `cache-on-disk` | Only with a cache folder; packet data goes to one file per stream |
+
+`Player::set_hwdec(Hwdec)` sets the `hwdec` property: mpv re-creates the decoder and the stream keeps playing.
+
+Facts measured with this build (`crates/player/tests/tuning.rs`):
+
+- Every option above is accepted per file and at runtime (no `CommandFailed`).
+- Seeks inside the cache work on a live TS even when `seekable` reports `no` (the cache is seekable for network streams by default). `force-seekable` set at runtime does not change the `seekable` property; it is decided when a stream opens.
+- `demuxer-cache-state` reports `seekable-ranges` and `cache-end` on the same timeline as `time-pos`. `PlayerState::cache` exposes them (the live rewind window).
+- The disk cache file (`mpv-cache-*.dat`) appears in the cache folder and is deleted when the stream stops.
+
+### Network: libcurl, timeouts and reconnects
+
+What governs the network in this build (from the option list of the DLL and mpv's `stream/stream_curl.c` at the pinned commit):
+
+| Path | Client | Timeouts | Reconnects |
+|---|---|---|---|
+| `http(s)` streams, HLS playlists and segments | libcurl (`curl-enabled=yes`) | `curl-connect-timeout` only. **No read or low-speed timeout**: a server that keeps the connection open and stops sending leaves mpv waiting forever (test `a_stalled_live_stream_never_ends_by_itself`). `network-timeout` does not apply | `curl-max-retries` (default 5, consecutive failures, reset after a successful transfer) re-requests the rest with `Range` after a recoverable network error, **only when the response was seekable** (`206` or `Accept-Ranges`). Films, episodes and HLS segments therefore resume by themselves; a live TS (no `Content-Length`, no ranges) never does |
+| `rtmp`, `rtsp`, `udp` (when enabled), `http` if curl were disabled | FFmpeg protocols | `network-timeout` (FFmpeg `timeout`) | FFmpeg's `reconnect*` options (not set: they would only matter if curl were turned off) |
+
+Consequences:
+
+- **The app detects stalls itself** (no progress for a few seconds while playing) and reconnects; that is the only remedy for a silent live stream, and for a VOD connection that hangs without an error. `curl-connect-timeout=10` bounds a dead host.
+- Setting FFmpeg's `reconnect`, `reconnect_streamed`, `reconnect_on_network_error` in `demuxer-lavf-o` was tried and dropped: mpv logged `Could not set AVOption reconnect='1'` because HLS segments go through libcurl.
+- Not changed: `curl-max-retries` (5 consecutive retries is enough; more would delay the app's own reconnect when the host is gone), `curl-buffer-size` (4 MiB), `curl-http-version` (`auto`).
+- Possible later: turning libcurl off for live TS (`curl-enabled=no` per file) would give FFmpeg's `reconnect_streamed` (transport-level reconnects that keep the rewind buffer). It changes the TLS stack and redirect handling that the security tests cover, so it needs its own review.
 
 ### Logging
 

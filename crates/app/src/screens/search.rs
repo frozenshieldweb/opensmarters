@@ -46,7 +46,7 @@ use crate::ui::widgets::{
     VirtualList,
 };
 use crate::ui::{paint, text};
-pub use engine::{Corpus, Hits, Kind, push_recent, rank};
+pub use engine::{Corpus, Hits, Kind, push_recent, rank, thousands};
 
 /// Recent searches (global, non-secret).
 pub const RECENT: Setting<Vec<String>> = Setting::new("search.recent", Vec::new);
@@ -584,24 +584,24 @@ impl Screen for SearchScreen {
 
         // What is searched (and what isn't).
         if let Some(src) = self.sources.value().cloned() {
-            let mut parts = vec![format!("{} channels", src.channels.len())];
+            let mut parts = vec![format!("{} channels", thousands(src.channels.len()))];
             if session.is_xtream() {
                 parts.push(if src.movies_complete {
-                    format!("{} films", src.movies.len())
+                    format!("{} films", thousands(src.movies.len()))
                 } else {
                     format!(
                         "{} films from {} of {} categories",
-                        src.movies.len(),
+                        thousands(src.movies.len()),
                         src.movie_cats.0,
                         src.movie_cats.1
                     )
                 });
                 parts.push(if src.series_complete {
-                    format!("{} series", src.series.len())
+                    format!("{} series", thousands(src.series.len()))
                 } else {
                     format!(
                         "{} series from {} of {} categories",
-                        src.series.len(),
+                        thousands(src.series.len()),
                         src.series_cats.0,
                         src.series_cats.1
                     )
@@ -609,7 +609,7 @@ impl Screen for SearchScreen {
             }
             parts.push(format!(
                 "{} programmes from the guide",
-                src.programmes.len()
+                thousands(src.programmes.len())
             ));
             text::line(
                 &painter,

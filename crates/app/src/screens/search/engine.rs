@@ -187,6 +187,19 @@ impl Hits {
     }
 }
 
+/// `49992` → `"49,992"`.
+pub fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Recent searches: newest first, case-insensitive de-duplication, at most `cap`.
 pub fn push_recent(list: &mut Vec<String>, query: &str, cap: usize) {
     let q = query.trim();
@@ -255,6 +268,15 @@ mod tests {
         let mut c2 = c.clone();
         c2.add(Kind::Series, ["Sport Stories"]);
         assert_eq!(c2.search("sport", Some(&first)).of(Kind::Series), &[0]);
+    }
+
+    #[test]
+    fn thousands_separators() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1000), "1,000");
+        assert_eq!(thousands(49_992), "49,992");
+        assert_eq!(thousands(1_234_567), "1,234,567");
     }
 
     #[test]

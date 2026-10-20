@@ -242,15 +242,16 @@ impl PlaybackPage {
                 }
             });
         SettingRow::new("Buffering")
-            .description(
-                "Auto (recommended) starts channels quickly, buffers more for films and for \
-                 channels that stalled",
-            )
+            .description("Auto (recommended): quick channel changes, more for films")
             .show(ui, |ui| {
                 let mut sel = usize::from(Buffering::from_index(cx.prefs.buffering).index());
                 let labels: Vec<&str> = Buffering::ALL.iter().map(|b| b.label()).collect();
-                Segmented::new(Id::unique("settings.pb.buffering"), &labels, 400.0)
-                    .show(ui, &mut sel);
+                Segmented::new(
+                    Id::unique("settings.pb.buffering"),
+                    &labels,
+                    ui.available_width().min(380.0),
+                )
+                .show(ui, &mut sel);
                 let v = u8::try_from(sel).unwrap_or(0);
                 if v != cx.prefs.buffering {
                     cx.prefs.buffering = v;
@@ -258,22 +259,27 @@ impl PlaybackPage {
                 }
             });
         let disk = cx.playback.has_disk_cache();
-        let rewind_text = rewind_description(cx.prefs.live_rewind, disk);
         SettingRow::new("Rewind live TV")
-            .description(&rewind_text)
+            .description("Pause live channels and go back")
             .show(ui, |ui| {
                 let labels = ["Off", "15 min", "30 min", "60 min"];
                 let mut sel = REWIND_CHOICES
                     .iter()
                     .position(|m| *m == sanitize_rewind(cx.prefs.live_rewind))
                     .unwrap_or(2);
-                Segmented::new(Id::unique("settings.pb.rewind"), &labels, 400.0).show(ui, &mut sel);
+                Segmented::new(
+                    Id::unique("settings.pb.rewind"),
+                    &labels,
+                    ui.available_width().min(380.0),
+                )
+                .show(ui, &mut sel);
                 let v = REWIND_CHOICES.get(sel).copied().unwrap_or(30);
                 if v != cx.prefs.live_rewind {
                     cx.prefs.live_rewind = v;
                     changed = true;
                 }
             });
+        note(ui, &rewind_description(cx.prefs.live_rewind, disk));
         if let Some(session) = cx.session() {
             let profile = session.profile_id();
             let boosted = cx.playback.boosted_channels(profile);
@@ -315,7 +321,10 @@ impl PlaybackPage {
         section(
             ui,
             "Simultaneous streams",
-            Some("This profile; applies at once."),
+            Some(
+                "The most streams opensmarters opens at once on this account, shared by \
+                 multiscreen, recordings and downloads. This profile; applies at once.",
+            ),
         );
         let account = budget.account_limit();
         let auto = match account {
@@ -326,13 +335,14 @@ impl PlaybackPage {
         let current = budget.override_limit();
         let mut sel = current.map_or(0, |n| usize::try_from(n.min(4)).unwrap_or(4));
         SettingRow::new("Streams at once")
-            .description(
-                "The most streams opensmarters opens at once on this account, shared by \
-                 multiscreen, recordings and downloads",
-            )
+            .description("Auto uses your provider's limit")
             .show(ui, |ui| {
-                Segmented::new(Id::unique("settings.pb.streams"), &labels, 400.0)
-                    .show(ui, &mut sel);
+                Segmented::new(
+                    Id::unique("settings.pb.streams"),
+                    &labels,
+                    ui.available_width().min(380.0),
+                )
+                .show(ui, &mut sel);
             });
         let wanted = u32::try_from(sel).ok().filter(|n| *n > 0);
         if wanted != current {
@@ -448,26 +458,37 @@ impl PlaybackPage {
     }
 }
 
-/// The "Rewind live TV" description: what it does and the disk (or memory) it may use.
+/// The note under "Rewind live TV": the disk (or memory) it may use.
 fn rewind_description(minutes: u8, disk: bool) -> String {
     let minutes = sanitize_rewind(minutes);
     if minutes == 0 {
-        return "Pause and go back on live channels. Off: Space still pauses, briefly".to_owned();
+        return "Off: Space still pauses live TV for a moment; ←/→ change channel.".to_owned();
     }
     if disk {
         // Behind and ahead of the playback position (a long pause), at 8 Mbit/s.
         let bytes = 2 * rewind_bytes(minutes, true);
         format!(
-            "Pause and go back up to {minutes} min on live channels. Uses up to {} of disk \
-             while watching",
+            "Up to {minutes} min. While you watch live TV it may use up to {} of disk; it is \
+             deleted when you stop.",
             human_bytes(bytes)
         )
     } else {
         format!(
-            "Pause and go back on live channels. Without a data folder it stays in memory, \
-             so it holds less than {minutes} min"
+            "Without a data folder the rewind buffer stays in memory, so it holds less than \
+             {minutes} min."
         )
     }
+}
+
+/// A caption under a setting row.
+fn note(ui: &mut Ui, text: &str) {
+    ui.add_space(2.0);
+    ui.label(
+        egui::RichText::new(text)
+            .font(crate::ui::theme::font::caption())
+            .color(color::TEXT_3),
+    );
+    ui.add_space(6.0);
 }
 
 fn picker_button(p: Picker) -> Id {

@@ -30,6 +30,8 @@ pub const NUDGE: f64 = 30.0;
 const OLDEST_MARGIN: f64 = 1.0;
 /// Pause past the window is detected when the cache ahead is this full.
 const FULL: f64 = 0.92;
+/// The OSD bar spans at least this many seconds (2 min) while the buffer fills.
+pub const MIN_BAR_SPAN: f64 = 120.0;
 
 /// Limits for [`Timeshift::tick`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -73,10 +75,18 @@ impl LiveView {
         self.behind < AT_LIVE
     }
 
-    /// Fractions (0..=1) along a bar spanning the window that ends at live: where the
+    /// Seconds the OSD bar spans: what is buffered, but at least [`MIN_BAR_SPAN`] (or the
+    /// window, if shorter) so the first seconds after tuning in read as a filling bar.
+    pub fn span(&self) -> f64 {
+        (self.live - self.oldest)
+            .max(self.window.min(MIN_BAR_SPAN))
+            .max(1.0)
+    }
+
+    /// Fractions (0..=1) along a bar that ends at live ([`Self::span`]): where the
     /// buffered part starts and where the playback position is.
     pub fn bar(&self) -> (f32, f32) {
-        let span = self.window.max(self.live - self.oldest).max(1.0);
+        let span = self.span();
         let start = self.live - span;
         let f = |t: f64| (((t - start) / span) as f32).clamp(0.0, 1.0);
         (f(self.oldest), f(self.pos))
@@ -84,7 +94,7 @@ impl LiveView {
 
     /// The position at fraction `frac` (0..=1) of the bar (a click on it).
     pub fn time_at(&self, frac: f64) -> f64 {
-        let span = self.window.max(self.live - self.oldest).max(1.0);
+        let span = self.span();
         self.live - span + span * frac.clamp(0.0, 1.0)
     }
 }
@@ -434,15 +444,29 @@ mod tests {
             live: 600.0,
             window: 600.0,
         };
+        // The bar spans what is buffered (5 min here): oldest at the left, live at the right.
         let (buffered, pos) = v.bar();
-        assert!((buffered - 0.5).abs() < 1e-6);
-        assert!((pos - 0.75).abs() < 1e-6);
+        assert!(buffered.abs() < 1e-6);
+        assert!((pos - 0.5).abs() < 1e-6);
+        assert!((v.time_at(0.5) - 450.0).abs() < 1e-9);
         assert!(!v.is_live());
-        // More buffered than the window (low bitrate): the bar grows to fit.
-        let wide = LiveView {
-            oldest: -300.0,
-            ..v
+        // Just tuned in (20 s buffered): at least 2 minutes, filling from the right.
+        let fresh = LiveView {
+            behind: 0.0,
+            pos: 20.0,
+            oldest: 0.0,
+            live: 20.0,
+            window: 1800.0,
         };
-        assert_eq!(wide.bar().0, 0.0);
+        assert!((fresh.span() - MIN_BAR_SPAN).abs() < 1e-9);
+        let (start, pos) = fresh.bar();
+        assert!((start - (100.0 / 120.0)).abs() < 1e-6);
+        assert!((pos - 1.0).abs() < 1e-6);
+        // A window shorter than 2 minutes is the minimum itself.
+        let short = LiveView {
+            window: 60.0,
+            ..fresh
+        };
+        assert!((short.span() - 60.0).abs() < 1e-9);
     }
 }

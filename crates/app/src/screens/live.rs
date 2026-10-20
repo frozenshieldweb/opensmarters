@@ -1274,6 +1274,7 @@ impl LiveScreen {
             {
                 cx.nav.push(Route::Guide);
             }
+            super::multiscreen::live_button(cx, ui);
             if let Some(ch) = &channel {
                 let fav = session.is_favourite(ContentKind::Live, &ch.key);
                 let f = IconButton::new(icons::HEART)

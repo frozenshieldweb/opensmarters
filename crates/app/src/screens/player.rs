@@ -894,6 +894,11 @@ impl PlayerScreen {
                 }
                 rx -= 48.0 + 16.0;
             }
+            // Multiscreen (stream D): opens it with this channel in tile 1.
+            if live {
+                let r = Rect::from_center_size(pos2(rx, cy), vec2(48.0, 48.0));
+                super::multiscreen::osd_button(cx, ui, r);
+            }
         });
         if self.sheet {
             self.track_sheet(cx, ui);

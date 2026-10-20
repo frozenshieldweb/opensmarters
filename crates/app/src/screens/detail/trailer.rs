@@ -3,8 +3,6 @@
 //! to a bare 11-character id by [`crate::services::vod::youtube_id`]) is opened in the
 //! system browser, only after an explicit confirmation that says where it goes.
 
-use std::process::Command;
-
 use eframe::egui::{self, Id};
 
 use crate::screens::AppCtx;
@@ -93,16 +91,10 @@ pub(super) fn open_in_browser(url: &str) -> std::io::Result<()> {
             "not a YouTube watch URL",
         ));
     }
-    // The URL is passed as a single argument (no shell), and its characters are limited
-    // to the fixed prefix plus [A-Za-z0-9_-].
-    #[cfg(target_os = "windows")]
-    let status = Command::new("explorer.exe").arg(url).status();
-    #[cfg(target_os = "macos")]
-    let status = Command::new("open").arg(url).status();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let status = Command::new("xdg-open").arg(url).status();
-    // explorer.exe reports 1 even when it worked, so only a failure to start counts.
-    status.map(|_| ())
+    // The URL's characters are limited to the fixed prefix plus [A-Za-z0-9_-]; the system
+    // launcher is started by absolute path with the URL as its single argument (no shell,
+    // no PATH lookup: SR-16).
+    crate::platform::open_url(url)
 }
 
 #[cfg(test)]

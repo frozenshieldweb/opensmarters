@@ -87,6 +87,8 @@ pub use locks::{ItemLock, Lockable, RELOCK_IDLE};
 pub(crate) use vod::LAST_CATEGORY as LAST_VOD_CATEGORY;
 pub use vod::SeriesWatch;
 mod pin;
+// Fast start from the cached login + catalogue, verified in the background.
+mod startup;
 
 /// TTL of category and stream lists.
 pub const LIST_TTL: Duration = Duration::from_secs(6 * 3600);

@@ -19,15 +19,19 @@ mod episodes;
 mod trailer;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use eframe::egui::{self, Align2, Color32, Id, Rect, ScrollArea, Sense, Ui, UiBuilder, pos2, vec2};
 use opensmarters_core::{CategoryId, SeriesInfo, VodInfo, VodStream};
 use opensmarters_store::{ContentKind, ItemSnapshot, PlaybackProgress};
 
+use super::common::unlock::{UnlockFlow, UnlockResult};
 use super::{AppCtx, Screen, shell};
+use crate::error::{AppError, LockedItem};
+use crate::focus;
 use crate::nav::{Route, Section};
 use crate::playback::next::EpisodeQueue;
-use crate::services::session::SeriesWatch;
+use crate::services::session::{ItemLock, SeriesWatch};
 use crate::services::vod::{self, ContinueKind, ContinueTarget};
 use crate::services::{ImageSize, ImageSlot};
 use crate::task::Loader;
@@ -213,6 +217,37 @@ pub struct DetailScreen {
     plot_expanded: bool,
     trailer: trailer::TrailerPrompt,
     scroll_y: f32,
+    /// Since when the parental check can't tell yet (fail closed after a while).
+    checking_since: Option<Instant>,
+    /// The PIN flow (the page's own lock, or a refused play action) and what follows it.
+    unlock: Option<(UnlockFlow, Retry)>,
+    /// The page's PIN prompt was opened once automatically.
+    unlock_offered: bool,
+}
+
+/// What to do once the PIN unlocked something.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Retry {
+    /// Show the page (its own lock).
+    Reveal,
+    /// Play the movie (from `resume`).
+    Movie(u64, Option<f64>),
+    /// Play the episode (from `resume`).
+    Episode(u64, Option<f64>),
+}
+
+/// How long the parental check may stay undecided before the page asks for the PIN.
+const CHECK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Whether the page may show the item (parental control).
+#[derive(Debug, Clone, PartialEq)]
+enum Gate {
+    /// No PIN, not locked, or unlocked this session.
+    Open,
+    /// Still finding out (nothing about the item is shown meanwhile).
+    Checking,
+    /// Locked (one of its categories, or unknown for too long): PIN first.
+    Locked(LockedItem),
 }
 
 impl DetailScreen {
@@ -232,6 +267,126 @@ impl DetailScreen {
             plot_expanded: false,
             trailer: trailer::TrailerPrompt::default(),
             scroll_y: 0.0,
+            checking_since: None,
+            unlock: None,
+            unlock_offered: false,
+        }
+    }
+
+    fn content_kind(&self) -> ContentKind {
+        match self.kind {
+            DetailKind::Movie(_) => ContentKind::Movie,
+            DetailKind::Series(_) => ContentKind::Series,
+        }
+    }
+
+    fn item_id(&self) -> String {
+        match self.kind {
+            DetailKind::Movie(id) | DetailKind::Series(id) => id.to_string(),
+        }
+    }
+
+    /// Parental gate: an item in a locked category (opened from anywhere: search,
+    /// favourites, `--route detail:`) needs the PIN before anything about it is shown.
+    /// Every category of the item counts (the session indexes them from the lists and
+    /// the detail info it loads); while it can't tell, nothing is shown, and after
+    /// [`CHECK_PATIENCE`] the page asks for the PIN (fail closed).
+    fn gate(&mut self, cx: &AppCtx<'_>) -> Gate {
+        let Some(session) = cx.session() else {
+            return Gate::Checking;
+        };
+        if !session.parental_enabled() {
+            return Gate::Open;
+        }
+        let kind = self.content_kind();
+        let item = self.item_id();
+        let info_done = match self.kind {
+            DetailKind::Movie(_) => self.movie.has_finished(),
+            DetailKind::Series(_) => self.series.has_finished(),
+        };
+        match session.item_lock(kind, &item, None) {
+            ItemLock::Unlocked => {
+                self.checking_since = None;
+                Gate::Open
+            }
+            ItemLock::Locked { category, name } => Gate::Locked(LockedItem {
+                kind,
+                item,
+                category: Some(category),
+                category_name: name,
+            }),
+            ItemLock::Unknown => {
+                let since = *self.checking_since.get_or_insert_with(Instant::now);
+                if info_done && since.elapsed() >= CHECK_PATIENCE {
+                    Gate::Locked(LockedItem {
+                        kind,
+                        item,
+                        category: None,
+                        category_name: None,
+                    })
+                } else {
+                    cx.egui
+                        .request_repaint_after(std::time::Duration::from_millis(200));
+                    Gate::Checking
+                }
+            }
+        }
+    }
+
+    /// The locked state: lock illustration and "Enter PIN" (the PIN flow opens once by
+    /// itself).
+    fn locked(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui, locked: &LockedItem) {
+        let content = cx.layout.content;
+        let m = cx.layout.margin;
+        let mut child = ui.new_child(UiBuilder::new().max_rect(content.shrink2(vec2(m, 64.0))));
+        let what = match self.kind {
+            DetailKind::Movie(_) => "This movie is in a locked category",
+            DetailKind::Series(_) => "This series is in a locked category",
+        };
+        let ask = EmptyState::new(
+            Id::unique("detail.locked"),
+            Illustration::ParentalLock,
+            what,
+            "Enter your PIN to see it. It locks again after 30 minutes without use.",
+        )
+        .action("Enter PIN", true)
+        .show(&mut child)
+        .is_some_and(|f| f.activated);
+        if (ask || !self.unlock_offered) && self.unlock.is_none() {
+            self.unlock_offered = true;
+            self.unlock = Some((UnlockFlow::new(cx, locked.clone()), Retry::Reveal));
+        }
+    }
+
+    /// Advances the PIN flow; runs the action it was for once unlocked.
+    fn poll_unlock(&mut self, cx: &mut AppCtx<'_>) {
+        let Some((flow, retry)) = &mut self.unlock else {
+            return;
+        };
+        match flow.show(cx) {
+            UnlockResult::Pending => {}
+            UnlockResult::Cancelled => {
+                self.unlock = None;
+                focus::request(&cx.egui, Id::unique("detail.locked").with("action"));
+            }
+            UnlockResult::Unlocked => {
+                let retry = *retry;
+                self.unlock = None;
+                match retry {
+                    Retry::Reveal => {}
+                    Retry::Movie(id, resume) => self.play_movie(cx, id, resume),
+                    Retry::Episode(id, resume) => self.play_episode(cx, id, resume),
+                }
+            }
+        }
+    }
+
+    /// A request builder's error: a parental lock starts the PIN flow (then retries),
+    /// anything else is a toast.
+    fn refused(&mut self, cx: &mut AppCtx<'_>, e: AppError, retry: Retry) {
+        match e {
+            AppError::Locked(l) => self.unlock = Some((UnlockFlow::new(cx, l), retry)),
+            e => cx.toasts.error(e.user_message()),
         }
     }
 
@@ -346,7 +501,7 @@ impl DetailScreen {
             resume,
         ) {
             Ok(req) => cx.play(req, true),
-            Err(e) => cx.toasts.error(e.user_message()),
+            Err(e) => self.refused(cx, e, Retry::Movie(id, resume)),
         }
     }
 
@@ -381,7 +536,7 @@ impl DetailScreen {
                 });
                 cx.play(req, true);
             }
-            Err(e) => cx.toasts.error(e.user_message()),
+            Err(e) => self.refused(cx, e, Retry::Episode(episode_id, resume)),
         }
     }
 
@@ -453,7 +608,7 @@ impl Screen for DetailScreen {
     }
 
     fn on_back(&mut self, _cx: &mut AppCtx<'_>) -> bool {
-        self.trailer.close()
+        self.unlock.take().is_some() || self.trailer.close()
     }
 
     fn section(&self) -> Option<Section> {
@@ -473,10 +628,21 @@ impl Screen for DetailScreen {
             self.load_progress(cx);
         }
         self.refresh_header(cx);
+        let gate = self.gate(cx);
+        let open = gate == Gate::Open;
 
         let content = cx.layout.content;
         let m = cx.layout.margin;
-        self.paint_backdrop(cx, ui, content);
+        self.paint_backdrop(cx, ui, content, open);
+
+        if let Gate::Locked(locked) = &gate {
+            let locked = locked.clone();
+            self.locked(cx, ui, &locked);
+            self.poll_unlock(cx);
+            shell::status_cluster(cx, ui);
+            return;
+        }
+        self.poll_unlock(cx);
 
         if let Some(err) = self.info_error() {
             let mut child = ui.new_child(UiBuilder::new().max_rect(content.shrink2(vec2(m, 64.0))));
@@ -526,7 +692,7 @@ impl Screen for DetailScreen {
             .id_salt(("detail.scroll", self.kind_id()))
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| self.page(cx, ui));
+            .show(ui, |ui| self.page(cx, ui, open));
         self.scroll_y = out.state.clamped_offset().y;
         // Keep the clock legible once the page scrolls under it.
         if self.scroll_y > 1.0 {
@@ -555,12 +721,13 @@ impl DetailScreen {
         }
     }
 
-    /// Backdrop (fixed) with tint and scrims; darkens as the page scrolls.
-    fn paint_backdrop(&self, cx: &AppCtx<'_>, ui: &Ui, content: Rect) {
+    /// Backdrop (fixed) with tint and scrims; darkens as the page scrolls. `show_art`
+    /// false (parental check pending or locked) paints the ambient art only.
+    fn paint_backdrop(&self, cx: &AppCtx<'_>, ui: &Ui, content: Rect, show_art: bool) {
         let painter = ui.painter().clone();
         painter.rect_filled(content, 0.0, color::BG);
         let images = &cx.services.images;
-        let h = self.header.as_ref();
+        let h = self.header.as_ref().filter(|_| show_art);
         let backdrop = h.and_then(|h| h.backdrop.as_deref());
         let mut drawn = false;
         for (url, tint) in [
@@ -615,7 +782,8 @@ impl DetailScreen {
     }
 
     /// The scrolling page: back, header, actions, then episodes or "More like this".
-    fn page(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {
+    /// `open` false (parental check pending) shows the loading skeleton only.
+    fn page(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui, open: bool) {
         ui.spacing_mut().item_spacing.y = 0.0;
         let content = cx.layout.content;
         let m = cx.layout.margin;
@@ -624,10 +792,10 @@ impl DetailScreen {
         let text_w = (full - 2.0 * m).min(640.0);
         let painter = ui.painter().clone();
 
-        // Back.
+        // Back: says where it leads ("‹ Movies", "‹ Home"), like the concept.
         ui.add_space(34.0);
         let (row, _) = ui.allocate_exact_size(vec2(full, 44.0), Sense::hover());
-        let back = Button::ghost("Back")
+        let back = Button::ghost(crate::nav::back_label(&cx.egui).unwrap_or("Back"))
             .icon(icons::CARET_LEFT)
             .small()
             .id(Id::unique("detail.back"));
@@ -639,14 +807,17 @@ impl DetailScreen {
         if back.show(&mut child).activated {
             cx.nav.back();
         }
-        let header = self.header.clone();
+        let header = self.header.clone().filter(|_| open);
         let tv = cx.layout.tv;
         let top = (content.height() * if tv { 0.18 } else { 0.26 } - 78.0).max(16.0);
         ui.add_space(top);
 
         let Some(h) = header else {
             // Loading: skeleton lines where the header will be.
-            if self.movie.show_skeleton() || self.series.show_skeleton() {
+            if self.movie.show_skeleton()
+                || self.series.show_skeleton()
+                || self.checking_since.is_some()
+            {
                 let (r, _) = ui.allocate_exact_size(vec2(full, 260.0), Sense::hover());
                 let ctx = cx.egui.clone();
                 skeleton(
@@ -905,7 +1076,15 @@ impl DetailScreen {
         let Some(list) = self.similar.value().cloned() else {
             return;
         };
-        let items: Vec<&VodStream> = list.iter().filter(|m| m.stream_id != id).take(20).collect();
+        // Films of locked categories stay out (any of their categories).
+        let items: Vec<&VodStream> = match cx.session() {
+            Some(s) => s
+                .filter_unlocked(list.iter().filter(|m| m.stream_id != id))
+                .into_iter()
+                .take(20)
+                .collect(),
+            None => Vec::new(),
+        };
         if items.is_empty() {
             return;
         }

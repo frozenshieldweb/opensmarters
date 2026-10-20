@@ -6,6 +6,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use eframe::egui::{self, Key, Modifiers, RawInput};
@@ -23,6 +24,9 @@ pub enum Step {
     Shot(PathBuf),
     /// Close the app.
     Quit,
+    /// Delay after each following key/text step (default [`KEY_GAP_SECS`]); a short gap
+    /// lets a `shot:` catch an animation mid-way (e.g. `gap:0.05,Enter,shot:fade.png`).
+    Gap(f64),
 }
 
 /// Default delay after each key so the UI settles (focus, scroll, animations).
@@ -46,6 +50,12 @@ pub fn parse_script(script: &str) -> Result<Vec<Step>, String> {
                 .parse()
                 .map_err(|_| format!("bad wait {tok:?}"))?;
             steps.push(Step::Wait(s.clamp(0.0, 600.0)));
+        } else if let Some(secs) = tok.strip_prefix("gap:") {
+            let s: f64 = secs
+                .trim()
+                .parse()
+                .map_err(|_| format!("bad gap {tok:?}"))?;
+            steps.push(Step::Gap(s.clamp(0.0, 10.0)));
         } else if let Some(t) = tok.strip_prefix("text:") {
             steps.push(Step::Text(t.to_owned()));
         } else if let Some(p) = tok.strip_prefix("shot:") {
@@ -94,6 +104,37 @@ fn parse_key(name: &str) -> Result<Key, String> {
         .ok_or_else(|| format!("unknown key {name:?}"))
 }
 
+/// Screenshots requested but not yet written to disk. `quit` and `--exit-after` wait for
+/// them, so `shot:x.png,quit` never leaves a truncated (0-byte) file behind.
+#[derive(Debug, Clone, Default)]
+pub struct PendingShots(Arc<AtomicUsize>);
+
+impl PendingShots {
+    /// Number of screenshots still being captured or saved.
+    pub fn count(&self) -> usize {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn begin(&self) -> ShotGuard {
+        self.0.fetch_add(1, Ordering::AcqRel);
+        ShotGuard(Arc::clone(&self.0))
+    }
+}
+
+/// Decrements the pending count when the save finished (or the callback was dropped).
+#[derive(Debug)]
+struct ShotGuard(Arc<AtomicUsize>);
+
+impl Drop for ShotGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Longest time `quit` waits for pending screenshots (a lost capture must not hang the
+/// run forever).
+const MAX_SHOT_WAIT_SECS: f64 = 10.0;
+
 /// Runs a script against the app's input and takes screenshots.
 #[derive(Debug, Default)]
 pub struct Harness {
@@ -103,6 +144,9 @@ pub struct Harness {
     final_shot: Option<(f64, PathBuf)>,
     exit_after: Option<f64>,
     closing: bool,
+    pending: PendingShots,
+    quit_requested_at: Option<f64>,
+    key_gap: Option<f64>,
 }
 
 impl Harness {
@@ -119,7 +163,27 @@ impl Harness {
             final_shot,
             exit_after,
             closing: false,
+            pending: PendingShots::default(),
+            quit_requested_at: None,
+            key_gap: None,
         }
+    }
+
+    /// Screenshots still being captured or written.
+    pub fn pending_shots(&self) -> usize {
+        self.pending.count()
+    }
+
+    /// Closes the window once every requested screenshot is on disk (or after
+    /// [`MAX_SHOT_WAIT_SECS`]). Returns true when the close was sent.
+    fn close_when_saved(&mut self, ctx: &egui::Context, now: f64) -> bool {
+        let since = *self.quit_requested_at.get_or_insert(now);
+        if self.pending.count() > 0 && now - since < MAX_SHOT_WAIT_SECS {
+            return false;
+        }
+        self.closing = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        true
     }
 
     /// True if there is anything to do (keeps the app repainting).
@@ -161,25 +225,26 @@ impl Harness {
                             modifiers,
                         });
                     }
-                    if key == Key::Space {
-                        // egui also expects a text event for typing into fields.
-                    }
-                    self.next_at = now + KEY_GAP_SECS;
+                    self.next_at = now + self.key_gap.unwrap_or(KEY_GAP_SECS);
                     break;
                 }
                 Step::Text(t) => {
                     raw.events.push(egui::Event::Text(t));
-                    self.next_at = now + KEY_GAP_SECS;
+                    self.next_at = now + self.key_gap.unwrap_or(KEY_GAP_SECS);
                     break;
                 }
+                Step::Gap(s) => self.key_gap = Some(s),
                 Step::Shot(path) => {
-                    screenshot(ctx, path, false);
+                    screenshot(ctx, path, false, &self.pending);
                     self.next_at = now + 0.3;
                     break;
                 }
                 Step::Quit => {
-                    self.closing = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    if !self.close_when_saved(ctx, now) {
+                        // Screenshots are still being written: try again next frame.
+                        self.steps.push_front(Step::Quit);
+                        self.next_at = now + 0.03;
+                    }
                     break;
                 }
             }
@@ -190,20 +255,21 @@ impl Harness {
             && let Some((_, path)) = self.final_shot.take()
         {
             self.closing = true;
-            screenshot(ctx, path, true);
+            screenshot(ctx, path, true, &self.pending);
         }
         if self.exit_after.is_some_and(|t| now >= t) {
-            self.closing = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            let _ = self.close_when_saved(ctx, now);
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(30));
     }
 }
 
 /// Requests a screenshot of the next rendered frame and saves it as PNG (on a worker
-/// thread). With `quit`, closes the app afterwards.
-pub fn screenshot(ctx: &egui::Context, path: PathBuf, quit: bool) {
+/// thread). With `quit`, closes the app once the file is written. `pending` counts the
+/// capture until the file is complete.
+pub fn screenshot(ctx: &egui::Context, path: PathBuf, quit: bool, pending: &PendingShots) {
     let ctx2 = ctx.clone();
+    let guard = pending.begin();
     ctx.request_screenshot(move |img: Arc<egui::ColorImage>| {
         let ctx3 = ctx2.clone();
         std::thread::spawn(move || {
@@ -211,6 +277,7 @@ pub fn screenshot(ctx: &egui::Context, path: PathBuf, quit: bool) {
                 Ok(()) => tracing::info!(path = %path.display(), w = img.size[0], h = img.size[1], "screenshot saved"),
                 Err(e) => tracing::warn!(error = %e, "screenshot failed"),
             }
+            drop(guard);
             if quit {
                 ctx3.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -257,7 +324,27 @@ mod tests {
         assert_eq!(s[8], Step::Text("ab".into()));
         assert_eq!(s[9], Step::Shot(PathBuf::from("x.png")));
         assert_eq!(s[10], Step::Quit);
+        assert_eq!(
+            parse_script("gap:0.05,Enter").unwrap_or_else(|e| panic!("{e}"))[0],
+            Step::Gap(0.05)
+        );
         assert!(parse_script("Nope").is_err());
         assert!(parse_script("wait:x").is_err());
+    }
+
+    #[test]
+    fn pending_shots_count_until_the_save_finishes() {
+        let pending = PendingShots::default();
+        assert_eq!(pending.count(), 0);
+        let a = pending.begin();
+        let b = pending.begin();
+        assert_eq!(pending.count(), 2);
+        drop(a);
+        assert_eq!(pending.count(), 1);
+        // A guard moved to another thread (the PNG writer) releases there.
+        std::thread::spawn(move || drop(b))
+            .join()
+            .unwrap_or_else(|_| panic!("join"));
+        assert_eq!(pending.count(), 0);
     }
 }

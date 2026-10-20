@@ -1297,83 +1297,13 @@ impl GuideScreen {
 
     fn overlays(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui, session: &Arc<Session>) {
         if let Some(d) = self.details.clone() {
-            let p = &d.programme;
-            let day = {
-                let local = p.start.with_timezone(&Local);
-                match (local.date_naive() - cx.now.with_timezone(&Local).date_naive()).num_days() {
-                    0 => "Today".to_owned(),
-                    1 => "Tomorrow".to_owned(),
-                    -1 => "Yesterday".to_owned(),
-                    _ => format!(
-                        "{} {} {}",
-                        weekday(local.weekday()),
-                        local.day(),
-                        local.format("%b")
-                    ),
-                }
-            };
-            let when = format!(
-                "{day} · {}–{} · {}",
-                cx.prefs.format_time(&p.start.with_timezone(&Local)),
-                cx.prefs.format_time(&p.stop.with_timezone(&Local)),
-                split_tag(&d.channel.name).1,
+            let (close, watch) = details_dialog(
+                cx,
+                ui.ctx(),
+                Id::unique("guide.details"),
+                &d.channel,
+                &d.programme,
             );
-            let ended = p.stop <= cx.now;
-            let mut close = false;
-            let mut watch = false;
-            Dialog::new(Id::unique("guide.details"), "").show_custom(ui.ctx(), |ui| {
-                let w = ui.available_width();
-                text::overline(
-                    ui.painter(),
-                    ui.cursor().min + vec2(0.0, 8.0),
-                    Align2::LEFT_CENTER,
-                    if ended {
-                        "Ended · not in the archive"
-                    } else {
-                        "Coming up"
-                    },
-                    color::TEXT_3,
-                );
-                ui.add_space(22.0);
-                let g = text::galley(ui.painter(), &p.title, font::title(), color::TEXT, w, 2);
-                let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
-                ui.painter().galley(r.min, g, color::TEXT);
-                ui.add_space(4.0);
-                let g = text::galley(ui.painter(), &when, font::caption(), color::TEXT_3, w, 1);
-                let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
-                ui.painter().galley(r.min, g, color::TEXT_3);
-                if !p.description.trim().is_empty() {
-                    ui.add_space(16.0);
-                    let g = text::galley(
-                        ui.painter(),
-                        &p.description,
-                        font::body(),
-                        color::TEXT_2,
-                        w,
-                        8,
-                    );
-                    let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
-                    ui.painter().galley(r.min, g, color::TEXT_2);
-                }
-                ui.add_space(24.0);
-                ui.allocate_ui_with_layout(
-                    vec2(w, 44.0),
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui| {
-                        ui.spacing_mut().item_spacing.x = 12.0;
-                        watch = Button::primary("Watch the channel now")
-                            .icon(icons::PLAY)
-                            .id(Id::unique("guide.details.watch"))
-                            .show(ui)
-                            .activated;
-                        close = Button::secondary("Close")
-                            .autofocus()
-                            .id(Id::unique("guide.details.close"))
-                            .show(ui)
-                            .activated;
-                    },
-                );
-            });
             if close {
                 self.details = None;
                 self.restore_grid_focus(cx);
@@ -1426,6 +1356,97 @@ impl GuideScreen {
             }
         }
     }
+}
+
+/// "Today", "Tomorrow", "Yesterday" or "Thu 22 Oct" for an instant, on the viewer's clock.
+pub(crate) fn relative_day(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let local = t.with_timezone(&Local);
+    match (local.date_naive() - now.with_timezone(&Local).date_naive()).num_days() {
+        0 => "Today".to_owned(),
+        1 => "Tomorrow".to_owned(),
+        -1 => "Yesterday".to_owned(),
+        _ => format!(
+            "{} {} {}",
+            weekday(local.weekday()),
+            local.day(),
+            local.format("%b")
+        ),
+    }
+}
+
+/// The details dialog of a programme that can't be played as such (upcoming, or ended
+/// without an archive). Returns `(close, watch the channel)`. Also used by Search.
+pub(crate) fn details_dialog(
+    cx: &AppCtx<'_>,
+    ctx: &egui::Context,
+    id: Id,
+    channel: &LiveChannel,
+    p: &Programme,
+) -> (bool, bool) {
+    let when = format!(
+        "{} · {}–{} · {}",
+        relative_day(p.start, cx.now),
+        cx.prefs.format_time(&p.start.with_timezone(&Local)),
+        cx.prefs.format_time(&p.stop.with_timezone(&Local)),
+        split_tag(&channel.name).1,
+    );
+    let ended = p.stop <= cx.now;
+    let mut close = false;
+    let mut watch = false;
+    Dialog::new(id, "").show_custom(ctx, |ui| {
+        let w = ui.available_width();
+        text::overline(
+            ui.painter(),
+            ui.cursor().min + vec2(0.0, 8.0),
+            Align2::LEFT_CENTER,
+            if ended {
+                "Ended · not in the archive"
+            } else {
+                "Coming up"
+            },
+            color::TEXT_3,
+        );
+        ui.add_space(22.0);
+        let g = text::galley(ui.painter(), &p.title, font::title(), color::TEXT, w, 2);
+        let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
+        ui.painter().galley(r.min, g, color::TEXT);
+        ui.add_space(4.0);
+        let g = text::galley(ui.painter(), &when, font::caption(), color::TEXT_3, w, 1);
+        let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
+        ui.painter().galley(r.min, g, color::TEXT_3);
+        if !p.description.trim().is_empty() {
+            ui.add_space(16.0);
+            let g = text::galley(
+                ui.painter(),
+                &p.description,
+                font::body(),
+                color::TEXT_2,
+                w,
+                8,
+            );
+            let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
+            ui.painter().galley(r.min, g, color::TEXT_2);
+        }
+        ui.add_space(24.0);
+        ui.allocate_ui_with_layout(
+            vec2(w, 44.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                watch = Button::primary("Watch the channel now")
+                    .icon(icons::PLAY)
+                    .id(id.with("watch"))
+                    .show(ui)
+                    .activated;
+                close = Button::secondary("Close")
+                    .autofocus()
+                    .id(id.with("close"))
+                    .show(ui)
+                    .activated;
+            },
+        );
+    });
+    (close, watch)
 }
 
 fn weekday(w: opensmarters_core::chrono::Weekday) -> &'static str {

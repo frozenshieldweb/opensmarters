@@ -147,7 +147,8 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Not an Xtream channel, or the URL was rejected.
+    /// [`AppError::Locked`] when any of the channel's categories is locked (parental
+    /// control); not an Xtream channel, or the URL was rejected.
     pub fn catchup_request_with(
         &self,
         channel: &LiveChannel,
@@ -159,6 +160,11 @@ impl Session {
         else {
             return Err(AppError::msg("Catch-up needs an Xtream Codes account."));
         };
+        self.check_unlocked(
+            opensmarters_store::ContentKind::Live,
+            &channel.key,
+            Some(&channel.categories),
+        )?;
         let url = urls.timeshift(
             stream_id,
             programme,

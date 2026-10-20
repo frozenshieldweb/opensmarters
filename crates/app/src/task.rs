@@ -10,6 +10,8 @@
 //!   [`Emitter::partial`] before its final result.
 //! - **Skeletons:** [`Loader::show_skeleton`] is true only after 150 ms without a value
 //!   (no flashing on fast loads, §6.16).
+//! - **Panics:** a task that panics (or is dropped by the runtime) before sending its
+//!   result ends the load with [`AppError::Internal`] instead of loading forever.
 //!
 //! ```ignore
 //! // in on_enter / when the category changes:
@@ -181,7 +183,23 @@ impl<T: Send + 'static> Loader<T> {
         };
         let mut changed = false;
         let mut done = false;
-        while let Ok((generation, update)) = rx.try_recv() {
+        loop {
+            let (generation, update) = match rx.try_recv() {
+                Ok(m) => m,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Every sender is gone without a final result: the task panicked (or
+                    // the runtime dropped it). Never leave a spinner forever.
+                    if !done {
+                        tracing::warn!("a background load ended without a result");
+                        self.error = Some(AppError::Internal);
+                        self.partial = false;
+                        changed = true;
+                        done = true;
+                    }
+                    break;
+                }
+            };
             if generation != self.generation {
                 continue;
             }
@@ -348,6 +366,36 @@ mod tests {
         wait_until(&mut l, |l| l.error().is_some());
         assert_eq!(l.value(), Some(&8), "a failed refresh keeps the old value");
         assert!(l.has_finished());
+    }
+
+    #[test]
+    #[allow(clippy::panic, unreachable_code)]
+    fn a_panicking_task_ends_with_an_error_not_a_spinner() {
+        let rt = rt();
+        let ctx = egui::Context::default();
+        let mut l: Loader<u32> = Loader::new();
+        l.start(rt.handle(), &ctx, |_| async {
+            panic!("loader task panicked on purpose");
+            Ok(1)
+        });
+        wait_until(&mut l, |l| !l.is_loading());
+        assert!(matches!(l.error(), Some(AppError::Internal)));
+        assert!(l.has_finished());
+        let mut b: Loader<u32> = Loader::new();
+        b.start_blocking(rt.handle(), &ctx, || panic!("blocking loader panicked"));
+        wait_until(&mut b, |l| !l.is_loading());
+        assert!(matches!(b.error(), Some(AppError::Internal)));
+        // A value from before stays visible.
+        let mut c: Loader<u32> = Loader::new();
+        c.start(rt.handle(), &ctx, |emit| async move {
+            emit.partial(5);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            panic!("after a partial value");
+            Ok(6)
+        });
+        wait_until(&mut c, |l| !l.is_loading());
+        assert_eq!(c.value(), Some(&5));
+        assert!(c.error().is_some());
     }
 
     #[test]

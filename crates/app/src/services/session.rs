@@ -15,6 +15,25 @@
 //!
 //! TTLs: categories and stream lists [`LIST_TTL`] (6 h), VOD/series info [`INFO_TTL`],
 //! EPG [`super::epg::EPG_TTL`] (10 min, memory only). [`Session::refresh`] drops it all.
+//! JSON (tens of MB for "All" lists) is decoded and encoded on the blocking pool / the
+//! store writer, never on the async workers.
+//!
+//! ## EPG
+//!
+//! One bounded cache and one bounded request queue for the Guide and every now/next
+//! lookup (see [`guide`] and [`super::epg`]).
+//!
+//! ## Parental control
+//!
+//! Locks are enforced where content is used: the request builders refuse locked items
+//! with [`AppError::Locked`], and lists filter with [`Session::filter_unlocked`] (see
+//! [`locks`]).
+//!
+//! ## Lifetime
+//!
+//! When the session manager replaces or closes a session it calls [`Session::close`]:
+//! queued EPG/guide/look-up work is dropped and background tasks stop before their next
+//! provider request, so a replaced profile never keeps talking to its old provider.
 //!
 //! ## Secrets
 //!
@@ -24,11 +43,10 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 use std::time::{Duration, Instant};
 
-use opensmarters_core::catalog::CategorySelection;
 use opensmarters_core::chrono::{DateTime, Utc};
 use opensmarters_core::m3u::{self, M3uLimits, Playlist};
 use opensmarters_core::net::HttpClient;
@@ -40,7 +58,7 @@ use opensmarters_core::urls::{
 use opensmarters_core::xtream::Client;
 use opensmarters_core::{
     AccountStatus, ArchiveProgramme, Category, CategoryId, DEFAULT_USER_AGENT, Episode, HttpConfig,
-    IPTV_SMARTERS_UA, LoginInfo, Series, SeriesInfo, VodInfo, VodStream, XtreamAccount,
+    IPTV_SMARTERS_UA, LiveStream, LoginInfo, Series, SeriesInfo, VodInfo, VodStream, XtreamAccount,
 };
 use opensmarters_player::PlayableUrl;
 use opensmarters_store::{
@@ -53,7 +71,7 @@ use serde::de::DeserializeOwned;
 
 use super::Services;
 use super::catalog::{ChannelSource, LiveCatalog, LiveChannel, Programme, now_and_next};
-use super::epg::{EpgCache, EpgState};
+use super::epg::EpgState;
 use crate::error::{AppError, AppResult};
 use crate::playback::{MediaKind, PlaybackItem, PlaybackRequest, ZapContext, stream_headers};
 
@@ -61,8 +79,11 @@ use crate::playback::{MediaKind, PlaybackItem, PlaybackRequest, ZapContext, stre
 // so parallel work on this file merges cleanly.
 pub mod catchup;
 pub mod guide;
+// Parental locks at the point of use (SR-02).
+pub mod locks;
 // Movies/series: watch state, mark watched, remembered categories (`session/vod.rs`).
 mod vod;
+pub use locks::{ItemLock, Lockable, RELOCK_IDLE};
 pub use vod::SeriesWatch;
 mod pin;
 
@@ -204,12 +225,68 @@ enum Source {
     },
 }
 
+/// Why an account counts as unencrypted (SECURITY.md SR-12). The UI shows the
+/// "Unencrypted" indicator for any of them ([`Session::is_insecure`]); the reason lets it
+/// say *what* is unencrypted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsecureReason {
+    /// The panel / playlist address itself is plain `http` (logins and lists travel in
+    /// clear).
+    PlainAccount,
+    /// The panel is `https`, but it serves streams over plain `http`
+    /// (`server_info.server_protocol`): stream URLs carry the username and password in
+    /// clear.
+    PlainStreams,
+    /// The playlist is fetched securely (or is a local file), but `count` of its entries
+    /// are plain `http` streams.
+    PlainPlaylistEntries {
+        /// Plain-`http` entries.
+        count: usize,
+    },
+}
+
+impl InsecureReason {
+    /// A plain-language sentence for the indicator's tooltip / account page.
+    pub fn message(self) -> String {
+        match self {
+            InsecureReason::PlainAccount => {
+                "This account uses an unencrypted connection (http). Your provider, and \
+                 anyone on the network, can see your sign-in details and what you watch."
+                    .into()
+            }
+            InsecureReason::PlainStreams => {
+                "Your provider sends streams over an unencrypted connection (http), \
+                 including your sign-in details in each stream address."
+                    .into()
+            }
+            InsecureReason::PlainPlaylistEntries { count } => format!(
+                "{count} channel{} in this playlist {} streamed over an unencrypted \
+                 connection (http).",
+                if count == 1 { "" } else { "s" },
+                if count == 1 { "is" } else { "are" }
+            ),
+        }
+    }
+}
+
+/// Plain-`http` entries of a playlist.
+fn plain_http_entries(p: &Playlist) -> usize {
+    p.entries
+        .iter()
+        .filter(|e| {
+            e.url
+                .trim_start()
+                .get(..7)
+                .is_some_and(|s| s.eq_ignore_ascii_case("http://"))
+        })
+        .count()
+}
+
 #[derive(Debug, Default)]
 struct ParentalState {
     pin_set: bool,
     matcher: Option<KeywordMatcher>,
     locks: HashMap<ContentKind, HashMap<String, CategoryLock>>,
-    unlocked: HashSet<(ContentKind, String)>,
     /// Digits of the PIN (4–8), see `services::parental::PIN_LENGTH`.
     pin_len: usize,
 }
@@ -219,21 +296,32 @@ struct MemoEntry {
     value: Arc<dyn Any + Send + Sync>,
 }
 
+/// The live catalogue with the lists it was built from (rebuilt only when they change).
+struct LiveMemo {
+    sources: (usize, usize),
+    catalog: Arc<LiveCatalog>,
+}
+
 /// The active profile's provider connection. See the [module docs](self).
 pub struct Session {
+    me: Weak<Session>,
     profile: Profile,
     services: Services,
     source: Source,
     user_agent: String,
     http: HttpClient,
     offline: AtomicBool,
+    closed: AtomicBool,
     account: Option<AccountSummary>,
-    insecure: bool,
+    insecure: Option<InsecureReason>,
     memo: Mutex<HashMap<String, MemoEntry>>,
     key_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    favourites: RwLock<HashMap<ContentKind, HashSet<String>>>,
+    favourites: RwLock<HashMap<ContentKind, Arc<HashSet<String>>>>,
+    favourites_generation: AtomicU64,
     parental: RwLock<ParentalState>,
-    epg: EpgCache,
+    lock_state: locks::LockState,
+    ext: Arc<guide::ExtState>,
+    live: Mutex<Option<LiveMemo>>,
     xmltv: tokio::sync::OnceCell<Option<Arc<opensmarters_core::xmltv::Epg>>>,
 }
 
@@ -247,15 +335,30 @@ impl std::fmt::Debug for Session {
     }
 }
 
+/// A store **read** (or keychain call) on the blocking pool. Writes go through
+/// `Services::write`/`Services::blocking` (FIFO).
 async fn blocking<T: Send + 'static>(
     store: &Arc<Store>,
     f: impl FnOnce(&Store) -> Result<T, opensmarters_store::StoreError> + Send + 'static,
 ) -> AppResult<T> {
     let store = Arc::clone(store);
-    tokio::task::spawn_blocking(move || f(&store))
-        .await
-        .map_err(|_| AppError::Cancelled)?
-        .map_err(AppError::from)
+    match tokio::task::spawn_blocking(move || f(&store)).await {
+        Ok(r) => r.map_err(AppError::from),
+        Err(e) if e.is_panic() => {
+            tracing::error!("a store read panicked");
+            Err(AppError::Internal)
+        }
+        Err(_) => Err(AppError::Cancelled),
+    }
+}
+
+/// Runs CPU work (JSON of tens of MB, catalogue building) on the blocking pool.
+async fn cpu<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> AppResult<T> {
+    match tokio::task::spawn_blocking(f).await {
+        Ok(v) => Ok(v),
+        Err(e) if e.is_panic() => Err(AppError::Internal),
+        Err(_) => Err(AppError::Cancelled),
+    }
 }
 
 impl Session {
@@ -320,9 +423,9 @@ impl Session {
                         }
                         account = Some(summary);
                         // Cache the parsed login (it never contains the password) for
-                        // offline starts.
+                        // offline starts (in order with other writes; not awaited).
                         if let Ok(bytes) = serde_json::to_vec(&info) {
-                            let _ = blocking(&store, move |s| {
+                            drop(services.write("cache the login", move |s| {
                                 s.cache()
                                     .put(
                                         CacheScope::Profile(profile_id),
@@ -331,8 +434,7 @@ impl Session {
                                         LOGIN_TTL,
                                     )
                                     .map(|_| ())
-                            })
-                            .await;
+                            }));
                         }
                         info
                     }
@@ -359,6 +461,14 @@ impl Session {
                     Err(e) => return Err(AppError::from(e).into()),
                 };
                 let urls = client.stream_urls(&login);
+                // SR-12: an https panel may still hand out http stream URLs.
+                let insecure = if insecure {
+                    Some(InsecureReason::PlainAccount)
+                } else if urls.base().scheme() != "https" {
+                    Some(InsecureReason::PlainStreams)
+                } else {
+                    None
+                };
                 (
                     Source::Xtream {
                         client,
@@ -383,8 +493,15 @@ impl Session {
                     .trim()
                     .to_ascii_lowercase()
                     .starts_with("http://");
-                let (playlist, was_offline) = load_m3u_url(&store, profile_id, &http, &url).await?;
+                let (playlist, was_offline) =
+                    load_m3u_url(&services, profile_id, &http, &url).await?;
                 offline = was_offline;
+                let plain = plain_http_entries(&playlist);
+                let insecure = if insecure {
+                    Some(InsecureReason::PlainAccount)
+                } else {
+                    (plain > 0).then_some(InsecureReason::PlainPlaylistEntries { count: plain })
+                };
                 (
                     Source::M3u {
                         playlist: RwLock::new(Arc::new(playlist)),
@@ -394,11 +511,12 @@ impl Session {
             }
             ProfileSource::M3uFile { path } => {
                 let playlist = load_m3u_file(path.clone()).await?;
+                let plain = plain_http_entries(&playlist);
                 (
                     Source::M3u {
                         playlist: RwLock::new(Arc::new(playlist)),
                     },
-                    false,
+                    (plain > 0).then_some(InsecureReason::PlainPlaylistEntries { count: plain }),
                 )
             }
         };
@@ -420,22 +538,51 @@ impl Session {
             s.profiles().mark_used(profile_id)
         });
 
-        Ok(Arc::new(Session {
+        let favourites = favourites
+            .into_iter()
+            .map(|(k, v)| (k, Arc::new(v)))
+            .collect();
+        Ok(Arc::new_cyclic(|me| Session {
+            me: me.clone(),
             profile,
             services,
             source,
             user_agent,
             http,
             offline: AtomicBool::new(offline),
+            closed: AtomicBool::new(false),
             account,
             insecure,
             memo: Mutex::new(HashMap::new()),
             key_locks: Mutex::new(HashMap::new()),
             favourites: RwLock::new(favourites),
+            favourites_generation: AtomicU64::new(0),
             parental: RwLock::new(parental),
-            epg: EpgCache::default(),
+            lock_state: locks::LockState::default(),
+            ext: Arc::new(guide::ExtState::default()),
+            live: Mutex::new(None),
             xmltv: tokio::sync::OnceCell::new(),
         }))
+    }
+
+    /// Stops this session's background work: queued EPG/guide/look-up requests are
+    /// dropped, running ones stop before their next provider call, cached refreshes are
+    /// skipped and queued image downloads are cancelled. Called by the session manager
+    /// when another profile (or a fresh copy of this one) replaces it, or when it is
+    /// closed. Store writes already queued still happen.
+    pub fn close(&self) {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tracing::debug!("session closed");
+        self.ext.close();
+        self.lock_state.close();
+        self.services.images.cancel_pending();
+    }
+
+    /// True once [`Session::close`] was called.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
     }
 
     // ---------------------------------------------------------------------------------
@@ -503,8 +650,15 @@ impl Session {
         self.account.as_ref()
     }
 
-    /// True if the account talks plain HTTP (show the unencrypted warning).
+    /// True if anything of this account travels over plain HTTP — the panel/playlist
+    /// address, the stream addresses the panel hands out, or playlist entries (show the
+    /// unencrypted warning; [`Session::insecure_reason`] says which).
     pub fn is_insecure(&self) -> bool {
+        self.insecure.is_some()
+    }
+
+    /// Why the account counts as unencrypted, if it does (SR-12).
+    pub fn insecure_reason(&self) -> Option<InsecureReason> {
         self.insecure
     }
 
@@ -585,21 +739,45 @@ impl Session {
         )
     }
 
-    async fn disk_put<T: Serialize>(&self, key: &str, value: &T, ttl: Duration) {
-        let Ok(bytes) = serde_json::to_vec(value) else {
-            return;
-        };
+    /// Queues a cache write on the store writer (serialised there, off the async
+    /// workers; not awaited). Failures only cost a later re-download.
+    fn disk_put<T: Serialize + Send + Sync + 'static>(
+        &self,
+        key: &str,
+        value: Arc<T>,
+        ttl: Duration,
+    ) {
         let key = key.to_owned();
         let profile = self.profile.id;
-        if let Err(e) = blocking(self.store(), move |s| {
+        drop(self.services.write("cache a response", move |s| {
+            let Ok(bytes) = serde_json::to_vec(&*value) else {
+                return Ok(());
+            };
             s.cache()
                 .put(CacheScope::Profile(profile), &key, &bytes, ttl)
                 .map(|_| ())
+        }));
+    }
+
+    /// Reads and decodes a disk-cache entry on the blocking pool: `(value, is_fresh)`.
+    async fn disk_get<T>(&self, key: &str) -> Option<(T, bool)>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        let profile = self.profile.id;
+        let k = key.to_owned();
+        blocking(self.store(), move |s| {
+            Ok(s.cache()
+                .get_stale_ok(CacheScope::Profile(profile), &k)?
+                .and_then(|hit| {
+                    serde_json::from_slice::<T>(&hit.data)
+                        .ok()
+                        .map(|v| (v, hit.is_fresh))
+                }))
         })
         .await
-        {
-            tracing::debug!(error = %e, "cache write failed");
-        }
+        .ok()
+        .flatten()
     }
 
     /// Generic cached fetch (see the module docs). `fetch` may run twice (once now, once
@@ -620,37 +798,34 @@ impl Session {
         if let Some(v) = self.memo_get::<T>(key) {
             return Ok(v);
         }
-        let profile = self.profile.id;
-        let k = key.to_owned();
-        let disk = blocking(self.store(), move |s| {
-            s.cache().get_stale_ok(CacheScope::Profile(profile), &k)
-        })
-        .await
-        .ok()
-        .flatten();
-        let stale = match disk {
-            Some(hit) => match serde_json::from_slice::<T>(&hit.data) {
-                Ok(v) if hit.is_fresh => {
-                    let v = Arc::new(v);
-                    self.memo_put(key, Arc::clone(&v), ttl);
-                    return Ok(v);
-                }
-                Ok(v) => Some(Arc::new(v)),
-                Err(_) => None,
-            },
+        let stale = match self.disk_get::<T>(key).await {
+            Some((v, true)) => {
+                let v = Arc::new(v);
+                self.memo_put(key, Arc::clone(&v), ttl);
+                self.after_load(key, v.as_ref());
+                return Ok(v);
+            }
+            Some((v, false)) => Some(Arc::new(v)),
             None => None,
         };
         if let Some(v) = stale {
             // Stale-while-revalidate: answer now, refresh in the background.
             self.memo_put(key, Arc::clone(&v), Duration::from_secs(60));
-            if !self.is_offline() {
+            self.after_load(key, v.as_ref());
+            if !self.is_offline() && !self.is_closed() {
                 let this = Arc::clone(self);
                 let key = key.to_owned();
                 self.services.spawn(async move {
+                    // The profile may have been switched meanwhile.
+                    if this.is_closed() {
+                        return;
+                    }
                     match fetch().await {
                         Ok(fresh) => {
-                            this.disk_put(&key, &fresh, ttl).await;
-                            this.memo_put(&key, Arc::new(fresh), ttl);
+                            let fresh = Arc::new(fresh);
+                            this.disk_put(&key, Arc::clone(&fresh), ttl);
+                            this.memo_put(&key, Arc::clone(&fresh), ttl);
+                            this.after_load(&key, fresh.as_ref());
                             this.services.egui().request_repaint();
                         }
                         Err(e) => tracing::debug!(error = %e, "background refresh failed"),
@@ -659,10 +834,13 @@ impl Session {
             }
             return Ok(v);
         }
-        let fresh = fetch().await?;
-        self.disk_put(key, &fresh, ttl).await;
-        let fresh = Arc::new(fresh);
+        if self.is_closed() {
+            return Err(AppError::Cancelled);
+        }
+        let fresh = Arc::new(fetch().await?);
+        self.disk_put(key, Arc::clone(&fresh), ttl);
         self.memo_put(key, Arc::clone(&fresh), ttl);
+        self.after_load(key, fresh.as_ref());
         Ok(fresh)
     }
 
@@ -676,32 +854,31 @@ impl Session {
         if let Some(v) = self.memo_get::<T>(key) {
             return Some(v);
         }
-        let profile = self.profile.id;
-        let k = key.to_owned();
-        let hit = blocking(self.store(), move |s| {
-            s.cache().get_stale_ok(CacheScope::Profile(profile), &k)
-        })
-        .await
-        .ok()
-        .flatten()?;
-        let v = Arc::new(serde_json::from_slice::<T>(&hit.data).ok()?);
+        let (v, _) = self.disk_get::<T>(key).await?;
+        let v = Arc::new(v);
         self.memo_put(key, Arc::clone(&v), Duration::from_secs(60));
+        self.after_load(key, v.as_ref());
         Some(v)
     }
 
     /// Drops every cached response of this profile (memory, disk, EPG). The next calls
-    /// hit the provider.
+    /// hit the provider. Await it **before** reopening the profile
+    /// (`SessionManager::reopen_fresh` does both in order).
     pub async fn refresh(&self) {
         self.memo
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
-        self.epg.clear();
+        *self.live.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        self.ext.clear_rows();
         let profile = self.profile.id;
-        let _ = blocking(self.store(), move |s| {
-            s.cache().invalidate_profile(profile).map(|_| ())
-        })
-        .await;
+        // On the writer: after every cache write queued before it.
+        let _ = self
+            .services
+            .write("clear saved provider data", move |s| {
+                s.cache().invalidate_profile(profile).map(|_| ())
+            })
+            .await;
     }
 
     fn client(&self) -> AppResult<Arc<Client>> {
@@ -715,15 +892,13 @@ impl Session {
     // ---------------------------------------------------------------------------------
 
     /// All live channels and categories (Xtream "All" list filtered locally, or the M3U
-    /// playlist's live entries).
+    /// playlist's live entries). Rebuilt only when the underlying lists change (a
+    /// background refresh, [`Session::refresh`]), off the async workers.
     ///
     /// # Errors
     ///
     /// Provider/network errors (with no cached copy).
     pub async fn live_catalog(self: &Arc<Self>) -> AppResult<Arc<LiveCatalog>> {
-        if let Some(c) = self.memo_get::<LiveCatalog>("live_catalog") {
-            return Ok(c);
-        }
         let catalog = match &self.source {
             Source::Xtream { .. } => {
                 let client = self.client()?;
@@ -735,26 +910,55 @@ impl Session {
                     })
                     .await?
                 };
-                let streams = self
+                let streams: Arc<Vec<LiveStream>> = self
                     .cached("xt:live_streams:all", LIST_TTL, move || {
                         let client = Arc::clone(&client);
                         async move { Ok(client.live_streams(None).await?.items) }
                     })
                     .await?;
-                LiveCatalog::from_xtream(&cats, &streams)
+                let sources = (Arc::as_ptr(&cats) as usize, Arc::as_ptr(&streams) as usize);
+                if let Some(c) = self.live_memo(sources) {
+                    return Ok(c);
+                }
+                let built = cpu(move || LiveCatalog::from_xtream(&cats, &streams)).await?;
+                (Arc::new(built), sources)
             }
             Source::M3u { .. } => {
                 let playlist = self.playlist().ok_or(AppError::Cancelled)?;
-                LiveCatalog::from_playlist(&playlist)
+                let sources = (Arc::as_ptr(&playlist) as usize, 0);
+                if let Some(c) = self.live_memo(sources) {
+                    return Ok(c);
+                }
+                let built = cpu(move || LiveCatalog::from_playlist(&playlist)).await?;
+                (Arc::new(built), sources)
             }
         };
-        let catalog = Arc::new(catalog);
-        self.memo_put(
-            "live_catalog",
-            Arc::clone(&catalog),
-            Duration::from_secs(60),
-        );
+        let (catalog, sources) = catalog;
+        self.note_live_catalog(&catalog);
+        *self.live.lock().unwrap_or_else(PoisonError::into_inner) = Some(LiveMemo {
+            sources,
+            catalog: Arc::clone(&catalog),
+        });
         Ok(catalog)
+    }
+
+    fn live_memo(&self, sources: (usize, usize)) -> Option<Arc<LiveCatalog>> {
+        self.live
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|m| m.sources == sources)
+            .map(|m| Arc::clone(&m.catalog))
+    }
+
+    /// The live catalogue built last (no I/O; `None` before the first
+    /// [`Session::live_catalog`]).
+    pub fn last_live_catalog(&self) -> Option<Arc<LiveCatalog>> {
+        self.live
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|m| Arc::clone(&m.catalog))
     }
 
     /// VOD categories (Xtream).
@@ -875,31 +1079,8 @@ impl Session {
         Ok(out)
     }
 
-    /// Non-blocking EPG lookup for a channel (schedules a background fetch when needed).
-    pub fn epg(self: &Arc<Self>, channel: &LiveChannel) -> EpgState {
-        let (state, fetch) = self.epg.lookup(&channel.key);
-        if fetch {
-            let this = Arc::clone(self);
-            let channel = channel.clone();
-            self.services.spawn(async move {
-                let permits = Arc::clone(&this.epg.permits);
-                let Ok(_permit) = permits.acquire_owned().await else {
-                    return;
-                };
-                match this.fetch_epg(&channel).await {
-                    Ok(list) => this.epg.put(&channel.key, list),
-                    Err(e) => {
-                        tracing::debug!(error = %e, "EPG fetch failed");
-                        this.epg.fail(&channel.key);
-                    }
-                }
-                this.services.egui().request_repaint();
-            });
-        }
-        state
-    }
-
-    /// Now/next for a channel at `now` (non-blocking, see [`Session::epg`]).
+    /// Now/next for a channel at `now` (non-blocking, see [`Session::epg`]: one bounded
+    /// cache and request queue shared with the Guide).
     pub fn now_next(
         self: &Arc<Self>,
         channel: &LiveChannel,
@@ -914,45 +1095,6 @@ impl Session {
             None => (None, None),
         };
         (state, n, x)
-    }
-
-    async fn fetch_epg(self: &Arc<Self>, channel: &LiveChannel) -> AppResult<Vec<Programme>> {
-        match (&self.source, &channel.source) {
-            (Source::Xtream { client, .. }, ChannelSource::Xtream { stream_id }) => {
-                let list = client.short_epg(*stream_id, Some(6)).await?;
-                Ok(list.items.iter().map(Programme::from_listing).collect())
-            }
-            _ => {
-                let Some(epg_id) = channel.epg_id.as_deref() else {
-                    return Ok(Vec::new());
-                };
-                let Some(xmltv) = self.xmltv().await else {
-                    return Ok(Vec::new());
-                };
-                let now = Utc::now();
-                Ok(xmltv
-                    .programmes_for(epg_id)
-                    .iter()
-                    .filter(|p| {
-                        p.stop
-                            .is_none_or(|s| s > now - opensmarters_core::chrono::Duration::hours(1))
-                    })
-                    .take(8)
-                    .map(|p| Programme {
-                        title: crate::ui::text::cap(p.title(None), 160).into_owned(),
-                        description: crate::ui::text::cap_paragraph(
-                            p.description(None).unwrap_or_default(),
-                            1200,
-                        ),
-                        start: p.start,
-                        stop: p
-                            .stop
-                            .unwrap_or(p.start + opensmarters_core::chrono::Duration::minutes(30)),
-                        has_archive: false,
-                    })
-                    .collect())
-            }
-        }
     }
 
     /// The profile's XMLTV guide (EPG URL override, else the M3U `url-tvg`), downloaded
@@ -984,12 +1126,14 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// The stream URL was rejected (e.g. an M3U entry with a `file:` URL).
+    /// [`AppError::Locked`] when any of the channel's categories is locked (parental
+    /// control); the stream URL was rejected (e.g. an M3U entry with a `file:` URL).
     pub fn live_request(
         &self,
         channel: &LiveChannel,
         zap: Option<ZapContext>,
     ) -> AppResult<PlaybackRequest> {
+        self.check_unlocked(ContentKind::Live, &channel.key, Some(&channel.categories))?;
         let (url, headers) = match (&self.source, &channel.source) {
             (Source::Xtream { urls, .. }, ChannelSource::Xtream { stream_id }) => {
                 let url = urls.live(*stream_id, self.live_container());
@@ -1042,7 +1186,9 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Not an Xtream account, or the URL was rejected.
+    /// [`AppError::Locked`] when the film is in a locked category, or its categories
+    /// are not known yet while a PIN is set (see [`locks`]); not an Xtream account, or
+    /// the URL was rejected.
     pub fn movie_request(
         &self,
         stream_id: u64,
@@ -1055,6 +1201,7 @@ impl Session {
         let Source::Xtream { urls, .. } = &self.source else {
             return Err(AppError::msg("Movies need an Xtream Codes account."));
         };
+        self.check_unlocked(ContentKind::Movie, &stream_id.to_string(), None)?;
         let url = urls.movie(stream_id, container_extension);
         Ok(PlaybackRequest {
             kind: MediaKind::Movie,
@@ -1077,7 +1224,9 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Not an Xtream account, or the URL was rejected.
+    /// [`AppError::Locked`] when the series is in a locked category (or its categories
+    /// are not known yet while a PIN is set); not an Xtream account, or the URL was
+    /// rejected.
     pub fn episode_request(
         &self,
         series_id: u64,
@@ -1089,6 +1238,7 @@ impl Session {
         let Source::Xtream { urls, .. } = &self.source else {
             return Err(AppError::msg("Series need an Xtream Codes account."));
         };
+        self.check_unlocked(ContentKind::Series, &series_id.to_string(), None)?;
         let url = urls.episode(episode.id, episode.container_extension.as_deref());
         let se = match (episode.season, episode.episode_num) {
             (Some(s), Some(e)) => format!("S{s} · E{e}"),
@@ -1125,39 +1275,20 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Not an Xtream channel, or the URL was rejected.
+    /// [`AppError::Locked`] when any of the channel's categories is locked; not an
+    /// Xtream channel, or the URL was rejected.
     pub fn catchup_request(
         &self,
         channel: &LiveChannel,
         programme: &ArchiveProgramme,
         resume_from: Option<f64>,
     ) -> AppResult<PlaybackRequest> {
-        let (Source::Xtream { urls, .. }, Some(stream_id)) = (&self.source, channel.stream_id())
-        else {
-            return Err(AppError::msg("Catch-up needs an Xtream Codes account."));
-        };
-        let url = urls.timeshift(
-            stream_id,
+        self.catchup_request_with(
+            channel,
             programme,
-            core_timeshift(self.profile.settings.timeshift_format),
-            self.live_container(),
-        );
-        Ok(PlaybackRequest {
-            kind: MediaKind::Catchup,
-            headers: stream_headers(url.as_str(), &self.user_agent, None, None),
-            url: PlayableUrl::parse(url.as_str())?,
-            title: crate::ui::text::cap(&programme.title, 160).into_owned(),
-            subtitle: Some(channel.name.clone()),
+            self.profile.settings.timeshift_format,
             resume_from,
-            item: PlaybackItem::Catchup {
-                stream_id,
-                start: programme.start.timestamp(),
-                duration_minutes: programme.duration_minutes(),
-            },
-            artwork: self.safe_url(channel.logo.as_deref()),
-            zap: None,
-            duration_hint: Some(f64::from(programme.duration_minutes()) * 60.0),
-        })
+        )
     }
 
     /// Rebuilds a request from a stored resume point (Continue watching).
@@ -1234,8 +1365,8 @@ impl Session {
             .is_some_and(|s| s.contains(id))
     }
 
-    /// The favourite ids of `kind`.
-    pub fn favourite_ids(&self, kind: ContentKind) -> HashSet<String> {
+    /// The favourite ids of `kind` (a shared snapshot: cheap, no copy of the set).
+    pub fn favourites(&self, kind: ContentKind) -> Arc<HashSet<String>> {
         self.favourites
             .read()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1244,8 +1375,34 @@ impl Session {
             .unwrap_or_default()
     }
 
-    /// Toggles a favourite (updated in memory at once, persisted in the background).
-    /// Returns the new state.
+    /// How many favourites of `kind` there are (no copy).
+    pub fn favourites_len(&self, kind: ContentKind) -> usize {
+        self.favourites
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&kind)
+            .map_or(0, |s| s.len())
+    }
+
+    /// Bumped on every favourites change (toggle, reload): compare it to know when a
+    /// list filtered by favourites must be rebuilt (the count alone misses a remove +
+    /// add).
+    pub fn favourites_generation(&self) -> u64 {
+        self.favourites_generation.load(Ordering::Relaxed)
+    }
+
+    /// The favourite ids of `kind`, **copied**.
+    ///
+    /// Kept for compatibility: prefer [`Session::favourites`] (shared, no copy),
+    /// [`Session::favourites_len`], [`Session::is_favourite`] and
+    /// [`Session::favourites_generation`] in code that runs every frame. To be removed
+    /// once Live TV and Home use them.
+    pub fn favourite_ids(&self, kind: ContentKind) -> HashSet<String> {
+        self.favourites(kind).as_ref().clone()
+    }
+
+    /// Toggles a favourite (updated in memory at once, persisted in the background, in
+    /// order). Returns the new state.
     pub fn toggle_favourite(
         &self,
         kind: ContentKind,
@@ -1257,7 +1414,7 @@ impl Session {
                 .favourites
                 .write()
                 .unwrap_or_else(PoisonError::into_inner);
-            let set = favs.entry(kind).or_default();
+            let set = Arc::make_mut(favs.entry(kind).or_default());
             if set.remove(id) {
                 false
             } else {
@@ -1265,6 +1422,7 @@ impl Session {
                 true
             }
         };
+        self.favourites_generation.fetch_add(1, Ordering::Relaxed);
         snapshot.icon_url = self.safe_url(snapshot.icon_url.as_deref());
         let profile = self.profile.id;
         let id = id.to_owned();
@@ -1283,24 +1441,28 @@ impl Session {
     /// Re-reads favourites from the store (after another screen edited them).
     pub async fn reload_favourites(&self) {
         let profile = self.profile.id;
-        if let Ok(f) = blocking(self.store(), move |s| {
-            let mut out = HashMap::new();
-            for kind in ContentKind::ALL {
-                out.insert(kind, s.favourites().ids(profile, kind)?);
-            }
-            Ok(out)
-        })
-        .await
+        // Behind the writes queued before it (a toggle just before a reload is seen).
+        if let Ok(f) = self
+            .services
+            .write("read favourites", move |s| {
+                let mut out = HashMap::new();
+                for kind in ContentKind::ALL {
+                    out.insert(kind, Arc::new(s.favourites().ids(profile, kind)?));
+                }
+                Ok(out)
+            })
+            .await
         {
             *self
                 .favourites
                 .write()
                 .unwrap_or_else(PoisonError::into_inner) = f;
+            self.favourites_generation.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     // ---------------------------------------------------------------------------------
-    // Parental control
+    // Parental control (the rest is in `session/locks.rs`)
     // ---------------------------------------------------------------------------------
 
     /// True if a parental PIN is set (locks are active).
@@ -1311,91 +1473,87 @@ impl Session {
             .pin_set
     }
 
-    /// True if a category needs the PIN (manual lock, or a keyword match unless manually
-    /// unlocked), and has not been unlocked in this session.
-    pub fn is_category_locked(&self, kind: ContentKind, id: &CategoryId, name: &str) -> bool {
-        let p = self.parental.read().unwrap_or_else(PoisonError::into_inner);
-        if !p.pin_set || p.unlocked.contains(&(kind, id.as_str().to_owned())) {
-            return false;
-        }
-        match p.locks.get(&kind).and_then(|m| m.get(id.as_str())) {
-            Some(CategoryLock::Locked) => true,
-            Some(CategoryLock::Unlocked) => false,
-            None => p.matcher.as_ref().is_some_and(|m| m.is_match(name)),
-        }
-    }
-
-    /// The selection is locked (All/Favourites never are).
-    pub fn is_selection_locked(
-        &self,
-        kind: ContentKind,
-        sel: &CategorySelection,
-        name: &str,
-    ) -> bool {
-        match sel {
-            CategorySelection::Category(id) => self.is_category_locked(kind, id, name),
-            _ => false,
-        }
-    }
-
-    /// Unlocks a category for the rest of this session (after a correct PIN).
-    pub fn unlock_category(&self, kind: ContentKind, id: &CategoryId) {
-        self.parental
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .unlocked
-            .insert((kind, id.as_str().to_owned()));
-    }
-
     /// Re-reads the PIN state, keywords and locks (after Settings → Parental changes).
+    /// When a PIN was just set, the image disk cache is wiped (artwork cached before
+    /// could otherwise be browsed in Explorer, SR-13); artwork of newly locked categories
+    /// is kept in memory only from now on.
     pub async fn reload_parental(&self) {
-        if let Ok(mut fresh) = load_parental(self.store(), self.profile.id).await {
-            let mut p = self
-                .parental
-                .write()
-                .unwrap_or_else(PoisonError::into_inner);
-            fresh.unlocked = std::mem::take(&mut p.unlocked);
-            *p = fresh;
+        // Behind the parental writes queued before it.
+        let profile = self.profile.id;
+        let fresh = self
+            .services
+            .write("read parental settings", move |s| read_parental(s, profile))
+            .await;
+        if let Ok(fresh) = fresh {
+            let pin_now_set = {
+                let mut p = self
+                    .parental
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let newly = fresh.pin_set && !p.pin_set;
+                *p = fresh;
+                newly
+            };
+            if pin_now_set {
+                self.services.images.clear_image_disk_cache();
+            }
+            self.rescan_private_art();
         }
     }
+}
+
+fn read_parental(
+    s: &Store,
+    profile: ProfileId,
+) -> Result<ParentalState, opensmarters_store::StoreError> {
+    let par = s.parental();
+    let pin_set = par.is_pin_set()?;
+    let keywords = par.keywords()?;
+    let mut locks = HashMap::new();
+    for kind in ContentKind::ALL {
+        locks.insert(kind, par.category_locks(profile, kind)?);
+    }
+    Ok(ParentalState {
+        pin_set,
+        matcher: Some(KeywordMatcher::new(keywords)),
+        locks,
+        pin_len: super::parental::pin_length(s),
+    })
 }
 
 async fn load_parental(store: &Arc<Store>, profile: ProfileId) -> AppResult<ParentalState> {
-    blocking(store, move |s| {
-        let par = s.parental();
-        let pin_set = par.is_pin_set()?;
-        let keywords = par.keywords()?;
-        let mut locks = HashMap::new();
-        for kind in ContentKind::ALL {
-            locks.insert(kind, par.category_locks(profile, kind)?);
-        }
-        Ok(ParentalState {
-            pin_set,
-            matcher: Some(KeywordMatcher::new(keywords)),
-            locks,
-            unlocked: HashSet::new(),
-            pin_len: super::parental::pin_length(s),
-        })
+    blocking(store, move |s| read_parental(s, profile)).await
+}
+
+async fn parse_m3u(bytes: Vec<u8>) -> AppResult<(Playlist, Vec<u8>)> {
+    cpu(move || {
+        m3u::parse(&bytes, &M3uLimits::default())
+            .map(|p| (p, bytes))
+            .map_err(AppError::from)
     })
-    .await
+    .await?
 }
 
 async fn load_m3u_url(
-    store: &Arc<Store>,
+    services: &Services,
     profile: ProfileId,
     http: &HttpClient,
     url: &SecretString,
 ) -> AppResult<(Playlist, bool)> {
-    let cached = blocking(store, move |s| {
+    let cached = blocking(&services.store, move |s| {
         s.cache()
             .get_stale_ok(CacheScope::Profile(profile), "m3u:playlist")
     })
     .await
     .ok()
     .flatten();
-    if let Some(hit) = &cached
-        && hit.is_fresh
-        && let Ok(p) = m3u::parse(&hit.data, &M3uLimits::default())
+    let (cached_data, cached_fresh) = match cached {
+        Some(hit) => (Some(hit.data.to_vec()), hit.is_fresh),
+        None => (None, false),
+    };
+    if cached_fresh
+        && let Some(data) = cached_data.clone()
+        && let Ok((p, _)) = parse_m3u(data).await
     {
         return Ok((p, false));
     }
@@ -1403,8 +1561,8 @@ async fn load_m3u_url(
         .map_err(|_| AppError::msg("The playlist address isn't a valid web address."))?;
     match http.get_bytes(&parsed_url).await {
         Ok(bytes) => {
-            let playlist = m3u::parse(&bytes, &M3uLimits::default())?;
-            let _ = blocking(store, move |s| {
+            let (playlist, bytes) = parse_m3u(bytes).await?;
+            drop(services.write("cache the playlist", move |s| {
                 s.cache()
                     .put(
                         CacheScope::Profile(profile),
@@ -1413,13 +1571,12 @@ async fn load_m3u_url(
                         LIST_TTL,
                     )
                     .map(|_| ())
-            })
-            .await;
+            }));
             Ok((playlist, false))
         }
         Err(e) => {
-            if let Some(hit) = cached
-                && let Ok(p) = m3u::parse(&hit.data, &M3uLimits::default())
+            if let Some(data) = cached_data
+                && let Ok((p, _)) = parse_m3u(data).await
             {
                 tracing::warn!("playlist download failed; using the cached copy");
                 return Ok((p, true));

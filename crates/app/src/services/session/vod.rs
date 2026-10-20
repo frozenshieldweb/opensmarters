@@ -154,40 +154,45 @@ impl Session {
                     .map(|d| d as f64)
             })
             .filter(|d| *d > 0.0);
-        blocking(self.store(), move |s| {
-            let pb = s.playback();
-            if watched {
-                let existing = pb.get(profile, PlaybackKind::Episode, &id)?;
-                let duration = existing.as_ref().and_then(|p| p.duration_secs).or(hint);
-                let pos = duration
-                    .unwrap_or_else(|| existing.as_ref().map_or(1.0, |p| p.position_secs.max(1.0)));
-                pb.record_progress(
-                    profile,
-                    PlaybackKind::Episode,
-                    &id,
-                    pos,
-                    duration,
-                    &snapshot,
-                )?;
-                pb.mark_finished(profile, PlaybackKind::Episode, &id)?;
-            } else {
-                pb.remove(profile, PlaybackKind::Episode, &id)?;
-            }
-            Ok(())
-        })
-        .await
+        // A write: in order with progress saves and other writes.
+        self.services()
+            .write("mark an episode watched", move |s| {
+                let pb = s.playback();
+                if watched {
+                    let existing = pb.get(profile, PlaybackKind::Episode, &id)?;
+                    let duration = existing.as_ref().and_then(|p| p.duration_secs).or(hint);
+                    let pos = duration.unwrap_or_else(|| {
+                        existing.as_ref().map_or(1.0, |p| p.position_secs.max(1.0))
+                    });
+                    pb.record_progress(
+                        profile,
+                        PlaybackKind::Episode,
+                        &id,
+                        pos,
+                        duration,
+                        &snapshot,
+                    )?;
+                    pb.mark_finished(profile, PlaybackKind::Episode, &id)?;
+                } else {
+                    pb.remove(profile, PlaybackKind::Episode, &id)?;
+                }
+                Ok(())
+            })
+            .await
     }
 
     /// The category last browsed in Movies (`ContentKind::Movie`) or Series.
     pub async fn last_vod_category(&self, kind: ContentKind) -> Option<CategoryId> {
         let key = format!("{}:{}", self.profile_id(), kind_key(kind));
-        blocking(self.store(), move |s| {
-            Ok(s.settings().get(&LAST_CATEGORY)?.remove(&key))
-        })
-        .await
-        .ok()
-        .flatten()
-        .map(CategoryId::from)
+        // Read behind any queued `remember_vod_category` (FIFO writer).
+        self.services()
+            .write("read the last category", move |s| {
+                Ok(s.settings().get(&LAST_CATEGORY)?.remove(&key))
+            })
+            .await
+            .ok()
+            .flatten()
+            .map(CategoryId::from)
     }
 
     /// Remembers the browsed category (in the background).

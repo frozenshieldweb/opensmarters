@@ -82,7 +82,7 @@ impl SettingsPageUi for AppearancePage {
                 Segmented::new(
                     Id::unique("settings.motion"),
                     &["Follow Windows", "Reduced", "Full"],
-                    380.0,
+                    420.0,
                 )
                 .show(ui, &mut sel);
                 if sel != motion_index(cx.prefs.motion_follow_system, cx.prefs.reduced_motion) {

@@ -31,9 +31,12 @@ pub struct AboutPage {
 
 fn component_rows(ui: &mut Ui, list: &[Component]) {
     for c in list {
-        SettingRow::new(c.name)
-            .description(c.role)
-            .show(ui, |ui| value_label(ui, c.licence, color::TEXT_2));
+        // Focusable so the list scrolls with the keyboard / a remote.
+        super::readable(ui, Id::unique(("settings.about.licence", c.name)), |ui| {
+            SettingRow::new(c.name)
+                .description(c.role)
+                .show(ui, |ui| value_label(ui, c.licence, color::TEXT_2));
+        });
     }
 }
 
@@ -81,11 +84,13 @@ impl SettingsPageUi for AboutPage {
             .description("You can study, change and share it")
             .show(ui, |ui| value_label(ui, "GPL-3.0-or-later", color::TEXT_2));
         ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new(GPL_NOTICE)
-                .font(font::caption())
-                .color(color::TEXT_3),
-        );
+        super::readable(ui, Id::unique("settings.about.gpl"), |ui| {
+            ui.label(
+                egui::RichText::new(GPL_NOTICE)
+                    .font(font::caption())
+                    .color(color::TEXT_3),
+            );
+        });
         ui.add_space(16.0);
         SettingRow::new("Source code")
             .description(SOURCE_URL)

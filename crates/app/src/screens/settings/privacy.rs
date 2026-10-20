@@ -155,26 +155,28 @@ impl PrivacyPage {
         ui.add_space(8.0);
         let busy = self.check.is_loading();
         let mut submit = false;
-        ui.horizontal(|ui| {
+        ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
-            let r = TextField::new(
-                Id::unique("settings.privacy.tmdb.key"),
-                if state.has_key {
-                    "Replace the key"
-                } else {
-                    "TMDB API key (v3)"
-                },
-            )
-            .password(true)
-            .placeholder("32 letters and digits")
-            .width(360.0)
-            .char_limit(128)
-            .error(self.key_error.as_deref())
-            .show(ui, &mut self.key);
-            if r.changed {
-                self.key_error = None;
-            }
-            submit |= r.submitted;
+            ui.vertical(|ui| {
+                let r = TextField::new(
+                    Id::unique("settings.privacy.tmdb.key"),
+                    if state.has_key {
+                        "Replace the key"
+                    } else {
+                        "TMDB API key (v3)"
+                    },
+                )
+                .password(true)
+                .placeholder("32 letters and digits")
+                .width(360.0)
+                .char_limit(128)
+                .error(self.key_error.as_deref())
+                .show(ui, &mut self.key);
+                if r.changed {
+                    self.key_error = None;
+                }
+                submit |= r.submitted;
+            });
             ui.vertical(|ui| {
                 ui.add_space(24.0);
                 submit |= Button::secondary(if busy {
@@ -239,14 +241,14 @@ impl SettingsPageUi for PrivacyPage {
         );
         let w = ui.available_width();
         let data = cx.services.paths.data_dir.as_ref().map_or_else(
-            || "nowhere on disk (this is a temporary session)".to_owned(),
-            |p| p.display().to_string(),
+            || "is kept in memory only: this is a temporary session".to_owned(),
+            |p| format!("is in {}", p.display()),
         );
         let logs = cx.services.paths.log_dir().map_or_else(
             || "not written in this temporary session".to_owned(),
             |p| p.display().to_string(),
         );
-        for (glyph_kind, lead, body) in [
+        for (i, (glyph_kind, lead, body)) in [
             (
                 CalloutKind::Success,
                 "No tracking, ever.",
@@ -268,7 +270,7 @@ impl SettingsPageUi for PrivacyPage {
                 "Everything else",
                 format!(
                     "(profiles without passwords, favourites, watch history, settings, and a \
-                     cache of your provider's lists, encrypted) is in {data}."
+                     cache of your provider's lists, encrypted) {data}."
                 ),
             ),
             (
@@ -296,8 +298,13 @@ impl SettingsPageUi for PrivacyPage {
                  always on."
                     .to_owned(),
             ),
-        ] {
-            Callout::new(glyph_kind, lead, body).width(w).show(ui);
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            super::readable(ui, Id::unique(("settings.privacy.fact", i)), |ui| {
+                Callout::new(glyph_kind, lead, body).width(w).show(ui);
+            });
             ui.add_space(8.0);
         }
         ui.add_space(24.0);

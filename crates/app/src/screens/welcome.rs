@@ -139,6 +139,9 @@ impl Screen for WelcomeScreen {
         let h_id = Id::unique("welcome.content-h");
         let last_h: f32 = ui.ctx().data(|d| d.get_temp(h_id)).unwrap_or(640.0);
         let busy = self.file_rx.is_some() || self.import.is_loading();
+        // Short windows (TV mode is ≈ 620 pt tall): smaller headline, tighter spacing.
+        let compact = rect.height() < 760.0;
+        let gap = if compact { 0.6 } else { 1.0 };
         ScrollArea::vertical()
             .id_salt("welcome.scroll")
             .auto_shrink([false, false])
@@ -154,16 +157,16 @@ impl Screen for WelcomeScreen {
                     egui::Sense::hover(),
                 );
                 assets::paint_exact(ui, ui.painter(), Asset::Wordmark, wr, Color32::WHITE);
-                ui.add_space(32.0);
+                ui.add_space(32.0 * gap);
                 let g = ui.painter().layout(
                     "A quiet place\nfor your channels.".to_owned(),
-                    font::hero(),
+                    if compact { font::display() } else { font::hero() },
                     color::TEXT,
                     col_w + 200.0,
                 );
                 let (hr, _) = ui.allocate_exact_size(g.size(), egui::Sense::hover());
                 ui.painter().galley(hr.min, g, color::TEXT);
-                ui.add_space(28.0);
+                ui.add_space(28.0 * gap);
                 for (glyph, line) in POINTS {
                     let job = text::job(line, font::body(), color::TEXT_2, col_w - 40.0, 3);
                     let gal = ui.painter().layout_job(job);
@@ -177,13 +180,13 @@ impl Screen for WelcomeScreen {
                         glyph,
                         24.0,
                         Style::Regular,
-                        color::ACCENT,
+                        color::TEXT_2,
                     );
                     ui.painter()
                         .galley(pos2(r.left() + 40.0, r.top()), gal, color::TEXT_2);
-                    ui.add_space(16.0);
+                    ui.add_space(16.0 * gap);
                 }
-                ui.add_space(20.0);
+                ui.add_space(20.0 * gap);
                 focus::scope(ui, Id::unique("welcome.actions"), |ui| {
                     if Button::primary("Add your account")
                         .icon(icons::USER_PLUS)
@@ -219,7 +222,7 @@ impl Screen for WelcomeScreen {
                 ui.painter().text(
                     cr.left_center(),
                     Align2::LEFT_CENTER,
-                    "Free and open source (GPL-3.0). You need an IPTV subscription to watch.",
+                    "Free and open source (GPL-3.0-or-later). You need an IPTV subscription to watch.",
                     font::caption(),
                     color::TEXT_3,
                 );

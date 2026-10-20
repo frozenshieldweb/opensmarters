@@ -38,6 +38,7 @@ use opensmarters_store::{
 use super::pin_flow::{PinSetup, SetupOutcome};
 use super::{SettingsPageUi, page_heading, section, value_label};
 use crate::error::AppError;
+use crate::focus;
 use crate::screens::AppCtx;
 use crate::services::parental::{
     MAX_PIN, MIN_PIN, ResetLimiter, ResetProof, lockout_text, pin_length, set_pin_length,
@@ -142,6 +143,72 @@ fn load_data(store: &Store, profile: ProfileId) -> Result<ParentalData, AppError
     })
 }
 
+/// The per-category Auto / Lock / Allow control: a segmented control whose default
+/// ("Auto") selection is a quiet `surface-4` pill, so only overrides get the cream fill and
+/// stand out in a long list. Returns true if the selection changed.
+fn lock_choice(ui: &mut Ui, id: Id, selected: &mut usize) -> bool {
+    use eframe::egui::{Align2, CornerRadius, Rect, Sense, pos2, vec2};
+
+    use crate::focus::FocusOpts;
+    use crate::ui::{motion, paint, theme::radius};
+
+    const OPTIONS: [&str; 3] = ["Auto", "Lock", "Allow"];
+    let (rect, _) = ui.allocate_exact_size(vec2(252.0, 44.0), Sense::hover());
+    let painter = ui.painter().clone();
+    painter.rect_filled(rect, CornerRadius::same(radius::FULL), color::SURFACE_2);
+    let inner = rect.shrink(4.0);
+    let seg_w = inner.width() / OPTIONS.len() as f32;
+    let pos = motion::animate_value(
+        ui.ctx(),
+        id.with("slide"),
+        *selected as f32,
+        crate::ui::theme::motion::BASE,
+    );
+    let pill = Rect::from_min_size(
+        pos2(inner.left() + seg_w * pos, inner.top()),
+        vec2(seg_w, inner.height()),
+    );
+    let overridden = *selected != 0;
+    painter.rect_filled(
+        pill,
+        CornerRadius::same(radius::FULL),
+        if overridden {
+            color::CREAM
+        } else {
+            color::SURFACE_4
+        },
+    );
+    let mut changed = false;
+    for (i, label) in OPTIONS.iter().enumerate() {
+        let seg = Rect::from_min_size(
+            pos2(inner.left() + seg_w * i as f32, inner.top()),
+            vec2(seg_w, inner.height()),
+        );
+        let (_, f) = focus::focusable(ui, id.with(i), seg, FocusOpts::default());
+        if f.activated && *selected != i {
+            *selected = i;
+            changed = true;
+        }
+        let fg = match (i == *selected, overridden) {
+            (true, true) => color::TEXT_ON_ACCENT,
+            (true, false) => color::TEXT,
+            _ if f.focused => color::TEXT,
+            _ => color::TEXT_2,
+        };
+        painter.text(
+            seg.center(),
+            Align2::CENTER_CENTER,
+            *label,
+            font::button(),
+            fg,
+        );
+        if f.focused {
+            paint::focus_ring(&painter, seg, radius::FULL, 1.0);
+        }
+    }
+    changed
+}
+
 /// Lower-cases and trims like the store; `None` with a message if unusable.
 fn normalize_keyword(k: &str) -> Result<String, &'static str> {
     let k = k.trim().to_lowercase();
@@ -209,12 +276,14 @@ impl ParentalPage {
                 self.unlocked = Some(Some(pin));
                 self.setup = None;
                 self.after_change(cx);
+                focus::request(&cx.egui, Id::unique("settings.parental.change"));
             }
             Some(Job::Removed) => {
                 cx.toasts
-                    .success("Parental control is off. Your keywords and locks are kept.");
+                    .success("Parental control is off. Your words and locks are kept.");
                 self.unlocked = Some(None);
                 self.after_change(cx);
+                focus::request(&cx.egui, Id::unique("settings.parental.set"));
             }
             Some(Job::Refused(outcome)) => {
                 // The PIN changed elsewhere since the page was opened: ask again.
@@ -283,7 +352,12 @@ impl ParentalPage {
         let mut entered = None;
         ui.vertical_centered(|ui| {
             ui.add_space(8.0);
-            if let PinPadEvent::Submitted(pin) = setup.pad.show(ui, setup.flow.title()) {
+            let title = if setup.change && !setup.flow.is_confirming() {
+                "Choose a new PIN"
+            } else {
+                setup.flow.title()
+            };
+            if let PinPadEvent::Submitted(pin) = setup.pad.show(ui, title) {
                 entered = Some(pin);
             }
             ui.add_space(8.0);
@@ -354,7 +428,7 @@ impl ParentalPage {
             Callout::new(
                 CalloutKind::Success,
                 "On:",
-                "categories that match your keywords, or that you lock below, ask for the PIN.",
+                "categories with a locked word in their name, or that you lock below, ask for the PIN.",
             )
             .width(w)
             .show(ui);
@@ -626,7 +700,7 @@ impl ParentalPage {
                 .and_then(|m| m.get(c.id.as_str()))
                 .copied();
             let matched = self.matches.matches.get(i).cloned().flatten();
-            let status = match (lock, &matched) {
+            let mut status = match (lock, &matched) {
                 (Some(CategoryLock::Locked), _) => "Locked: always asks for the PIN".to_owned(),
                 (Some(CategoryLock::Unlocked), Some(_)) => {
                     "Allowed (a word matches, but you allowed it)".to_owned()
@@ -637,6 +711,19 @@ impl ParentalPage {
                 }
                 (None, None) => "Not locked".to_owned(),
             };
+            let would_lock = matches!(
+                (lock, &matched),
+                (Some(CategoryLock::Locked), _) | (None, Some(_))
+            );
+            if !data.status.is_set && would_lock {
+                let mut chars = status.chars();
+                let first = chars.next().map(|c| c.to_lowercase().to_string());
+                status = format!(
+                    "Once a PIN is set: {}{}",
+                    first.unwrap_or_default(),
+                    chars.as_str()
+                );
+            }
             let name = text::cap(&c.name, 80);
             let mut sel = match lock {
                 None => 0,
@@ -644,13 +731,11 @@ impl ParentalPage {
                 Some(CategoryLock::Unlocked) => 2,
             };
             SettingRow::new(&name).description(&status).show(ui, |ui| {
-                if Segmented::new(
+                if lock_choice(
+                    ui,
                     Id::unique(("settings.parental.lock", kind, c.id.as_str())),
-                    &["Auto", "Lock", "Allow"],
-                    252.0,
-                )
-                .show(ui, &mut sel)
-                {
+                    &mut sel,
+                ) {
                     let new = match sel {
                         1 => Some(CategoryLock::Locked),
                         2 => Some(CategoryLock::Unlocked),
@@ -904,14 +989,19 @@ impl SettingsPageUi for ParentalPage {
         }
         self.data.poll();
         self.poll_job(cx);
-        page_heading(
-            ui,
-            "Parental control",
-            Some(
-                "Lock adult categories behind a PIN. The PIN and the words apply to every \
-                 profile on this computer; category locks belong to this profile.",
-            ),
-        );
+        // Behind the PIN (or choosing one) the keypad needs the room, also in TV mode.
+        // (The selected section in the list says where we are.)
+        let keypad = self.setup.is_some() || self.unlocked.is_none();
+        if !keypad {
+            page_heading(
+                ui,
+                "Parental control",
+                Some(
+                    "Lock adult categories behind a PIN. The PIN and the words apply to every \
+                     profile on this computer; category locks belong to this profile.",
+                ),
+            );
+        }
         if self.setup.is_some() {
             self.setup_ui(cx, ui);
             return;
@@ -939,6 +1029,8 @@ impl SettingsPageUi for ParentalPage {
                     PinPromptResult::Verified(pin) => {
                         self.unlocked = Some(pin);
                         self.gate = None;
+                        // Continue in the page (the keypad disappears).
+                        focus::request(&cx.egui, Id::unique("settings.parental.change"));
                     }
                     PinPromptResult::Forgot => {
                         self.forgot = Some(Forgot {
@@ -962,7 +1054,7 @@ impl SettingsPageUi for ParentalPage {
         self.locks_section(cx, ui, &session, &mut data);
         ui.add_space(32.0);
         section(ui, "Good to know", None);
-        for (lead, body) in [
+        for (i, (lead, body)) in [
             (
                 "What the PIN protects:",
                 "locked categories (until you close the app), this page, adding, editing or \
@@ -979,10 +1071,14 @@ impl SettingsPageUi for ParentalPage {
                  guessing at the keyboard; someone who can delete the app's files can always \
                  start over.",
             ),
-        ] {
-            Callout::new(CalloutKind::Info, lead, body)
-                .width(ui.available_width())
-                .show(ui);
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let w = ui.available_width();
+            super::readable(ui, Id::unique(("settings.parental.note", i)), |ui| {
+                Callout::new(CalloutKind::Info, lead, body).width(w).show(ui);
+            });
             ui.add_space(8.0);
         }
         // Keep local edits (optimistic) until the next reload.

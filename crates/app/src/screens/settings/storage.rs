@@ -258,12 +258,9 @@ impl StoragePage {
 
     fn space_section(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui, u: &Usage) {
         section(ui, "Space used", None);
-        let cache_desc = format!(
-            "Your provider's lists, kept encrypted for faster starts and offline use ({} items)",
-            u.cache_entries
-        );
+        let cache_desc = "Your provider's lists, encrypted, for quick starts and offline use";
         SettingRow::new("Saved provider data")
-            .description(&cache_desc)
+            .description(cache_desc)
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
                 if Button::ghost("Clear")
@@ -285,7 +282,16 @@ impl StoragePage {
                         ))
                     });
                 }
-                value_label(ui, &human_bytes(u.cache_bytes), color::TEXT_2);
+                value_label(
+                    ui,
+                    &format!(
+                        "{} · {} list{}",
+                        human_bytes(u.cache_bytes),
+                        u.cache_entries,
+                        if u.cache_entries == 1 { "" } else { "s" }
+                    ),
+                    color::TEXT_2,
+                );
             });
         SettingRow::new("Cache limit")
             .description("The oldest saved lists are removed above this")

@@ -262,6 +262,19 @@ pub(crate) fn section(ui: &mut Ui, title: &str, description: Option<&str>) {
     ui.add_space(8.0);
 }
 
+/// Adds `add` as a focusable "reading stop": arrow keys can land on it (with the focus
+/// ring), so a page of text scrolls with the keyboard or a remote even where it has no
+/// controls. Activation does nothing.
+pub(crate) fn readable<R>(ui: &mut Ui, id: Id, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let r = ui.scope(add);
+    let rect = r.response.rect;
+    let (_, f) = focus::focusable(ui, id, rect, focus::FocusOpts::default());
+    if f.focused {
+        crate::ui::paint::focus_ring(ui.painter(), rect, crate::ui::theme::radius::SM, 1.0);
+    }
+    r.inner
+}
+
 /// A paragraph of body text (`text-2`).
 pub(crate) fn paragraph(ui: &mut Ui, text: &str) {
     ui.label(

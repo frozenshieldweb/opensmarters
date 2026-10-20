@@ -157,15 +157,19 @@ impl PinPrompt {
             return r;
         }
         let painter = ui.painter().clone();
-        let (ir, _) = ui.allocate_exact_size(vec2(96.0, 96.0), Sense::hover());
-        assets::paint_contain(
-            ui,
-            &painter,
-            Asset::Illustration(Illustration::ParentalLock),
-            ir,
-            Color32::WHITE,
-        );
-        ui.add_space(8.0);
+        // The lock illustration only when the window is tall enough (TV mode at 1080p is
+        // ≈ 620 pt tall: the keypad must fit).
+        if ui.ctx().content_rect().height() >= 760.0 {
+            let (ir, _) = ui.allocate_exact_size(vec2(96.0, 96.0), Sense::hover());
+            assets::paint_contain(
+                ui,
+                &painter,
+                Asset::Illustration(Illustration::ParentalLock),
+                ir,
+                Color32::WHITE,
+            );
+            ui.add_space(8.0);
+        }
         if let Some(e) = self.status.error() {
             ui.label(
                 egui::RichText::new(format!(

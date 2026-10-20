@@ -105,9 +105,10 @@ impl UrlPolicy {
 /// normalised form, so what mpv sees is exactly what was checked. The
 /// fragment (`#…`) is dropped because it means nothing to a stream.
 ///
-/// Local files can be played only through [`PlayableUrl::from_local_file`],
-/// which is meant for development and tests, and only on a player built with
-/// [`crate::PlayerConfig::allow_local_files`].
+/// Local files can be played only through [`PlayableUrl::from_owned_media`] (files the
+/// app saved itself, inside its recordings folder, checked by content) or
+/// [`PlayableUrl::from_local_file`], which is meant for development and tests and only
+/// works on a player built with [`crate::PlayerConfig::allow_local_files`].
 ///
 /// `Debug` is redacted, and there is deliberately no `Display`: stream URLs
 /// carry credentials.
@@ -116,6 +117,7 @@ pub struct PlayableUrl {
     url: String,
     scheme: String,
     local: bool,
+    owned: bool,
 }
 
 impl PlayableUrl {
@@ -162,6 +164,7 @@ impl PlayableUrl {
             url: out,
             scheme,
             local: false,
+            owned: false,
         })
     }
 
@@ -188,6 +191,49 @@ impl PlayableUrl {
             url: out,
             scheme: "file".to_owned(),
             local: true,
+            owned: false,
+        })
+    }
+
+    /// A media file the app saved itself (a download, a recording or a clip), for
+    /// playback on any player (no [`crate::PlayerConfig::allow_local_files`] needed).
+    ///
+    /// Checks, after resolving symbolic links: `root` is an absolute folder, `file` is a
+    /// regular file **inside** it, and the file's first bytes are a known audio/video
+    /// container ([`sniff_container`]): text playlists (M3U, PLS, EDL…) and unknown
+    /// data are refused, so a "film" that is really a playlist cannot make mpv open other
+    /// files or URLs.
+    ///
+    /// # Errors
+    /// [`ValidationError::BadLocalPath`] (not absolute, missing, not a file),
+    /// [`ValidationError::OutsideRoot`] or [`ValidationError::NotMedia`].
+    pub fn from_owned_media(root: &Path, file: &Path) -> Result<Self, ValidationError> {
+        if !root.is_absolute() || !file.is_absolute() {
+            return Err(ValidationError::BadLocalPath);
+        }
+        let root = std::fs::canonicalize(root).map_err(|_| ValidationError::BadLocalPath)?;
+        let canonical = std::fs::canonicalize(file).map_err(|_| ValidationError::BadLocalPath)?;
+        if !root.is_dir() || !canonical.is_file() {
+            return Err(ValidationError::BadLocalPath);
+        }
+        if !canonical.starts_with(&root) || canonical == root {
+            return Err(ValidationError::OutsideRoot);
+        }
+        let mut head = [0u8; SNIFF_BYTES];
+        let n = read_head(&canonical, &mut head).map_err(|_| ValidationError::BadLocalPath)?;
+        if sniff_container(&head[..n]).is_none() {
+            return Err(ValidationError::NotMedia);
+        }
+        let canonical = strip_verbatim_prefix(&canonical);
+        let url =
+            url::Url::from_file_path(&canonical).map_err(|()| ValidationError::BadLocalPath)?;
+        let out = String::from(url);
+        check_raw(&out, MAX_URL_LEN)?;
+        Ok(Self {
+            url: out,
+            scheme: "file".to_owned(),
+            local: true,
+            owned: true,
         })
     }
 
@@ -202,10 +248,197 @@ impl PlayableUrl {
         &self.scheme
     }
 
-    /// Whether this was built with [`PlayableUrl::from_local_file`].
+    /// Whether this is a local file ([`PlayableUrl::from_local_file`] or
+    /// [`PlayableUrl::from_owned_media`]).
     pub fn is_local_file(&self) -> bool {
         self.local
     }
+
+    /// Whether this was built with [`PlayableUrl::from_owned_media`].
+    pub fn is_owned_media(&self) -> bool {
+        self.owned
+    }
+}
+
+/// How many leading bytes [`sniff_container`] looks at (callers should pass at least
+/// this many when the file is that long).
+pub const SNIFF_BYTES: usize = 4096;
+
+/// An audio/video container recognised by [`sniff_container`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Container {
+    /// MPEG transport stream (188-byte packets, or 192-byte M2TS packets).
+    MpegTs,
+    /// Matroska or WebM.
+    Matroska,
+    /// ISO base media (MP4, MOV, fragmented MP4).
+    Mp4,
+    /// AVI.
+    Avi,
+    /// Flash video.
+    Flv,
+    /// MPEG program stream.
+    MpegPs,
+    /// ASF / WMV.
+    Asf,
+}
+
+impl Container {
+    /// The usual file extension (without the dot).
+    pub fn extension(self) -> &'static str {
+        match self {
+            Container::MpegTs => "ts",
+            Container::Matroska => "mkv",
+            Container::Mp4 => "mp4",
+            Container::Avi => "avi",
+            Container::Flv => "flv",
+            Container::MpegPs => "mpg",
+            Container::Asf => "wmv",
+        }
+    }
+}
+
+/// Recognises a media container from the first bytes of a file (pass up to
+/// [`SNIFF_BYTES`]). Returns `None` for anything else, including text playlists (M3U,
+/// PLS, XSPF, mpv EDL), HTML error pages and empty input. Downloaders should check the
+/// first bytes they receive with this before keeping a file.
+pub fn sniff_container(head: &[u8]) -> Option<Container> {
+    let at = |i: usize, sig: &[u8]| head.get(i..i + sig.len()) == Some(sig);
+    if at(0, &[0x1A, 0x45, 0xDF, 0xA3]) {
+        return Some(Container::Matroska);
+    }
+    if ["ftyp", "styp", "moov"].iter().any(|b| at(4, b.as_bytes())) {
+        return Some(Container::Mp4);
+    }
+    if at(0, b"RIFF") && at(8, b"AVI ") {
+        return Some(Container::Avi);
+    }
+    if at(0, b"FLV") && head.get(3) == Some(&1) {
+        return Some(Container::Flv);
+    }
+    if at(0, &[0x00, 0x00, 0x01, 0xBA]) {
+        return Some(Container::MpegPs);
+    }
+    if at(0, &[0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11]) {
+        return Some(Container::Asf);
+    }
+    // Transport streams: a sync byte every packet. Ask for three in a row when the input
+    // is long enough, two otherwise (short clips).
+    let ts = |offset: usize, stride: usize| {
+        let syncs = (0..3)
+            .map(|k| offset + k * stride)
+            .take_while(|i| *i < head.len())
+            .collect::<Vec<_>>();
+        syncs.len() >= 2 && syncs.iter().all(|i| head[*i] == 0x47)
+    };
+    if ts(0, 188) || ts(4, 192) {
+        return Some(Container::MpegTs);
+    }
+    None
+}
+
+fn read_head(path: &Path, buf: &mut [u8]) -> std::io::Result<usize> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut n = 0;
+    while n < buf.len() {
+        match f.read(&mut buf[n..])? {
+            0 => break,
+            k => n += k,
+        }
+    }
+    Ok(n)
+}
+
+/// A new file the player may **write**: the output of [`crate::Player::dump_cache`]
+/// (a clip of the buffer) or [`crate::Player::set_stream_record`] (a recording of what is
+/// playing).
+///
+/// Checks: `root` is an existing absolute folder; `file_name` is a bare name (no
+/// separators, no `..`, no `:`, no control characters, no leading dot) of at most 180
+/// characters ending in `.ts`, `.mkv` or `.mp4`; the file does not exist yet (outputs
+/// never overwrite anything). The resulting path is absolute and plain, so neither mpv
+/// nor ffmpeg can read it as a protocol URL.
+#[derive(Clone, PartialEq, Eq)]
+pub struct MediaOutput {
+    path: std::path::PathBuf,
+}
+
+impl MediaOutput {
+    /// Validates `root` + `file_name`.
+    ///
+    /// # Errors
+    /// [`ValidationError::BadLocalPath`] (root not an absolute folder),
+    /// [`ValidationError::BadFileName`] or [`ValidationError::AlreadyExists`].
+    pub fn new(root: &Path, file_name: &str) -> Result<Self, ValidationError> {
+        if !root.is_absolute() {
+            return Err(ValidationError::BadLocalPath);
+        }
+        let root = std::fs::canonicalize(root).map_err(|_| ValidationError::BadLocalPath)?;
+        if !root.is_dir() {
+            return Err(ValidationError::BadLocalPath);
+        }
+        let count = file_name.chars().count();
+        let ext_ok = Path::new(file_name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| ["ts", "mkv", "mp4"].contains(&e.to_ascii_lowercase().as_str()));
+        if count == 0
+            || count > 180
+            || !ext_ok
+            || file_name.starts_with(['.', ' '])
+            || file_name.ends_with(['.', ' '])
+            || file_name.contains("..")
+            || file_name
+                .chars()
+                .any(|c| c.is_control() || "<>:\"/\\|?*%".contains(c))
+        {
+            return Err(ValidationError::BadFileName);
+        }
+        let stem = file_name
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .trim_end()
+            .to_ascii_uppercase();
+        let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+                && stem.len() == 4
+                && stem.as_bytes()[3].is_ascii_digit());
+        if device {
+            return Err(ValidationError::BadFileName);
+        }
+        let path = strip_verbatim_prefix(&root).join(file_name);
+        if path.exists() {
+            return Err(ValidationError::AlreadyExists);
+        }
+        let s = path.to_string_lossy();
+        check_raw_path(&s)?;
+        Ok(Self { path })
+    }
+
+    /// The absolute path to write.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl fmt::Debug for MediaOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("MediaOutput").field(&self.path).finish()
+    }
+}
+
+/// Paths handed to mpv for writing: no control characters, not too long.
+fn check_raw_path(s: &str) -> Result<(), ValidationError> {
+    if s.len() > MAX_URL_LEN {
+        return Err(ValidationError::TooLong { max: MAX_URL_LEN });
+    }
+    if s.chars().any(char::is_control) {
+        return Err(ValidationError::ControlChar);
+    }
+    Ok(())
 }
 
 impl fmt::Debug for PlayableUrl {
@@ -719,5 +952,168 @@ mod tests {
         assert_eq!(raw_scheme("subfile,,start:x"), None);
         assert_eq!(raw_scheme("://x"), None);
         assert_eq!(raw_scheme("noscheme"), None);
+    }
+
+    /// A unique scratch folder under the system temp dir (removed on drop).
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "opensmarters-player-{tag}-{}-{:?}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default()
+            ));
+            std::fs::create_dir_all(&p).unwrap_or_else(|e| panic!("{e}"));
+            Self(p)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn ts_bytes(packets: usize) -> Vec<u8> {
+        let mut v = vec![0u8; 188 * packets];
+        for k in 0..packets {
+            v[k * 188] = 0x47;
+        }
+        v
+    }
+
+    #[test]
+    fn sniffs_containers_and_refuses_text() {
+        assert_eq!(sniff_container(&ts_bytes(3)), Some(Container::MpegTs));
+        let mut m2ts = vec![0u8; 192 * 3];
+        for k in 0..3 {
+            m2ts[k * 192 + 4] = 0x47;
+        }
+        assert_eq!(sniff_container(&m2ts), Some(Container::MpegTs));
+        assert_eq!(
+            sniff_container(&[0x1A, 0x45, 0xDF, 0xA3, 0, 0]),
+            Some(Container::Matroska)
+        );
+        assert_eq!(sniff_container(b"\0\0\0\x20ftypisom"), Some(Container::Mp4));
+        assert_eq!(
+            sniff_container(b"RIFF\0\0\0\0AVI LIST"),
+            Some(Container::Avi)
+        );
+        assert_eq!(sniff_container(b"FLV\x01\x05"), Some(Container::Flv));
+        assert_eq!(
+            sniff_container(&[0, 0, 1, 0xBA, 0x44]),
+            Some(Container::MpegPs)
+        );
+        for text in [
+            &b"#EXTM3U\n#EXTINF:-1,x\nfile:///C:/Windows/win.ini\n"[..],
+            b"[playlist]\nFile1=http://x/\n",
+            b"# mpv EDL v0\nfile:///C:/x.mkv\n",
+            b"<?xml version=\"1.0\"?><playlist/>",
+            b"<html><body>403 Forbidden</body></html>",
+            b"G",
+            b"",
+        ] {
+            assert_eq!(
+                sniff_container(text),
+                None,
+                "{:?}",
+                String::from_utf8_lossy(text)
+            );
+        }
+        // A single 0x47 followed by garbage is not a transport stream.
+        let mut fake = ts_bytes(3);
+        fake[188] = b'#';
+        assert_eq!(sniff_container(&fake), None);
+    }
+
+    #[test]
+    fn owned_media_must_be_inside_the_root_and_real_media() {
+        let root = Scratch::new("owned");
+        let other = Scratch::new("other");
+        let good = root.0.join("Film.ts");
+        std::fs::write(&good, ts_bytes(4)).unwrap_or_else(|e| panic!("{e}"));
+        let u = PlayableUrl::from_owned_media(&root.0, &good).unwrap_or_else(|e| panic!("{e}"));
+        assert!(u.is_local_file() && u.is_owned_media());
+        assert!(u.as_str().starts_with("file:///"));
+
+        let playlist = root.0.join("Not a film.mkv");
+        std::fs::write(&playlist, b"#EXTM3U\nhttp://example.com/x.ts\n")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            PlayableUrl::from_owned_media(&root.0, &playlist),
+            Err(ValidationError::NotMedia)
+        );
+
+        let outside = other.0.join("Film.ts");
+        std::fs::write(&outside, ts_bytes(4)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            PlayableUrl::from_owned_media(&root.0, &outside),
+            Err(ValidationError::OutsideRoot)
+        );
+        let sneaky = root
+            .0
+            .join("..")
+            .join(other.0.file_name().unwrap_or_default())
+            .join("Film.ts");
+        assert_eq!(
+            PlayableUrl::from_owned_media(&root.0, &sneaky),
+            Err(ValidationError::OutsideRoot)
+        );
+        assert_eq!(
+            PlayableUrl::from_owned_media(&root.0, &root.0),
+            Err(ValidationError::BadLocalPath)
+        );
+        assert_eq!(
+            PlayableUrl::from_owned_media(Path::new("relative"), &good),
+            Err(ValidationError::BadLocalPath)
+        );
+        assert_eq!(
+            PlayableUrl::from_owned_media(&root.0, &root.0.join("missing.ts")),
+            Err(ValidationError::BadLocalPath)
+        );
+    }
+
+    #[test]
+    fn media_outputs_are_new_safe_names() {
+        let root = Scratch::new("out");
+        let o = MediaOutput::new(&root.0, "News 20-00 clip.ts").unwrap_or_else(|e| panic!("{e}"));
+        assert!(o.path().is_absolute());
+        assert!(o.path().ends_with("News 20-00 clip.ts"));
+        assert!(MediaOutput::new(&root.0, "Clip.MKV").is_ok());
+        for bad in [
+            "",
+            "clip",
+            "clip.m3u8",
+            "clip.txt",
+            ".clip.ts",
+            "clip.ts ",
+            "../clip.ts",
+            "a/b.ts",
+            r"a\b.ts",
+            "C:clip.ts",
+            "x%03d.ts",
+            "a\nb.ts",
+            "CON.ts",
+            "lpt1.mkv",
+        ] {
+            assert_eq!(
+                MediaOutput::new(&root.0, bad),
+                Err(ValidationError::BadFileName),
+                "{bad:?}"
+            );
+        }
+        std::fs::write(root.0.join("taken.ts"), b"x").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            MediaOutput::new(&root.0, "taken.ts"),
+            Err(ValidationError::AlreadyExists)
+        );
+        assert_eq!(
+            MediaOutput::new(Path::new("relative"), "clip.ts"),
+            Err(ValidationError::BadLocalPath)
+        );
     }
 }

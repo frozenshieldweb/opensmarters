@@ -143,4 +143,17 @@ pub enum ValidationError {
     /// Local path is not absolute or does not name a file.
     #[error("not an absolute path to an existing file")]
     BadLocalPath,
+    /// An owned media file or output is not inside the folder it must be in.
+    #[error("not inside the expected folder")]
+    OutsideRoot,
+    /// The file's first bytes are not a known audio/video container (playlists and text
+    /// files are refused).
+    #[error("not a recognised media file")]
+    NotMedia,
+    /// An output file name is not a bare, safe name with a media extension.
+    #[error("not a safe media file name")]
+    BadFileName,
+    /// An output file already exists (outputs are never overwritten).
+    #[error("the file already exists")]
+    AlreadyExists,
 }

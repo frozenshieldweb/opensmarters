@@ -12,6 +12,7 @@ This tracks the phases in [BUILD_PROMPT.md](BUILD_PROMPT.md#7-how-to-work).
 | 4: VOD, series, resume, catch-up, favourites, parental, settings | **done** | 4A: Movies, Series, Detail, resume, next episode. 4B: Catch-up (with timeshift-format fallback), Guide (virtualised EPG grid, bounded XMLTV), Search, Favourites. 4C: parental control, Settings pages, Storage & data, privacy, welcome screen, window state. Workspace: ~350 tests; fmt, clippy and deny all clean |
 | 5: reviews, hardening, packaging, SECURITY.md | in progress | Security, code and UX reviews running |
 | 6: real-provider test | partial | Core, player and foundation app verified against the user's panel (see below); final pass after fixes |
+| 7: recording, multiscreen, sleep timer, reminders, stable streams | **foundation done** | Plan and contracts: [PHASE7.md](PHASE7.md). Foundation: schema v2 (recordings, reminders), connection budget (leases; viewing preempts downloads), owned-media playback and `dump-cache`/`stream-record` into validated outputs, routes/stubs (Recordings, Multiscreen, Settings › Recordings), app-wide hooks. Streams A–D in progress |
 
 ## Real-provider test (2026-10-20, the user's Xtream account, via `crates/core/examples/live_probe.rs`)
 

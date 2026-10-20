@@ -25,14 +25,23 @@
 //! - **Progress** of movies/episodes/catch-up is saved every [`SAVE_EVERY`] and when
 //!   playback stops or switches.
 //! - **Recent channels** are recorded when a live channel starts.
+//! - **Connection budget:** opening a provider stream takes a lease from
+//!   `session.connections()` ([`crate::services::connections`]) with this controller's
+//!   [`Purpose`] (`Watch`, or `Tile(n)` for multiscreen); it may take a download's slot.
+//!   The lease is kept while zapping and reconnecting and released when playback stops,
+//!   a VOD finishes or the stream gives up. Local files (recordings) need none. When
+//!   recordings hold every connection, the status says so instead of opening a stream
+//!   the provider would refuse.
 //! - **mpv log lines are redacted** with the app-wide redactor before they are logged.
 //! - **Aspect/zoom** (`VideoFit`) persists across streams and restarts.
 //!
 //! Shutdown: [`PlaybackController::destroy`] from `eframe::App::on_exit` (frees the render
 //! context while GL is current), then the player is dropped.
 
+pub mod multi;
 pub mod next;
 pub mod request;
+pub mod sleep;
 pub mod tracks;
 
 use std::sync::Arc;
@@ -52,6 +61,7 @@ pub use request::{
 pub use tracks::{BufferPreset, PlayerTuning};
 
 use crate::services::Session;
+use crate::services::connections::{Lease, Purpose};
 
 /// Reconnect delays (seconds) for successive attempts; after the last one we give up.
 pub const RETRY_DELAYS: [u64; 5] = [2, 5, 10, 30, 30];
@@ -111,6 +121,9 @@ struct Active {
     /// Deferred start (debounced zapping).
     load_at: Option<Instant>,
     subs_applied: bool,
+    /// The provider connection this stream uses (`None` for local files, or before the
+    /// first load).
+    lease: Option<Lease>,
 }
 
 /// The user's subtitle preference for VOD in this run.
@@ -139,6 +152,7 @@ pub struct PlaybackController {
     queue: Arc<std::sync::Mutex<Option<next::EpisodeQueue>>>,
     audio_pref: Option<String>,
     tuning: PlayerTuning,
+    purpose: Purpose,
 }
 
 impl std::fmt::Debug for PlaybackController {
@@ -218,7 +232,14 @@ impl PlaybackController {
             queue: Arc::default(),
             audio_pref: None,
             tuning,
+            purpose: Purpose::Watch,
         }
+    }
+
+    /// Which connection-budget purpose this controller's streams use (default
+    /// [`Purpose::Watch`]; multiscreen tiles use [`Purpose::Tile`]).
+    pub fn set_connection_purpose(&mut self, purpose: Purpose) {
+        self.purpose = purpose;
     }
 
     /// The hardware decoding / buffer options the player started with.
@@ -355,6 +376,13 @@ impl PlaybackController {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         tracing::debug!(kind = ?req.kind, "play");
+        // Zapping keeps the connection lease of the same session (the old stream was just
+        // stopped); a local file needs none.
+        let lease = self
+            .active
+            .take()
+            .filter(|old| Arc::ptr_eq(&old.session, &session) && !req.url.is_local_file())
+            .and_then(|old| old.lease);
         self.active = Some(Active {
             req,
             session,
@@ -368,6 +396,7 @@ impl PlaybackController {
             loaded_once: false,
             load_at,
             subs_applied: false,
+            lease,
         });
         self.sync_episode_queue();
         if let Some(at) = load_at {
@@ -402,6 +431,19 @@ impl PlaybackController {
                 .blocking("record recent channel", move |s| {
                     s.recent_live().touch(profile, &key, &snapshot)
                 });
+        }
+        if !a.req.url.is_local_file() && a.lease.is_none() {
+            match a.session.connections().acquire_for_viewing(self.purpose) {
+                Ok(lease) => a.lease = Some(lease),
+                Err(busy) => {
+                    tracing::info!(holders = ?busy.holders, "no free provider connection");
+                    a.failed = Some(format!(
+                        "{} Stop a recording, or wait until one finishes.",
+                        busy.message()
+                    ));
+                    return;
+                }
+            }
         }
         let opts = LoadOptions {
             user_agent: a.req.headers.user_agent.clone(),
@@ -635,6 +677,10 @@ impl PlaybackController {
         let Some(a) = &mut self.active else {
             return;
         };
+        // The stream is closed for good: free its connection (replay/retry take one again).
+        if a.finished || a.failed.is_some() {
+            a.lease = None;
+        }
         // Live stall detection.
         if a.req.kind.is_live()
             && a.retry_at.is_none()

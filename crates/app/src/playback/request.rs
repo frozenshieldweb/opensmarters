@@ -24,6 +24,11 @@ pub enum MediaKind {
     Episode,
     /// A catch-up (timeshift) programme.
     Catchup,
+    /// A live recording or clip played from the recordings folder (a local file: seekable,
+    /// finishes at the end, no reconnects, no provider connection). Downloaded films and
+    /// episodes play as [`MediaKind::Movie`]/[`MediaKind::Episode`] so their resume point
+    /// is shared with streaming.
+    Recording,
 }
 
 impl MediaKind {
@@ -39,6 +44,7 @@ impl MediaKind {
             MediaKind::Movie => Some(PlaybackKind::Movie),
             MediaKind::Episode => Some(PlaybackKind::Episode),
             MediaKind::Catchup => Some(PlaybackKind::Catchup),
+            MediaKind::Recording => None,
         }
     }
 }
@@ -82,6 +88,12 @@ pub enum PlaybackItem {
         /// Duration in minutes.
         duration_minutes: u32,
     },
+    /// A live recording or clip (store row id); its resume point lives in the recordings
+    /// table.
+    Recording {
+        /// `recordings.id`.
+        id: opensmarters_store::RecordingId,
+    },
 }
 
 impl PlaybackItem {
@@ -89,7 +101,7 @@ impl PlaybackItem {
     /// `"<stream_id>@<start>"`.
     pub fn progress_id(&self) -> Option<String> {
         match self {
-            PlaybackItem::Live { .. } => None,
+            PlaybackItem::Live { .. } | PlaybackItem::Recording { .. } => None,
             PlaybackItem::Movie { stream_id, .. } => Some(stream_id.to_string()),
             PlaybackItem::Episode { episode_id, .. } => Some(episode_id.to_string()),
             PlaybackItem::Catchup {

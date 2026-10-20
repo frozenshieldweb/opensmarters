@@ -10,6 +10,8 @@
 //! | Favourites (live / movies / series) with display snapshots | SQLite | [`Store::favourites`] → [`Favourites`] |
 //! | Resume points, watch history, continue watching, up-next inputs | SQLite | [`Store::playback`] → [`Playback`] |
 //! | Recently watched live channels | SQLite | [`Store::recent_live`] → [`RecentLive`] |
+//! | Recordings and downloads (jobs, progress, file names; never URLs) | SQLite | [`Store::recordings`] → [`Recordings`] |
+//! | Programme reminders | SQLite | [`Store::reminders`] → [`Reminders`] |
 //! | Response cache (TTL, size cap, LRU eviction) — **encrypted** | SQLite + key in keychain | [`Store::cache`] → [`Cache`] |
 //! | Global settings (time format, language, UI scale, last profile, TMDB opt-in, cache cap) | SQLite | [`Store::settings`] → [`AppSettings`] |
 //! | TMDB API key | keychain | [`AppSettings::tmdb_api_key`] |
@@ -108,6 +110,8 @@ mod parental;
 mod playback;
 mod profiles;
 mod recent;
+pub mod recordings;
+mod reminders;
 mod secrets;
 pub mod settings;
 mod text;
@@ -138,6 +142,10 @@ pub use profiles::{
     ProfileSource, ProfileUpdate, Profiles, TimeshiftFormat, UserAgent,
 };
 pub use recent::{RecentChannel, RecentLive};
+pub use recordings::{
+    NewRecording, Recording, RecordingId, RecordingKind, RecordingState, Recordings,
+};
+pub use reminders::{NewReminder, Reminder, ReminderAction, ReminderId, Reminders};
 pub use secrets::{KeyringSecretStore, MemorySecretStore, SecretError, SecretKey, SecretStore};
 pub use settings::AppSettings;
 pub use time::{Clock, ManualClock, SystemClock, Timestamp};
@@ -236,8 +244,9 @@ impl StoreOptions {
 /// The store: a SQLite connection plus a [`SecretStore`]. See the [crate docs](crate) for
 /// the threading model. Cheap per-domain handles are returned by [`profiles`](Self::profiles),
 /// [`favourites`](Self::favourites), [`playback`](Self::playback),
-/// [`recent_live`](Self::recent_live), [`cache`](Self::cache), [`settings`](Self::settings)
-/// and [`parental`](Self::parental).
+/// [`recent_live`](Self::recent_live), [`recordings`](Self::recordings),
+/// [`reminders`](Self::reminders), [`cache`](Self::cache), [`settings`](Self::settings) and
+/// [`parental`](Self::parental).
 pub struct Store {
     conn: Mutex<Connection>,
     secrets: Arc<dyn SecretStore>,
@@ -329,6 +338,16 @@ impl Store {
     /// Recently watched live channels.
     pub fn recent_live(&self) -> RecentLive<'_> {
         RecentLive { store: self }
+    }
+
+    /// Recordings and downloads.
+    pub fn recordings(&self) -> Recordings<'_> {
+        Recordings { store: self }
+    }
+
+    /// Programme reminders.
+    pub fn reminders(&self) -> Reminders<'_> {
+        Reminders { store: self }
     }
 
     /// The encrypted response cache.

@@ -3317,6 +3317,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "directories",
  "eframe",
  "egui_extras",
  "embed-resource",

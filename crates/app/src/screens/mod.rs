@@ -24,9 +24,11 @@ pub mod guide;
 pub mod home;
 pub mod live;
 pub mod movies;
+pub mod multiscreen;
 pub mod onboarding;
 pub mod player;
 pub mod profiles;
+pub mod recordings;
 pub mod search;
 pub mod series;
 pub mod settings;
@@ -77,6 +79,14 @@ pub struct AppCtx<'a> {
     pub now: DateTime<Utc>,
     /// During `on_leave`: the route becoming the top.
     pub next_route: Option<Route>,
+    /// Recordings and downloads (app-wide).
+    pub dvr: &'a mut crate::dvr::Dvr,
+    /// The sleep timer.
+    pub sleep: &'a mut crate::playback::sleep::SleepTimer,
+    /// App-wide prompts (reminders, "Still watching?").
+    pub alerts: &'a mut crate::services::alerts::Alerts,
+    /// Multiscreen tile players.
+    pub multi: &'a mut crate::playback::multi::MultiView,
     pub(crate) prefs_dirty: &'a mut bool,
 }
 
@@ -164,6 +174,8 @@ pub fn create(route: &Route) -> Box<dyn Screen> {
         Route::Catchup { stream_id } => Box::new(catchup::CatchupScreen::new(*stream_id)),
         Route::Search { query } => Box::new(search::SearchScreen::new(query.clone())),
         Route::Favourites => Box::new(favourites::FavouritesScreen::new()),
+        Route::Recordings { tab } => Box::new(recordings::RecordingsScreen::new(*tab)),
+        Route::Multiscreen => Box::new(multiscreen::MultiscreenScreen::new()),
         Route::Settings { page } => Box::new(settings::SettingsScreen::new(*page)),
         Route::Player(p) => Box::new(player::PlayerScreen::new(p.clone())),
     }

@@ -21,7 +21,7 @@ struct NavItem {
     glyph: &'static str,
 }
 
-const MAIN_ITEMS: [NavItem; 7] = [
+const MAIN_ITEMS: [NavItem; 8] = [
     NavItem {
         section: Section::Home,
         label: "Home",
@@ -57,6 +57,11 @@ const MAIN_ITEMS: [NavItem; 7] = [
         label: "Favourites",
         glyph: icons::HEART,
     },
+    NavItem {
+        section: Section::Recordings,
+        label: "Recordings",
+        glyph: icons::RECORD,
+    },
 ];
 
 /// The route a section opens.
@@ -72,6 +77,9 @@ pub fn section_route(s: Section) -> Route {
         Section::Series => Route::Series { category: None },
         Section::Catchup => Route::Catchup { stream_id: None },
         Section::Favourites => Route::Favourites,
+        Section::Recordings => Route::Recordings {
+            tab: crate::nav::RecordingsTab::default(),
+        },
         Section::Settings => Route::settings(),
     }
 }

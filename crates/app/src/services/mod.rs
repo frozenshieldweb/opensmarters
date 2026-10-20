@@ -6,8 +6,10 @@
 //! The provider-specific part lives in [`session::Session`] (one per active profile,
 //! `cx.session()`).
 
+pub mod alerts;
 pub mod backup;
 pub mod catalog;
+pub mod connections;
 #[cfg(feature = "demo")]
 pub mod demo;
 pub mod epg;

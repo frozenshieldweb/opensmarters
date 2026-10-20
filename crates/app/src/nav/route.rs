@@ -28,8 +28,53 @@ pub enum Section {
     Catchup,
     /// Favourites.
     Favourites,
+    /// Recordings and downloads.
+    Recordings,
     /// Settings.
     Settings,
+}
+
+/// Tabs of the Recordings screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RecordingsTab {
+    /// Films and episodes saved for offline viewing.
+    #[default]
+    Downloads,
+    /// Live recordings and clips.
+    Recordings,
+    /// Scheduled recordings and reminders.
+    Scheduled,
+}
+
+impl RecordingsTab {
+    /// All tabs in order.
+    pub const ALL: [RecordingsTab; 3] = [
+        RecordingsTab::Downloads,
+        RecordingsTab::Recordings,
+        RecordingsTab::Scheduled,
+    ];
+
+    /// Tab label.
+    pub fn label(self) -> &'static str {
+        match self {
+            RecordingsTab::Downloads => "Downloads",
+            RecordingsTab::Recordings => "Recordings",
+            RecordingsTab::Scheduled => "Scheduled",
+        }
+    }
+
+    /// `--route recordings:tab=<slug>` name.
+    pub fn slug(self) -> &'static str {
+        match self {
+            RecordingsTab::Downloads => "downloads",
+            RecordingsTab::Recordings => "recordings",
+            RecordingsTab::Scheduled => "scheduled",
+        }
+    }
+
+    fn from_slug(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.slug() == s)
+    }
 }
 
 /// Settings sub-pages (§8.6).
@@ -50,6 +95,8 @@ pub enum SettingsPage {
     Language,
     /// Cache, history, backup (export/import), data folder, logs.
     Storage,
+    /// Recordings folder, padding, downloads, clips.
+    Recordings,
     /// Privacy facts, optional TMDB.
     Privacy,
     /// Versions, licences.
@@ -58,10 +105,11 @@ pub enum SettingsPage {
 
 impl SettingsPage {
     /// All pages in menu order.
-    pub const ALL: [SettingsPage; 9] = [
+    pub const ALL: [SettingsPage; 10] = [
         SettingsPage::Account,
         SettingsPage::Profiles,
         SettingsPage::Playback,
+        SettingsPage::Recordings,
         SettingsPage::Parental,
         SettingsPage::Appearance,
         SettingsPage::Language,
@@ -80,6 +128,7 @@ impl SettingsPage {
             SettingsPage::Appearance => "Appearance",
             SettingsPage::Language => "Language & region",
             SettingsPage::Storage => "Storage & data",
+            SettingsPage::Recordings => "Recordings & downloads",
             SettingsPage::Privacy => "Privacy & security",
             SettingsPage::About => "About",
         }
@@ -95,6 +144,7 @@ impl SettingsPage {
             SettingsPage::Appearance => "appearance",
             SettingsPage::Language => "language",
             SettingsPage::Storage => "storage",
+            SettingsPage::Recordings => "recordings",
             SettingsPage::Privacy => "privacy",
             SettingsPage::About => "about",
         }
@@ -171,6 +221,14 @@ pub enum Route {
     },
     /// Favourites.
     Favourites,
+    /// Recordings and downloads.
+    Recordings {
+        /// Selected tab.
+        tab: RecordingsTab,
+    },
+    /// Multiscreen: up to four live channels at once (as many as the connection budget
+    /// allows).
+    Multiscreen,
     /// Settings.
     Settings {
         /// Selected page.
@@ -207,6 +265,8 @@ impl Route {
             Route::Catchup { .. } => Section::Catchup,
             Route::Search { .. } => Section::Search,
             Route::Favourites => Section::Favourites,
+            Route::Recordings { .. } => Section::Recordings,
+            Route::Multiscreen => Section::Live,
             Route::Settings { .. } => Section::Settings,
         })
     }
@@ -233,6 +293,7 @@ impl Route {
             (Route::Catchup { stream_id: a }, Route::Catchup { stream_id: b }) => a == b,
             (Route::Search { query: a }, Route::Search { query: b }) => a == b,
             (Route::Settings { page: a }, Route::Settings { page: b }) => a == b,
+            (Route::Recordings { tab: a }, Route::Recordings { tab: b }) => a == b,
             (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
         }
     }
@@ -295,6 +356,15 @@ impl Route {
                 query: get("q").unwrap_or_default().to_owned(),
             },
             "favourites" | "favorites" => Route::Favourites,
+            "recordings" | "downloads" => {
+                let tab = match bare.or_else(|| get("tab")) {
+                    Some(slug) => RecordingsTab::from_slug(slug)
+                        .ok_or_else(|| format!("unknown recordings tab {slug:?}"))?,
+                    None => RecordingsTab::default(),
+                };
+                Route::Recordings { tab }
+            }
+            "multiscreen" | "multi" => Route::Multiscreen,
             "settings" => {
                 let page = match bare.or_else(|| get("page")) {
                     Some(slug) => SettingsPage::from_slug(slug)
@@ -336,6 +406,8 @@ impl fmt::Display for Route {
             Route::Catchup { stream_id: Some(s) } => write!(f, "catchup:stream={s}"),
             Route::Search { query } => write!(f, "search:q={query}"),
             Route::Favourites => f.write_str("favourites"),
+            Route::Recordings { tab } => write!(f, "recordings:tab={}", tab.slug()),
+            Route::Multiscreen => f.write_str("multiscreen"),
             Route::Settings { page } => write!(f, "settings:{}", page.slug()),
             Route::Player(PlayerRoute::LiveChannel { key }) => write!(f, "player:live={key}"),
             Route::Player(PlayerRoute::Request(r)) => write!(f, "player:{:?}", r.kind),
@@ -387,6 +459,9 @@ mod tests {
             "detail:series=3",
             "player:live=1001",
             "catchup:stream=5",
+            "recordings:tab=scheduled",
+            "multiscreen",
+            "settings:recordings",
         ] {
             let r = Route::parse(s).unwrap_or(Route::Profiles);
             assert_eq!(r.to_string(), s);

@@ -15,7 +15,7 @@ use crate::config::{LogLevel, MpvOption, OptValue, PlayerConfig};
 use crate::error::{Error, MpvError};
 use crate::ffi::{self, MpvApi, mpv_handle};
 use crate::node::{NodeIn, NodeOut, OwnedNode};
-use crate::playable::{PlayableUrl, Referrer, UserAgent};
+use crate::playable::{MediaOutput, PlayableUrl, Referrer, UserAgent};
 
 /// Capacity of the event channel. Events beyond it are dropped (and counted
 /// in [`PlayerState::dropped_events`]); state is never lost because it is
@@ -173,12 +173,18 @@ pub enum Op {
     VideoFit,
     /// user-agent / referrer
     HttpHeaders,
+    /// runtime tuning (cache, buffering, decoding)
+    Tuning,
+    /// [`Player::set_stream_record`]
+    Record,
+    /// [`Player::dump_cache`] (also reported on success: [`PlayerEvent::CommandDone`])
+    DumpCache,
     /// unknown reply id
     Other,
 }
 
 impl Op {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 14] = [
         Self::Load,
         Self::Stop,
         Self::Pause,
@@ -190,6 +196,9 @@ impl Op {
         Self::SubtitleTrack,
         Self::VideoFit,
         Self::HttpHeaders,
+        Self::Tuning,
+        Self::Record,
+        Self::DumpCache,
     ];
 
     fn id(self) -> u64 {
@@ -475,6 +484,12 @@ pub enum PlayerEvent {
     PropertyChanged(Property),
     /// An mpv log line (unredacted; see [`LogLine`]).
     Log(LogLine),
+    /// A long-running request finished successfully (only sent for
+    /// [`Op::DumpCache`]).
+    CommandDone {
+        /// Which request.
+        op: Op,
+    },
     /// An asynchronous request failed.
     CommandFailed {
         /// Which request.
@@ -1052,12 +1067,13 @@ impl Player {
     ///
     /// # Errors
     /// [`Error::SchemeNotEnabled`]/[`Error::LocalFilesDisabled`] if this
-    /// player's config does not allow the URL; [`Error::Mpv`] if mpv refuses
-    /// to queue the request. Loading failures arrive later as
+    /// player's config does not allow the URL (files from
+    /// [`PlayableUrl::from_owned_media`] are always allowed); [`Error::Mpv`] if
+    /// mpv refuses to queue the request. Loading failures arrive later as
     /// [`PlayerEvent::EndFile`] with [`EndReason::Error`].
     pub fn load(&self, url: &PlayableUrl, opts: &LoadOptions) -> Result<(), Error> {
         if url.is_local_file() {
-            if !self.config.allow_local_files {
+            if !url.is_owned_media() && !self.config.allow_local_files {
                 return Err(Error::LocalFilesDisabled);
             }
         } else if !self.config.url_policy.allows_scheme(url.scheme()) {
@@ -1225,6 +1241,62 @@ impl Player {
             .fit
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Writes part of the demuxer cache (what has been received of the current stream) to
+    /// `out`: from `start` to `end`, in seconds of `time-pos`. Used to save "the last N
+    /// minutes" of a live channel without opening another connection: pass
+    /// `time_pos - N*60 .. time_pos` (clamped to what is cached). mpv remuxes the packets
+    /// of the selected tracks; the container follows the file extension. Needs a player
+    /// built with [`crate::PlayerConfig::seekable_cache`] for streams the server cannot
+    /// seek (live TS).
+    ///
+    /// The range must be explicit: with this libmpv build, `dump-cache no no` ("the whole
+    /// cache") reports success but writes nothing.
+    ///
+    /// Asynchronous: [`PlayerEvent::CommandDone`] (`Op::DumpCache`) when the file is
+    /// complete, [`PlayerEvent::CommandFailed`] otherwise. Only a [`MediaOutput`] (a new,
+    /// validated file in an app folder) can be written.
+    ///
+    /// # Errors
+    /// [`Error::InvalidArgument`] for a non-finite, negative or empty range; [`Error::Mpv`]
+    /// if mpv refuses to queue the request.
+    pub fn dump_cache(&self, start: f64, end: f64, out: &MediaOutput) -> Result<(), Error> {
+        let start = finite(start, "dump start")?.clamp(0.0, 1.0e7);
+        let end = finite(end, "dump end")?.clamp(0.0, 1.0e7);
+        if end <= start {
+            return Err(Error::InvalidArgument("dump range"));
+        }
+        let path = out
+            .path()
+            .to_str()
+            .ok_or(Error::InvalidArgument("output path"))?;
+        self.command(
+            Op::DumpCache,
+            &[
+                "dump-cache",
+                &format!("{start:.3}"),
+                &format!("{end:.3}"),
+                path,
+            ],
+        )
+    }
+
+    /// Starts (`Some`) or stops (`None`) recording the current stream to a file as it is
+    /// received (`stream-record`). Uses no extra connection; the recording ends when the
+    /// file is replaced or playback stops. A new [`MediaOutput`] is required each time.
+    ///
+    /// # Errors
+    /// [`Error::Mpv`] if mpv refuses to queue the request.
+    pub fn set_stream_record(&self, out: Option<&MediaOutput>) -> Result<(), Error> {
+        let path = match out {
+            Some(o) => o
+                .path()
+                .to_str()
+                .ok_or(Error::InvalidArgument("output path"))?,
+            None => "",
+        };
+        self.set_string(Op::Record, c"stream-record", path)
     }
 
     // ---- async primitives ------------------------------------------------
@@ -1575,10 +1647,15 @@ unsafe fn handle_event(core: &Core, shared: &Shared, ev: &ffi::mpv_event) -> Opt
         ffi::MPV_EVENT_AUDIO_RECONFIG => Some(PlayerEvent::AudioReconfig),
         ffi::MPV_EVENT_QUEUE_OVERFLOW => Some(PlayerEvent::QueueOverflow),
         ffi::MPV_EVENT_COMMAND_REPLY | ffi::MPV_EVENT_SET_PROPERTY_REPLY => {
-            (ev.error < 0).then(|| PlayerEvent::CommandFailed {
-                op: Op::from_id(ev.reply_userdata),
-                error: core.mpv_err(ev.error),
-            })
+            let op = Op::from_id(ev.reply_userdata);
+            if ev.error < 0 {
+                Some(PlayerEvent::CommandFailed {
+                    op,
+                    error: core.mpv_err(ev.error),
+                })
+            } else {
+                (op == Op::DumpCache).then_some(PlayerEvent::CommandDone { op })
+            }
         }
         ffi::MPV_EVENT_PROPERTY_CHANGE => {
             if ev.data.is_null() {

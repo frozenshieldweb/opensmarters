@@ -11,6 +11,7 @@
 //! | Appearance | `appearance.rs` | TV mode, UI size, reduced motion (follows Windows by default) |
 //! | Language & region | `language.rs` | clock format, display language |
 //! | Storage & data | `storage.rs` | cache usage/clear/cap, history, backup export/import, data folder, logs |
+//! | Recordings & downloads | `recordings.rs` | recordings folder, padding, downloads, clips |
 //! | Privacy & security | `privacy.rs` | plain-language privacy facts, optional TMDB key |
 //! | About | `about.rs` (+ `licences.rs`) | versions, GPL notice, source, third-party licences |
 //!
@@ -28,6 +29,7 @@ mod pin_flow;
 mod playback;
 mod privacy;
 mod profiles;
+mod recordings;
 mod storage;
 
 use eframe::egui::{self, Align2, Id, Rect, Stroke, Ui, pos2};
@@ -69,6 +71,7 @@ pub struct SettingsScreen {
     appearance: appearance::AppearancePage,
     language: language::LanguagePage,
     storage: storage::StoragePage,
+    recordings: recordings::RecordingsPage,
     privacy: privacy::PrivacyPage,
     about: about::AboutPage,
     entered: bool,
@@ -94,6 +97,7 @@ impl SettingsScreen {
             appearance: appearance::AppearancePage::default(),
             language: language::LanguagePage,
             storage: storage::StoragePage::default(),
+            recordings: recordings::RecordingsPage::default(),
             privacy: privacy::PrivacyPage::default(),
             about: about::AboutPage::default(),
             entered: false,
@@ -109,6 +113,7 @@ impl SettingsScreen {
             SettingsPage::Appearance => &mut self.appearance,
             SettingsPage::Language => &mut self.language,
             SettingsPage::Storage => &mut self.storage,
+            SettingsPage::Recordings => &mut self.recordings,
             SettingsPage::Privacy => &mut self.privacy,
             SettingsPage::About => &mut self.about,
         }
@@ -124,6 +129,7 @@ fn page_icon(p: SettingsPage) -> &'static str {
         SettingsPage::Appearance => icons::PALETTE,
         SettingsPage::Language => icons::GLOBE,
         SettingsPage::Storage => icons::DATABASE,
+        SettingsPage::Recordings => icons::RECORD,
         SettingsPage::Privacy => icons::SHIELD_CHECK,
         SettingsPage::About => icons::INFO,
     }

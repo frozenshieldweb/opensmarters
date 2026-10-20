@@ -235,6 +235,7 @@ pub struct Session {
     parental: RwLock<ParentalState>,
     epg: EpgCache,
     xmltv: tokio::sync::OnceCell<Option<Arc<opensmarters_core::xmltv::Epg>>>,
+    connections: Arc<super::connections::ConnectionBudget>,
 }
 
 impl std::fmt::Debug for Session {
@@ -415,6 +416,26 @@ impl Session {
         .unwrap_or_default();
         let parental = load_parental(&store, profile_id).await.unwrap_or_default();
 
+        // Connection budget: the user's override, else the account's limit. At sign-in
+        // this app holds no stream, so `active_cons` is what other devices use.
+        let override_limit = blocking(&store, move |s| {
+            s.settings()
+                .get(&super::connections::MAX_STREAMS_OVERRIDE)
+                .map(|m| m.get(&profile_id.to_string()).copied())
+        })
+        .await
+        .ok()
+        .flatten()
+        .map(u32::from);
+        let connections = super::connections::ConnectionBudget::new(
+            account.as_ref().and_then(|a| a.max_connections),
+            override_limit,
+        );
+        if let Some(a) = &account {
+            // A cached (offline) login's `active_cons` is stale: don't trust it.
+            connections.set_account(a.max_connections, a.active_cons.filter(|_| !offline));
+        }
+
         // Mark as used (last profile) in the background.
         services.blocking("mark profile used", move |s| {
             s.profiles().mark_used(profile_id)
@@ -435,6 +456,7 @@ impl Session {
             parental: RwLock::new(parental),
             epg: EpgCache::default(),
             xmltv: tokio::sync::OnceCell::new(),
+            connections,
         }))
     }
 
@@ -450,6 +472,12 @@ impl Session {
     /// The profile id.
     pub fn profile_id(&self) -> ProfileId {
         self.profile.id
+    }
+
+    /// The connection budget shared by the player, multiscreen, downloads and recordings
+    /// (see [`super::connections`]).
+    pub fn connections(&self) -> &Arc<super::connections::ConnectionBudget> {
+        &self.connections
     }
 
     /// Xtream or M3U.
@@ -973,6 +1001,8 @@ impl Session {
     pub async fn connection_usage(&self) -> AppResult<(Option<u32>, Option<u32>)> {
         let client = self.client()?;
         let info = client.account_info().await?;
+        self.connections
+            .set_account(info.user_info.max_connections, info.user_info.active_cons);
         Ok((info.user_info.active_cons, info.user_info.max_connections))
     }
 

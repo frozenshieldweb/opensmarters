@@ -68,6 +68,10 @@ pub struct OpensmartersApp {
     frame_count: u64,
     system_motion: crate::platform::SystemMotion,
     window: Option<crate::window_state::WindowTracker>,
+    dvr: crate::dvr::Dvr,
+    sleep: crate::playback::sleep::SleepTimer,
+    alerts: crate::services::alerts::Alerts,
+    multi: crate::playback::multi::MultiView,
     #[cfg(feature = "demo")]
     demo: Option<crate::services::demo::Demo>,
 }
@@ -101,6 +105,10 @@ macro_rules! cx {
             layout: $layout,
             now: Utc::now(),
             next_route: $next,
+            dvr: &mut $s.dvr,
+            sleep: &mut $s.sleep,
+            alerts: &mut $s.alerts,
+            multi: &mut $s.multi,
             prefs_dirty: &mut $s.prefs_dirty,
         }
     };
@@ -183,6 +191,10 @@ impl OpensmartersApp {
             frame_count: 0,
             system_motion,
             window: config.window.map(crate::window_state::WindowTracker::new),
+            dvr: crate::dvr::Dvr::default(),
+            sleep: crate::playback::sleep::SleepTimer::default(),
+            alerts: crate::services::alerts::Alerts::default(),
+            multi: crate::playback::multi::MultiView::default(),
             #[cfg(feature = "demo")]
             demo: config.demo,
         };
@@ -243,9 +255,13 @@ impl OpensmartersApp {
         }
     }
 
-    fn poll_sessions(&mut self, ctx: &egui::Context) {
+    fn poll_sessions(&mut self, ctx: &egui::Context, layout: Layout) {
         match self.sessions.poll(ctx) {
             Some(SessionEvent::Opened(session)) => {
+                {
+                    let mut cx = cx!(self, layout, None);
+                    crate::dvr::on_session_opened(&mut cx, &session);
+                }
                 let route = self.pending_route.take().unwrap_or(Route::Home);
                 tracing::info!(route = %route, "profile opened");
                 if session.is_offline() {
@@ -358,7 +374,8 @@ impl eframe::App for OpensmartersApp {
         self.apply_zoom(&ctx);
         let system_animations = self.system_motion.poll();
         motion::set_reduced(&ctx, self.prefs.effective_reduced_motion(system_animations));
-        self.poll_sessions(&ctx);
+        let early_layout = Layout::new(ctx.content_rect(), self.prefs.tv_mode || self.tv_override);
+        self.poll_sessions(&ctx, early_layout);
         self.playback.update();
         for what in self.services.take_background_errors() {
             self.toasts.push(
@@ -397,6 +414,15 @@ impl eframe::App for OpensmartersApp {
         };
         layout.content =
             Rect::from_min_max(egui::pos2(screen.left() + rail_w, screen.top()), screen.max);
+
+        // Feature hooks (Phase 7): recordings, sleep timer, reminders. They may claim keys
+        // and queue navigation like a screen.
+        {
+            let mut cx = cx!(self, layout, None);
+            crate::dvr::on_frame(&mut cx);
+            crate::playback::sleep::on_frame(&mut cx);
+            crate::services::alerts::on_frame(&mut cx);
+        }
 
         // 1. Screen-owned keys, then the focus engine, then back.
         if let Some(entry) = self.router.top_mut() {
@@ -449,6 +475,10 @@ impl eframe::App for OpensmartersApp {
             let mut cx = cx!(self, layout, None);
             shell::rail(&mut cx, ui, section);
         }
+        {
+            let mut cx = cx!(self, layout, None);
+            crate::services::alerts::show(&mut cx, ui);
+        }
         let bottom = layout.safe_area().bottom();
         self.toasts.show(&ctx, bottom);
         focus::end_frame(&ctx);
@@ -462,7 +492,9 @@ impl eframe::App for OpensmartersApp {
     }
 
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        self.dvr.shutdown();
         if let Some(gl) = gl {
+            self.multi.destroy(gl);
             self.playback.destroy(gl);
         }
         // One small settings write at exit (the background pool may already be gone).

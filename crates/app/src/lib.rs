@@ -23,6 +23,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod dvr;
 pub mod error;
 pub mod focus;
 pub mod harness;

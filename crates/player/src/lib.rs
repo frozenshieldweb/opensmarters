@@ -119,7 +119,10 @@ mod video;
 pub use config::{Hwdec, LogLevel, PlayerConfig};
 pub use error::{Error, LoadError, MpvError, ValidationError};
 pub use ffi::LIBMPV_FILE_NAME;
-pub use playable::{MAX_HEADER_LEN, MAX_URL_LEN, PlayableUrl, Referrer, UrlPolicy, UserAgent};
+pub use playable::{
+    Container, MAX_HEADER_LEN, MAX_URL_LEN, MediaOutput, PlayableUrl, Referrer, SNIFF_BYTES,
+    UrlPolicy, UserAgent, sniff_container,
+};
 pub use player::{
     Aspect, EndReason, LoadOptions, LogLine, Op, Player, PlayerEvent, PlayerState, Property, Track,
     TrackKind, TrackSelection, VideoFit,

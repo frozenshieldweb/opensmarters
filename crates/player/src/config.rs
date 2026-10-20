@@ -108,6 +108,7 @@ pub struct PlayerConfig {
     pub(crate) libmpv_path: Option<PathBuf>,
     pub(crate) audio_output: bool,
     pub(crate) video_output: bool,
+    pub(crate) seekable_cache: bool,
 }
 
 impl Default for PlayerConfig {
@@ -125,6 +126,7 @@ impl Default for PlayerConfig {
             libmpv_path: None,
             audio_output: true,
             video_output: true,
+            seekable_cache: false,
         }
     }
 }
@@ -212,6 +214,17 @@ impl PlayerConfig {
     #[must_use]
     pub fn video_output(mut self, enabled: bool) -> Self {
         self.video_output = enabled;
+        self
+    }
+
+    /// Keep the demuxer cache seekable even for streams the server cannot seek (live TS,
+    /// HTTP without range support): `demuxer-seekable-cache=yes` + `force-seekable=yes`.
+    /// Needed to seek back inside what was received (pause / rewind live TV) and for
+    /// [`crate::Player::dump_cache`]. Seeks outside the cached range fail on such streams.
+    /// Default `false`.
+    #[must_use]
+    pub fn seekable_cache(mut self, enabled: bool) -> Self {
+        self.seekable_cache = enabled;
         self
     }
 
@@ -322,6 +335,10 @@ impl PlayerConfig {
         }
         if !self.video_output {
             v.push(m("vid", s("no")));
+        }
+        if self.seekable_cache {
+            v.push(m("demuxer-seekable-cache", s("yes")));
+            v.push(m("force-seekable", s("yes")));
         }
         v
     }

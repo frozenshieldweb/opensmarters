@@ -33,6 +33,7 @@ fake-panel = { path = "../fake-panel", optional = true }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+directories = "6"
 eframe = { version = "0.37", default-features = false, features = [
     "glow",
     "default_fonts",

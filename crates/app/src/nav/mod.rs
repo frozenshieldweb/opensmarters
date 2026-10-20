@@ -9,5 +9,5 @@
 pub mod route;
 pub mod router;
 
-pub use route::{PlayerRoute, Route, Section, SettingsPage};
+pub use route::{PlayerRoute, RecordingsTab, Route, Section, SettingsPage};
 pub use router::{Change, Entry, NavCommand, Navigator, Router};

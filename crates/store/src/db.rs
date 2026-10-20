@@ -18,7 +18,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use crate::error::{Result, StoreError};
 
 /// The ordered list of migrations. Index `i` upgrades version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[MIGRATION_1];
+pub(crate) const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2];
 
 /// Schema version written by this build.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -149,6 +149,62 @@ CREATE TABLE category_locks (
     state       TEXT NOT NULL CHECK (state IN ('locked', 'unlocked')),
     PRIMARY KEY (profile_id, kind, category_id)
 ) STRICT, WITHOUT ROWID;
+"#;
+
+/// Version 2: recordings / downloads and programme reminders (Phase 7).
+///
+/// `recordings.file_name` is a bare file name relative to the user's recordings folder
+/// (validated: no separators, no `..`); the folder itself is an app setting. Rows never
+/// hold a stream URL: the app rebuilds it from the ids and the profile's credentials.
+const MIGRATION_2: &str = r#"
+CREATE TABLE recordings (
+    id                  INTEGER PRIMARY KEY,
+    profile_id          TEXT    NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+    kind                TEXT    NOT NULL CHECK (kind IN ('movie', 'episode', 'live', 'clip')),
+    state               TEXT    NOT NULL CHECK (state IN ('scheduled', 'queued', 'active',
+                                                          'paused', 'done', 'failed',
+                                                          'cancelled')),
+    item_id             TEXT    NOT NULL,  -- movie stream_id, episode id or live stream_id
+    series_id           TEXT,
+    season              INTEGER,
+    episode             INTEGER,
+    container_extension TEXT,
+    title               TEXT    NOT NULL,
+    subtitle            TEXT,              -- channel or series name
+    icon_url            TEXT,
+    start_at            INTEGER,           -- live: programme start (ms)
+    end_at              INTEGER,           -- live: programme end (ms)
+    file_name           TEXT,              -- relative to the recordings folder
+    bytes_done          INTEGER NOT NULL DEFAULT 0 CHECK (bytes_done >= 0),
+    bytes_total         INTEGER CHECK (bytes_total IS NULL OR bytes_total >= 0),
+    duration_secs       REAL    CHECK (duration_secs IS NULL OR duration_secs >= 0),
+    position_secs       REAL    CHECK (position_secs IS NULL OR position_secs >= 0),
+    error               TEXT,
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL,
+    CHECK (start_at IS NULL OR end_at IS NULL OR end_at > start_at),
+    CHECK (state <> 'scheduled' OR (start_at IS NOT NULL AND end_at IS NOT NULL))
+) STRICT;
+
+CREATE INDEX recordings_profile ON recordings (profile_id, state, start_at);
+
+CREATE TABLE reminders (
+    id           INTEGER PRIMARY KEY,
+    profile_id   TEXT    NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+    stream_id    TEXT    NOT NULL,         -- live channel key
+    start_at     INTEGER NOT NULL,         -- programme start (ms)
+    end_at       INTEGER NOT NULL,
+    title        TEXT    NOT NULL,
+    channel_name TEXT    NOT NULL,
+    icon_url     TEXT,
+    action       TEXT    NOT NULL DEFAULT 'notify' CHECK (action IN ('notify', 'switch')),
+    fired_at     INTEGER,
+    created_at   INTEGER NOT NULL,
+    CHECK (end_at > start_at),
+    UNIQUE (profile_id, stream_id, start_at)
+) STRICT;
+
+CREATE INDEX reminders_due ON reminders (profile_id, start_at);
 "#;
 
 /// Opens (creating if needed) a database file and prepares the connection.
@@ -292,6 +348,20 @@ mod tests {
                              'http://panel.example.invalid:8080', 'fixture_user', 1, 1);
                      INSERT INTO favourites (profile_id, kind, item_id, position, added_at, name)
                      VALUES ('00000000-0000-4000-8000-000000000001', 'live', '42', 0, 1, 'Ch 42');",
+                )
+                .unwrap();
+            }
+            2 => {
+                seed_fixture(conn, 1);
+                conn.execute_batch(
+                    "INSERT INTO recordings (profile_id, kind, state, item_id, title, start_at,
+                                             end_at, created_at, updated_at)
+                     VALUES ('00000000-0000-4000-8000-000000000001', 'live', 'scheduled', '42',
+                             'News', 1000, 2000, 1, 1);
+                     INSERT INTO reminders (profile_id, stream_id, start_at, end_at, title,
+                                            channel_name, created_at)
+                     VALUES ('00000000-0000-4000-8000-000000000001', '42', 1000, 2000, 'News',
+                             'Ch 42', 1);",
                 )
                 .unwrap();
             }

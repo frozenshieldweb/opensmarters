@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/opensmarters/opensmarters"
 publish = false
@@ -25,6 +25,14 @@ unwrap_used = "warn"
 expect_used = "warn"
 dbg_macro = "warn"
 todo = "warn"
+
+# Keep PIN hashing / cache crypto fast in debug builds.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.chacha20poly1305]
+opt-level = 3
 
 [profile.release]
 lto = "thin"

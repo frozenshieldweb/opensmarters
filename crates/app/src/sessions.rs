@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Opening and switching profiles (`cx.sessions`). One profile is open at a time; opening
 //! another replaces it when the login succeeds.
+//!
+//! A replaced or closed session is **closed** ([`Session::close`]): its queued EPG,
+//! guide, look-up and image work is dropped and its background tasks stop before their
+//! next provider request, so the old provider is never called again.
+//!
+//! The manager also reports user input to the open session every frame
+//! ([`Session::note_activity`]): parental unlocks expire after
+//! [`crate::services::session::RELOCK_IDLE`] without input.
 
 use std::sync::Arc;
 
@@ -26,6 +34,23 @@ pub struct SessionManager {
     opening: Option<(ProfileId, String)>,
     loader: Loader<Result<Arc<Session>, OpenFailure>>,
     failure: Option<(ProfileId, OpenFailure)>,
+}
+
+/// True if this frame carries user input (keys, text, clicks, wheel, pointer moves).
+fn has_user_input(ctx: &egui::Context) -> bool {
+    ctx.input(|i| {
+        i.events.iter().any(|e| {
+            matches!(
+                e,
+                egui::Event::Key { .. }
+                    | egui::Event::Text(_)
+                    | egui::Event::PointerButton { .. }
+                    | egui::Event::PointerMoved(_)
+                    | egui::Event::MouseWheel { .. }
+                    | egui::Event::Touch { .. }
+            )
+        })
+    })
 }
 
 impl SessionManager {
@@ -65,6 +90,24 @@ impl SessionManager {
             });
     }
 
+    /// "Refresh channels and films": drops every cached response of `session`'s profile
+    /// (memory and disk) **and then** opens the profile again, in that order — the
+    /// fresh session can never read the old cache, and the old session is closed when
+    /// the new one replaces it. Use it instead of spawning `refresh()` next to
+    /// [`SessionManager::open`] (those two race).
+    pub fn reopen_fresh(&mut self, services: &Services, session: &Arc<Session>) {
+        let profile = session.profile_id();
+        self.opening = Some((profile, session.profile().name.clone()));
+        self.failure = None;
+        let services2 = services.clone();
+        let old = Arc::clone(session);
+        self.loader
+            .start(services.rt(), services.egui(), move |_| async move {
+                old.refresh().await;
+                Ok(Session::open(services2, profile).await)
+            });
+    }
+
     /// Cancels an open in progress.
     pub fn cancel(&mut self) {
         self.loader.cancel();
@@ -73,16 +116,36 @@ impl SessionManager {
 
     /// Closes the current session (e.g. its profile was deleted).
     pub fn close(&mut self) {
-        self.current = None;
+        if let Some(old) = self.current.take() {
+            old.close();
+        }
     }
 
-    /// Replaces the current session directly (tests, demo).
+    /// Replaces the current session directly (tests, demo). The previous one is closed.
     pub fn set_current(&mut self, session: Arc<Session>) {
-        self.current = Some(session);
+        self.replace(session);
     }
 
-    /// Applies a finished open. Call once per frame.
-    pub fn poll(&mut self, _ctx: &egui::Context) -> Option<SessionEvent> {
+    fn replace(&mut self, session: Arc<Session>) {
+        let same = self
+            .current
+            .as_ref()
+            .is_some_and(|old| Arc::ptr_eq(old, &session));
+        if let Some(old) = self.current.replace(session)
+            && !same
+        {
+            old.close();
+        }
+    }
+
+    /// Applies a finished open and reports user input to the open session. Call once per
+    /// frame.
+    pub fn poll(&mut self, ctx: &egui::Context) -> Option<SessionEvent> {
+        if let Some(s) = &self.current
+            && has_user_input(ctx)
+        {
+            s.note_activity();
+        }
         if !self.loader.poll() {
             return None;
         }
@@ -90,7 +153,7 @@ impl SessionManager {
         let (profile, _) = self.opening.take()?;
         match result {
             Ok(session) => {
-                self.current = Some(Arc::clone(&session));
+                self.replace(Arc::clone(&session));
                 Some(SessionEvent::Opened(session))
             }
             Err(f) => {

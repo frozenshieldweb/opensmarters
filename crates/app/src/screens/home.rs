@@ -265,6 +265,15 @@ impl HomeScreen {
 
     fn play_progress(cx: &mut AppCtx<'_>, p: &PlaybackProgress) {
         let Some(session) = cx.session() else { return };
+        // Catch-up resumes from the Catch-up screen (it knows the archive and the
+        // timeshift-format fallback).
+        if p.kind == opensmarters_store::PlaybackKind::Catchup
+            && let Some((stream_id, start)) =
+                crate::services::session::catchup::parse_progress_id(&p.item_id)
+        {
+            super::catchup::open(cx, stream_id, Some(start), true);
+            return;
+        }
         match session.resume_request(p) {
             Ok(req) => cx.play(req, true),
             Err(e) => cx.toasts.error(e.user_message()),

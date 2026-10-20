@@ -55,9 +55,54 @@ pub fn start(rt: &tokio::runtime::Runtime, store: &Store, set_pin: bool) -> anyh
             .parental()
             .set_pin(&SecretString::from(DEMO_PIN.to_owned()))?;
     }
+    // Dev only: `OPENSMARTERS_DEMO_FAVOURITES=1` pre-fills a few favourites (synthetic).
+    if std::env::var_os("OPENSMARTERS_DEMO_FAVOURITES").is_some() {
+        seed_favourites(store, profile.id, &panel)?;
+    }
     tracing::info!("demo provider running on 127.0.0.1:{}", panel.port());
     Ok(Demo {
         panel,
         profile: profile.id,
     })
+}
+
+fn seed_favourites(
+    store: &Store,
+    profile: ProfileId,
+    panel: &fake_panel::Handle,
+) -> anyhow::Result<()> {
+    use opensmarters_store::{ContentKind, ItemSnapshot};
+    let base = panel.base_url().trim_end_matches('/');
+    let cat = panel.catalogue();
+    let favs = store.favourites();
+    for c in cat.live.iter().take(5) {
+        let snap = ItemSnapshot {
+            name: c.name.trim().to_owned(),
+            icon_url: Some(format!("{base}/images/logo/{}.png", c.stream_id)),
+            category_id: Some(c.category_id.to_string()),
+        };
+        favs.add(profile, ContentKind::Live, &c.stream_id.to_string(), &snap)?;
+    }
+    for m in cat.movies.iter().take(4) {
+        let snap = ItemSnapshot {
+            name: m.name.clone(),
+            icon_url: Some(format!("{base}/images/poster/{}.png", m.stream_id)),
+            category_id: Some(m.category_id.to_string()),
+        };
+        favs.add(profile, ContentKind::Movie, &m.stream_id.to_string(), &snap)?;
+    }
+    for s in cat.series.iter().take(3) {
+        let snap = ItemSnapshot {
+            name: s.name.clone(),
+            icon_url: Some(format!("{base}/images/cover/{}.png", s.series_id)),
+            category_id: Some(s.category_id.to_string()),
+        };
+        favs.add(
+            profile,
+            ContentKind::Series,
+            &s.series_id.to_string(),
+            &snap,
+        )?;
+    }
+    Ok(())
 }

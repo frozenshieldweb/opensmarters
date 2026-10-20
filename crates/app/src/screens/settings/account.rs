@@ -141,12 +141,9 @@ impl SettingsPageUi for AccountPage {
                 .show(ui)
                 .activated
             {
-                let s = session.clone();
+                // Invalidate the cache first, then reopen (no race between the two).
                 let services = cx.services.clone();
-                let id = profile.id;
-                let name = profile.name.clone();
-                cx.services.spawn(async move { s.refresh().await });
-                cx.sessions.open(&services, id, name);
+                cx.sessions.reopen_fresh(&services, &session);
                 cx.toasts.info("Refreshing from your provider…");
             }
             if Button::ghost("Switch profile")

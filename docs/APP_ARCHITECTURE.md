@@ -201,6 +201,23 @@ The store is synchronous and **must not be called on the UI thread** (fsync, key
 Argon2). Use `Loader::start_blocking(..)` to read and `cx.services.blocking("what", |s| ..)`
 for fire-and-forget writes.
 
+### Guide, catch-up and search (Phase 4B, `services/session/{guide,catchup}.rs`)
+
+| API | Use |
+|---|---|
+| `guide_row(&channel)` → `RowState::{Loading, Missing, Ready(Arc<EpgRow>)}` | Non-blocking; call every frame for the rows **on screen**. Xtream: `get_simple_data_table` (else `get_short_epg`), bounded LRU (320 rows, 10 min), 3 requests at a time, requests for rows that scrolled away are dropped. XMLTV profiles read the session guide. |
+| `full_row(&channel).await` | The `get_simple_data_table` schedule (archive flags, server-local starts) for Catch-up. |
+| `guide_uses_xmltv()`, `start_guide()`, `xmltv_status()`, `loaded_xmltv()` | XMLTV path: the profile's EPG URL override (keychain), else the M3U `url-tvg`. Parsed off-thread with `core::xmltv::parse_filtered` (window −36 h…+7 d, known channels only, short texts, ≤ 400 k programmes); also feeds Live TV now/next. |
+| `cached_guide_rows()` | Schedules already fetched (Search's programme results). |
+| `server_time_zone()` | Panel zone for server-local strings / catch-up day tabs. |
+| `timeshift_format()`, `saved_timeshift_format()`, `set_timeshift_format(f, persist)` | The format in use (a session choice after the fallback worked, else the profile's); `persist` saves it to the profile in the background. |
+| `catchup_request_with(&channel, &programme, format, resume)` | Catch-up request with an explicit format (the one-time fallback). |
+| `catchup::{Attempt, Fallback}` | Pure fallback policy: failure → offer the other format once → give up; success of the fallback → offer to save it. |
+
+Other screens open Catch-up on a programme with `screens::catchup::open(cx, stream_id,
+Some(start_ts), autoplay)` (Guide, Search, Home's Continue watching). Catch-up resume
+points use the player's id `"<stream_id>@<start>"`.
+
 ## 6. The loader pattern (`task.rs`)
 
 ```rust
@@ -351,6 +368,14 @@ The demo provider is plain HTTP on `127.0.0.1:<random>`; to test onboarding by k
 `fake-panel --port 18765` and type `127.0.0.1:18765`, `demo`, `demo` (`expired`/`expired`,
 `banned`/`banned` show the refusal messages).
 
+Dev-only environment switches for `--demo`:
+
+| Variable | Effect |
+|---|---|
+| `OPENSMARTERS_DEMO_QUIRKS=huge,timeshift-smarters-only` | fake-panel quirks (`huge` = 50 000 channels; `timeshift-503` = every catch-up stream fails like the real panel; `timeshift-smarters-only` = only the Smarters start format plays, to exercise the fallback) |
+| `OPENSMARTERS_DEMO_FAVOURITES=1` | seeds a few synthetic favourites (live, films, series) |
+| `OPENSMARTERS_DEMO_XMLTV=1` | sets the demo profile's EPG URL override to the panel's `xmltv.xml.gz` (guide on the XMLTV path) |
+
 ## 10. UI kit catalogue (`src/ui`)
 
 - **Tokens** (`theme`): `color::*` (§4.1–4.3), `space::*`, `radius::*`, `stroke::*`,
@@ -418,7 +443,9 @@ reformatting existing code so parallel work merges cleanly.
   keeps desktop use out of it.
 - Window-state restore can't be exercised by the harness (it is off for `--ephemeral`, and
   non-ephemeral runs would touch the real keychain); it is unit-tested only.
-- Search history (`services::search_history`) is stored and cleared by Settings › Storage;
-  the Search screen should record queries with `search_history::record` and show them.
-- EPG for M3U profiles uses the first `url-tvg` only.
+- EPG for M3U profiles uses the first `url-tvg` only (or the profile's EPG URL override).
+- Catch-up is Xtream-only: M3U `catchup*` attributes are parsed but no catch-up URL is
+  built from `catchup-source` templates yet.
+- Search finds programmes only in schedules already fetched (Guide rows, XMLTV); films and
+  series in what is cached unless the user loads the full lists.
 - The connection-limit check cannot see the HTTP status mpv got; it asks the account API.

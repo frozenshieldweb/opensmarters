@@ -35,6 +35,13 @@ pub struct Quirks {
     /// `malformed-item`: one corrupt object in each category/stream list (and one EPG entry
     /// with invalid base64).
     pub malformed_item: bool,
+    /// `timeshift-503`: every timeshift request answers `503`, like a real panel whose
+    /// archive is down (clients must degrade gracefully).
+    pub timeshift_503: bool,
+    /// `timeshift-smarters-only`: only the IPTV Smarters start format
+    /// (`YYYY-MM-DD:HH:MM:SS`) plays; the standard `YYYY-MM-DD:HH-MM` form gets `503`
+    /// (exercises a client's format fallback).
+    pub timeshift_smarters_only: bool,
 }
 
 impl Default for Quirks {
@@ -49,6 +56,8 @@ impl Default for Quirks {
             huge: false,
             stream_host: false,
             malformed_item: false,
+            timeshift_503: false,
+            timeshift_smarters_only: false,
         }
     }
 }
@@ -65,6 +74,8 @@ impl Quirks {
         "huge",
         "stream-host",
         "malformed-item",
+        "timeshift-503",
+        "timeshift-smarters-only",
     ];
 
     /// No quirks at all (note: also turns `category-all-literal` off).
@@ -86,6 +97,8 @@ impl Quirks {
             "huge" => &mut self.huge,
             "stream-host" => &mut self.stream_host,
             "malformed-item" => &mut self.malformed_item,
+            "timeshift-503" => &mut self.timeshift_503,
+            "timeshift-smarters-only" => &mut self.timeshift_smarters_only,
             _ => return None,
         })
     }

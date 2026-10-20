@@ -57,6 +57,10 @@ use super::epg::{EpgCache, EpgState};
 use crate::error::{AppError, AppResult};
 use crate::playback::{MediaKind, PlaybackItem, PlaybackRequest, ZapContext, stream_headers};
 
+// Phase 4B extensions (guide rows, bounded XMLTV, catch-up formats) live in child modules
+// so parallel work on this file merges cleanly.
+pub mod catchup;
+pub mod guide;
 // Movies/series: watch state, mark watched, remembered categories (`session/vod.rs`).
 mod vod;
 pub use vod::SeriesWatch;
@@ -951,31 +955,11 @@ impl Session {
         }
     }
 
-    /// The playlist's XMLTV guide (M3U `url-tvg`), downloaded once per session.
+    /// The profile's XMLTV guide (EPG URL override, else the M3U `url-tvg`), downloaded
+    /// once per session and parsed with bounded memory (see [`guide`]).
     async fn xmltv(&self) -> Option<Arc<opensmarters_core::xmltv::Epg>> {
         self.xmltv
-            .get_or_init(|| async {
-                let playlist = self.playlist()?;
-                let url = playlist.tvg_urls.first()?.clone();
-                let url = opensmarters_core::url::Url::parse(url.trim()).ok()?;
-                match self.http.get_bytes(&url).await {
-                    Ok(bytes) => tokio::task::spawn_blocking(move || {
-                        opensmarters_core::xmltv::parse_bytes(
-                            &bytes,
-                            &opensmarters_core::xmltv::XmltvLimits::default(),
-                        )
-                        .ok()
-                        .map(Arc::new)
-                    })
-                    .await
-                    .ok()
-                    .flatten(),
-                    Err(e) => {
-                        tracing::info!(error = %e, "playlist guide download failed");
-                        None
-                    }
-                }
-            })
+            .get_or_init(|| self.load_guide_xmltv())
             .await
             .clone()
     }

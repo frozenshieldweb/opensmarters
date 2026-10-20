@@ -29,8 +29,15 @@ pub struct Demo {
 ///
 /// The panel could not bind, or the profile could not be created.
 pub fn start(rt: &tokio::runtime::Runtime, store: &Store, set_pin: bool) -> anyhow::Result<Demo> {
+    // Dev only: `OPENSMARTERS_DEMO_QUIRKS=huge,timeshift-smarters-only` makes the fake
+    // panel misbehave like real ones (see `fake_panel::Quirks`).
+    let quirks = match std::env::var("OPENSMARTERS_DEMO_QUIRKS") {
+        Ok(list) => fake_panel::Quirks::parse_list([list])?,
+        Err(_) => fake_panel::Quirks::default(),
+    };
     let config = fake_panel::Config {
         media: fake_panel::MediaMode::Background,
+        quirks,
         ..fake_panel::Config::default()
     };
     let panel = rt.block_on(fake_panel::spawn(config))?;
@@ -48,9 +55,65 @@ pub fn start(rt: &tokio::runtime::Runtime, store: &Store, set_pin: bool) -> anyh
             .parental()
             .set_pin(&SecretString::from(DEMO_PIN.to_owned()))?;
     }
+    // Dev only: `OPENSMARTERS_DEMO_FAVOURITES=1` pre-fills a few favourites (synthetic).
+    if std::env::var_os("OPENSMARTERS_DEMO_FAVOURITES").is_some() {
+        seed_favourites(store, profile.id, &panel)?;
+    }
+    // Dev only: `OPENSMARTERS_DEMO_XMLTV=1` sets the profile's EPG URL override to the
+    // panel's gzipped XMLTV, so the guide runs on the XMLTV path.
+    if std::env::var_os("OPENSMARTERS_DEMO_XMLTV").is_some() {
+        let url = SecretString::from(format!(
+            "{}/xmltv.xml.gz",
+            panel.base_url().trim_end_matches('/')
+        ));
+        store
+            .profiles()
+            .set_epg_url_override(profile.id, Some(&url))?;
+    }
     tracing::info!("demo provider running on 127.0.0.1:{}", panel.port());
     Ok(Demo {
         panel,
         profile: profile.id,
     })
+}
+
+fn seed_favourites(
+    store: &Store,
+    profile: ProfileId,
+    panel: &fake_panel::Handle,
+) -> anyhow::Result<()> {
+    use opensmarters_store::{ContentKind, ItemSnapshot};
+    let base = panel.base_url().trim_end_matches('/');
+    let cat = panel.catalogue();
+    let favs = store.favourites();
+    for c in cat.live.iter().take(5) {
+        let snap = ItemSnapshot {
+            name: c.name.trim().to_owned(),
+            icon_url: Some(format!("{base}/images/logo/{}.png", c.stream_id)),
+            category_id: Some(c.category_id.to_string()),
+        };
+        favs.add(profile, ContentKind::Live, &c.stream_id.to_string(), &snap)?;
+    }
+    for m in cat.movies.iter().take(4) {
+        let snap = ItemSnapshot {
+            name: m.name.clone(),
+            icon_url: Some(format!("{base}/images/poster/{}.png", m.stream_id)),
+            category_id: Some(m.category_id.to_string()),
+        };
+        favs.add(profile, ContentKind::Movie, &m.stream_id.to_string(), &snap)?;
+    }
+    for s in cat.series.iter().take(3) {
+        let snap = ItemSnapshot {
+            name: s.name.clone(),
+            icon_url: Some(format!("{base}/images/cover/{}.png", s.series_id)),
+            category_id: Some(s.category_id.to_string()),
+        };
+        favs.add(
+            profile,
+            ContentKind::Series,
+            &s.series_id.to_string(),
+            &snap,
+        )?;
+    }
+    Ok(())
 }

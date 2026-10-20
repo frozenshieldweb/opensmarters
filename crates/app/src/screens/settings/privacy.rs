@@ -224,6 +224,10 @@ impl PrivacyPage {
 }
 
 impl SettingsPageUi for PrivacyPage {
+    fn entry_focus(&self) -> Option<Id> {
+        Some(Id::unique(("settings.privacy.fact", 0usize)))
+    }
+
     fn on_enter(&mut self, cx: &mut AppCtx<'_>) {
         self.key.clear();
         self.key_error = None;

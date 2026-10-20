@@ -805,6 +805,7 @@ impl ParentalPage {
             });
             if close {
                 self.confirm_off = false;
+                focus::request(&cx.egui, Id::unique("settings.parental.off"));
             }
         }
         self.forgot_dialog(cx, ui);

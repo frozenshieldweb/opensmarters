@@ -28,6 +28,10 @@ fn motion_index(follow: bool, reduced: bool) -> usize {
 }
 
 impl SettingsPageUi for AppearancePage {
+    fn entry_focus(&self) -> Option<Id> {
+        Some(Id::unique("settings.tv"))
+    }
+
     fn ui(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {
         page_heading(
             ui,

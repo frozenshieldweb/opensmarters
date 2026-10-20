@@ -22,8 +22,12 @@ pub struct AccountPage {
 }
 
 impl SettingsPageUi for AccountPage {
-    fn on_back(&mut self, _cx: &mut AppCtx<'_>) -> bool {
-        self.gate.take().is_some()
+    fn on_back(&mut self, cx: &mut AppCtx<'_>) -> bool {
+        let was_open = self.gate.take().is_some();
+        if was_open {
+            crate::focus::request(&cx.egui, Id::unique("settings.account.edit"));
+        }
+        was_open
     }
 
     fn ui(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {
@@ -167,7 +171,10 @@ impl SettingsPageUi for AccountPage {
                         edit: Some(profile.id),
                     });
                 }
-                PinPromptResult::Cancelled | PinPromptResult::Forgot => self.gate = None,
+                PinPromptResult::Cancelled | PinPromptResult::Forgot => {
+                    self.gate = None;
+                    crate::focus::request(&cx.egui, Id::unique("settings.account.edit"));
+                }
                 PinPromptResult::Pending => {}
             }
         }

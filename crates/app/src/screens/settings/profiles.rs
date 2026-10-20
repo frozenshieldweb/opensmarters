@@ -52,6 +52,15 @@ pub(crate) fn source_line(p: &Profile) -> String {
     }
 }
 
+/// The button that opened a gated action (focus returns there when it's cancelled).
+fn opener(a: &Action) -> Id {
+    match a {
+        Action::Add => Id::unique("settings.profiles.add"),
+        Action::Edit(id) => Id::unique(("settings.profiles.edit", *id)),
+        Action::Delete(id, _) => Id::unique(("settings.profiles.delete", *id)),
+    }
+}
+
 impl ProfilesPage {
     fn reload(&mut self, cx: &AppCtx<'_>) {
         let store = cx.services.store.clone();
@@ -76,8 +85,16 @@ impl SettingsPageUi for ProfilesPage {
         self.reload(cx);
     }
 
-    fn on_back(&mut self, _cx: &mut AppCtx<'_>) -> bool {
-        self.gate.take().is_some() || self.confirm.take().is_some()
+    fn on_back(&mut self, cx: &mut AppCtx<'_>) -> bool {
+        if let Some((_, action)) = self.gate.take() {
+            crate::focus::request(&cx.egui, opener(&action));
+            return true;
+        }
+        if let Some((id, _)) = self.confirm.take() {
+            crate::focus::request(&cx.egui, Id::unique(("settings.profiles.delete", id)));
+            return true;
+        }
+        false
     }
 
     fn ui(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {
@@ -178,7 +195,11 @@ impl SettingsPageUi for ProfilesPage {
                     self.gate = None;
                     self.run(cx, a);
                 }
-                PinPromptResult::Cancelled | PinPromptResult::Forgot => self.gate = None,
+                PinPromptResult::Cancelled | PinPromptResult::Forgot => {
+                    let back = opener(action);
+                    self.gate = None;
+                    crate::focus::request(&cx.egui, back);
+                }
                 PinPromptResult::Pending => {}
             }
         }
@@ -212,6 +233,7 @@ impl SettingsPageUi for ProfilesPage {
                 });
             if close {
                 self.confirm = None;
+                crate::focus::request(&cx.egui, Id::unique(("settings.profiles.delete", id)));
             }
         }
     }

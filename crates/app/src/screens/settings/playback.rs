@@ -16,6 +16,7 @@ use opensmarters_store::{
 
 use super::{SettingsPageUi, page_heading, section, value_label};
 use crate::error::AppError;
+use crate::focus;
 use crate::playback::tracks::{LANGUAGES, language_name};
 use crate::playback::{BufferPreset, PlayerTuning};
 use crate::screens::AppCtx;
@@ -340,11 +341,23 @@ impl PlaybackPage {
         }
         if close {
             self.picker = None;
+            focus::request(&cx.egui, picker_button(which));
         }
     }
 }
 
+fn picker_button(p: Picker) -> Id {
+    match p {
+        Picker::Audio => Id::unique("settings.pb.audio"),
+        Picker::Subtitles => Id::unique("settings.pb.subs"),
+    }
+}
+
 impl SettingsPageUi for PlaybackPage {
+    fn entry_focus(&self) -> Option<Id> {
+        Some(Id::unique("settings.pb.container").with(self.container))
+    }
+
     fn on_enter(&mut self, cx: &mut AppCtx<'_>) {
         if let Some(s) = cx.session() {
             self.load_from(&s.profile().settings);
@@ -352,8 +365,14 @@ impl SettingsPageUi for PlaybackPage {
         }
     }
 
-    fn on_back(&mut self, _cx: &mut AppCtx<'_>) -> bool {
-        self.picker.take().is_some()
+    fn on_back(&mut self, cx: &mut AppCtx<'_>) -> bool {
+        match self.picker.take() {
+            Some(p) => {
+                focus::request(&cx.egui, picker_button(p));
+                true
+            }
+            None => false,
+        }
     }
 
     fn ui(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {

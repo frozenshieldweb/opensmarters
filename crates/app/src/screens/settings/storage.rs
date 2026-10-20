@@ -554,6 +554,7 @@ impl StoragePage {
             });
             if close {
                 self.confirm_history = false;
+                crate::focus::request(&cx.egui, Id::unique("settings.storage.history"));
             }
         }
         if let Some(gate) = &mut self.gate {
@@ -567,7 +568,10 @@ impl StoragePage {
                     self.gate = None;
                     self.pick_file(cx, FileOp::Import);
                 }
-                PinPromptResult::Cancelled | PinPromptResult::Forgot => self.gate = None,
+                PinPromptResult::Cancelled | PinPromptResult::Forgot => {
+                    self.gate = None;
+                    crate::focus::request(&cx.egui, Id::unique("settings.storage.import"));
+                }
                 PinPromptResult::Pending => {}
             }
         }
@@ -640,6 +644,7 @@ impl StoragePage {
             }
             if close {
                 self.report = None;
+                crate::focus::request(&cx.egui, Id::unique("settings.storage.import"));
             }
         }
     }
@@ -673,19 +678,24 @@ fn import_summary(r: &ImportReport) -> String {
 }
 
 impl SettingsPageUi for StoragePage {
+    fn entry_focus(&self) -> Option<Id> {
+        Some(Id::unique("settings.storage.cache.clear"))
+    }
+
     fn on_enter(&mut self, cx: &mut AppCtx<'_>) {
         self.refresh(cx);
     }
 
-    fn on_back(&mut self, _cx: &mut AppCtx<'_>) -> bool {
-        if self.gate.take().is_some() {
-            return true;
-        }
-        if self.confirm_history {
-            self.confirm_history = false;
-            return true;
-        }
-        self.report.take().is_some()
+    fn on_back(&mut self, cx: &mut AppCtx<'_>) -> bool {
+        let back = if self.gate.take().is_some() || self.report.take().is_some() {
+            Id::unique("settings.storage.import")
+        } else if std::mem::take(&mut self.confirm_history) {
+            Id::unique("settings.storage.history")
+        } else {
+            return false;
+        };
+        crate::focus::request(&cx.egui, back);
+        true
     }
 
     fn ui(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {
@@ -749,6 +759,17 @@ mod tests {
         );
         // Starts at a line boundary when cut.
         assert_eq!(tail(&log, 14).unwrap_or_default(), "line three\n");
+        // "Copy log" redacts again: a secret that slipped into the file never reaches the
+        // clipboard (the log writer already redacts; this is defence in depth).
+        std::fs::write(
+            &log,
+            "GET http://h:80/live/bob/synthetic-pw-71/1.ts\nlogin synthetic-pw-71 ok\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let redactor = opensmarters_core::Redactor::new();
+        redactor.add_secret("synthetic-pw-71");
+        let copied = redactor.redact(&tail(&log, LOG_COPY_BYTES).unwrap_or_default());
+        assert!(!copied.contains("synthetic-pw-71"), "{copied}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

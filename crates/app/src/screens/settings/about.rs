@@ -41,8 +41,16 @@ fn component_rows(ui: &mut Ui, list: &[Component]) {
 }
 
 impl SettingsPageUi for AboutPage {
-    fn on_back(&mut self, _cx: &mut AppCtx<'_>) -> bool {
-        std::mem::take(&mut self.licences)
+    fn entry_focus(&self) -> Option<Id> {
+        Some(Id::unique("settings.about.gpl"))
+    }
+
+    fn on_back(&mut self, cx: &mut AppCtx<'_>) -> bool {
+        let was_open = std::mem::take(&mut self.licences);
+        if was_open {
+            crate::focus::request(&cx.egui, Id::unique("settings.about.licences"));
+        }
+        was_open
     }
 
     fn ui(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {
@@ -177,6 +185,7 @@ impl SettingsPageUi for AboutPage {
                 });
             if close {
                 self.licences = false;
+                crate::focus::request(&cx.egui, Id::unique("settings.about.licences"));
             }
         }
     }

@@ -471,8 +471,15 @@ impl FocusEngine {
         if let Some(best) = best_in_direction(src.rect, dir, same.iter().copied()) {
             return Some(best.id);
         }
-        // 2. Across scopes: geometric best, then prefer the target region's memory.
-        let best = best_in_direction(src.rect, dir, pool.iter().copied())?;
+        // 2. Across scopes: geometric best, then prefer the target region's memory. Up/Down
+        //    never leave the region (the side rail is beside the page: pressing Down at the
+        //    bottom of a page must not jump into the rail's bottom items).
+        let reachable: Vec<&Candidate> = pool
+            .iter()
+            .copied()
+            .filter(|c| dir.axis() == Axis::Horizontal || c.group == src.group)
+            .collect();
+        let best = best_in_direction(src.rect, dir, reachable.iter().copied())?;
         let remembered = |mem: Option<Id>| {
             mem.and_then(|id| pool.iter().find(|c| c.id == id))
                 .filter(|c| is_in_direction(src.rect, c.rect, dir))
@@ -758,6 +765,47 @@ mod tests {
             e.current(),
             Some(rail.id),
             "a chosen rail focus is not stolen"
+        );
+    }
+
+    #[test]
+    fn up_down_never_jump_between_rail_and_page() {
+        let mut e = FocusEngine::new();
+        let rail_settings = Candidate {
+            group: Id::new("rail"),
+            ..cand("nav-settings", r(0.0, 900.0, 200.0, 48.0), "rail")
+        };
+        let rail_home = Candidate {
+            group: Id::new("rail"),
+            ..cand("nav-home", r(0.0, 100.0, 200.0, 48.0), "rail")
+        };
+        let last = Candidate {
+            autofocus: true,
+            ..cand("last-button", r(300.0, 600.0, 120.0, 44.0), "page")
+        };
+        let cands = [rail_home, rail_settings, last];
+        frame(&mut e, NavInput::default(), &cands);
+        assert_eq!(e.current(), Some(last.id));
+        frame(
+            &mut e,
+            NavInput {
+                dir: Some(Dir::Down),
+                ..Default::default()
+            },
+            &cands,
+        );
+        assert_eq!(e.current(), Some(last.id), "Down at the bottom stays put");
+        frame(
+            &mut e,
+            NavInput {
+                dir: Some(Dir::Left),
+                ..Default::default()
+            },
+            &cands,
+        );
+        assert!(
+            e.current() == Some(rail_home.id) || e.current() == Some(rail_settings.id),
+            "Left still reaches the rail"
         );
     }
 

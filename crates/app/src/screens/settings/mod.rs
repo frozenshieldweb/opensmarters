@@ -49,6 +49,12 @@ pub trait SettingsPageUi {
     fn on_back(&mut self, _cx: &mut AppCtx<'_>) -> bool {
         false
     }
+    /// The widget that gets the focus when moving Right from the section list into this
+    /// page for the first time (default: the nearest one geometrically). Text pages return
+    /// their first item so reading starts at the top.
+    fn entry_focus(&self) -> Option<Id> {
+        None
+    }
     /// Draws the page into the detail pane.
     fn ui(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui);
 }
@@ -138,6 +144,19 @@ impl Screen for SettingsScreen {
     fn on_back(&mut self, cx: &mut AppCtx<'_>) -> bool {
         let page = self.page;
         self.page_mut(page).on_back(cx)
+    }
+
+    fn on_input(&mut self, _cx: &mut AppCtx<'_>, ctx: &egui::Context) {
+        // Right from the section list into a page not visited yet: start at its top.
+        let page = self.page;
+        let page_scope = Id::unique(("settings.page", page.slug()));
+        if focus::is_in_scope(ctx, Id::unique("settings.sections"))
+            && focus::scope_memory(ctx, page_scope).is_none()
+            && let Some(entry) = self.page_mut(page).entry_focus()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight))
+        {
+            focus::request(ctx, entry);
+        }
     }
 
     fn section(&self) -> Option<Section> {

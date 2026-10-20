@@ -59,9 +59,9 @@ pub fn item_categories<'a>(
 /// True when `is_locked` says yes for any of `ids`.
 pub fn any_locked<'a>(
     ids: impl IntoIterator<Item = &'a CategoryId>,
-    mut is_locked: impl FnMut(&CategoryId) -> bool,
+    is_locked: impl FnMut(&CategoryId) -> bool,
 ) -> bool {
-    ids.into_iter().any(|id| is_locked(id))
+    ids.into_iter().any(is_locked)
 }
 
 /// True when the item (in categories `ids`) is locked for this session.

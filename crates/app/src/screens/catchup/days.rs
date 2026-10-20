@@ -63,7 +63,7 @@ pub fn archive_days<Z: TimeZone>(
     let mut archived: Vec<ArchiveProgramme> = (0..row.programmes.len())
         .filter_map(|i| row.archive(i, server, now))
         .collect();
-    archived.sort_by(|a, b| b.start.cmp(&a.start));
+    archived.sort_by_key(|p| std::cmp::Reverse(p.start));
     let today = now.with_timezone(viewer).date_naive();
     let mut days: Vec<Day> = Vec::new();
     for p in archived {

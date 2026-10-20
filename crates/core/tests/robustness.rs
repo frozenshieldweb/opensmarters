@@ -19,7 +19,7 @@ use opensmarters_core::secrecy::SecretString;
 use opensmarters_core::urls::{LiveContainer, StreamUrls, TimeshiftFormat};
 use opensmarters_core::{
     Category, LiveStream, LoginInfo, Series, SeriesInfo, ServerInfo, ServerUrl, VodInfo, VodStream,
-    XtreamAccount, m3u, xmltv,
+    XtreamAccount, hls, m3u, xmltv,
 };
 use proptest::prelude::*;
 use serde_json::Value;
@@ -502,6 +502,91 @@ proptest! {
             prop_assert!(matches!(u.scheme(), "http" | "https"));
             let again = ServerUrl::parse(&u.to_string()).unwrap();
             prop_assert_eq!(again, u);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// HLS playlists (recording HLS-only channels)
+// ---------------------------------------------------------------------------------------
+
+fn hls_line() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just("#EXTM3U".to_owned()),
+        "#EXT-X-TARGETDURATION:-?[0-9.e]{0,6}",
+        "#EXT-X-MEDIA-SEQUENCE:[0-9]{0,22}",
+        "#EXTINF:-?[0-9.eE+inf]{0,8},[^\r\n]{0,10}",
+        "#EXT-X-DISCONTINUITY",
+        "#EXT-X-ENDLIST",
+        "#EXT-X-KEY:METHOD=(NONE|AES-128|SAMPLE-AES)(,URI=\"[^\"\r\n]{0,10}\")?",
+        "#EXT-X-MAP:URI=\"[^\"\r\n]{0,16}\"(,BYTERANGE=\"[0-9@]{0,6}\")?",
+        "#EXT-X-STREAM-INF:(BANDWIDTH=[0-9]{0,12})?(,RESOLUTION=[0-9]{0,5}x[0-9]{0,5})?(,AUDIO=\"[a-z]{0,3}\")?",
+        "#EXT-X-MEDIA:TYPE=(AUDIO|VIDEO),GROUP-ID=\"[a-z]{0,3}\"(,URI=\"[a-z./]{0,8}\")?",
+        "(http|https|file|data|edl|ftp)://[a-z]{0,8}(/[a-zA-Z0-9._%-]{0,8}){0,3}",
+        "[a-zA-Z0-9._/-]{0,20}([?][a-z]=[0-9])?",
+        "[^\r\n]{0,30}",
+        Just(String::new()),
+    ]
+}
+
+fn hls_doc() -> impl Strategy<Value = String> {
+    (
+        prop::collection::vec(hls_line(), 0..40),
+        prop::sample::select(vec!["\n", "\r\n"]),
+        any::<bool>(),
+    )
+        .prop_map(|(lines, sep, header)| {
+            let body = lines.join(sep);
+            if header {
+                format!("#EXTM3U{sep}{body}")
+            } else {
+                body
+            }
+        })
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    #[test]
+    fn hls_never_panics_on_bytes(bytes in prop::collection::vec(any::<u8>(), 0..2048)) {
+        let base = opensmarters_core::url::Url::parse("http://cdn.example.com/l/u/p/1/i.m3u8").unwrap();
+        let _ = hls::looks_like_playlist(&bytes);
+        let _ = hls::parse(&bytes, &base, &hls::HlsLimits::default());
+    }
+
+    #[test]
+    fn hls_structured_invariants(doc in hls_doc(), max_segments in 1usize..8) {
+        let base = opensmarters_core::url::Url::parse("https://cdn.example.com/l/u/p/1/i.m3u8").unwrap();
+        let limits = hls::HlsLimits { max_segments, max_variants: 4, ..hls::HlsLimits::default() };
+        let web = |u: &opensmarters_core::url::Url| {
+            matches!(u.scheme(), "http" | "https") && u.host_str().is_some_and(|h| !h.is_empty())
+        };
+        match hls::parse(doc.as_bytes(), &base, &limits) {
+            Ok(hls::Playlist::Master(m)) => {
+                prop_assert!(!m.variants.is_empty() && m.variants.len() <= 4);
+                prop_assert!(m.variants.iter().all(|v| web(&v.uri)));
+                if let Some(best) = m.best() {
+                    prop_assert!(!best.separate_audio);
+                }
+            }
+            Ok(hls::Playlist::Media(m)) => {
+                prop_assert!(m.segments.len() <= max_segments);
+                for s in &m.segments {
+                    prop_assert!(web(&s.uri));
+                    prop_assert!(s.init.as_ref().is_none_or(web));
+                    prop_assert!(s.duration.is_finite() && s.duration >= 0.0);
+                    prop_assert!(!format!("{s:?}").contains("cdn.example.com"), "Debug hides URIs");
+                }
+                for w in m.segments.windows(2) {
+                    prop_assert!(w[0].sequence < w[1].sequence || w[1].sequence == u64::MAX);
+                }
+                let wait = m.reload_after();
+                prop_assert!(wait >= std::time::Duration::from_secs(1) && wait <= std::time::Duration::from_secs(10));
+            }
+            Err(e) => {
+                let _ = e.to_string();
+            }
         }
     }
 }

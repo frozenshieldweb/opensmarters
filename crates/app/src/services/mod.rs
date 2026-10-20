@@ -69,6 +69,7 @@ pub struct Services {
     /// True for `--ephemeral` (in-memory store, memory keychain).
     pub ephemeral: bool,
     egui: egui::Context,
+    errors: Arc<std::sync::Mutex<Vec<&'static str>>>,
 }
 
 impl std::fmt::Debug for Services {
@@ -104,6 +105,7 @@ impl Services {
             paths,
             ephemeral,
             egui,
+            errors: Arc::default(),
         }
     }
 
@@ -118,19 +120,50 @@ impl Services {
     }
 
     /// Runs a blocking closure (store/keychain) on the runtime's blocking pool and
-    /// forgets the result; errors are logged. Requests a repaint when done.
+    /// forgets the result. Errors are logged and reported to the app, which shows a toast
+    /// ([`Services::take_background_errors`]). Requests a repaint when done.
     pub fn blocking<F>(&self, what: &'static str, f: F)
     where
         F: FnOnce(&Store) -> Result<(), opensmarters_store::StoreError> + Send + 'static,
     {
         let store = Arc::clone(&self.store);
         let ctx = self.egui.clone();
+        let errors = Arc::clone(&self.errors);
         self.rt.spawn_blocking(move || {
             if let Err(e) = f(&store) {
                 tracing::warn!(error = %e, "{what} failed");
+                let mut q = errors
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if !q.contains(&what) && q.len() < 16 {
+                    q.push(what);
+                }
             }
             ctx.request_repaint();
         });
+    }
+
+    /// Reports a failed background job by its short description (e.g. `"save progress"`);
+    /// the app shows it as a toast.
+    pub fn report_background_error(&self, what: &'static str) {
+        let mut q = self
+            .errors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !q.contains(&what) && q.len() < 16 {
+            q.push(what);
+        }
+        self.egui.request_repaint();
+    }
+
+    /// Drains the failed background jobs (descriptions given to [`Services::blocking`]).
+    pub fn take_background_errors(&self) -> Vec<&'static str> {
+        std::mem::take(
+            &mut *self
+                .errors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     /// Spawns a future on the runtime.
@@ -141,6 +174,18 @@ impl Services {
     {
         self.rt.spawn(fut)
     }
+}
+
+/// The toast text for a failed background job (`what` as given to
+/// [`Services::blocking`]). Plain language, no error details (those are in the log).
+pub fn background_error_message(what: &str) -> String {
+    let what = what.trim();
+    let what = if what.is_empty() {
+        "save a change"
+    } else {
+        what
+    };
+    format!("Couldn't {what}. Your disk may be full or busy; details are in the log.")
 }
 
 /// A stable 64-bit FNV-1a hash (ids and cache file names must not change between Rust
@@ -163,6 +208,15 @@ pub fn stable_hash(parts: &[&str]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_error_text_is_plain() {
+        assert_eq!(
+            background_error_message("save progress"),
+            "Couldn't save progress. Your disk may be full or busy; details are in the log."
+        );
+        assert!(background_error_message(" ").starts_with("Couldn't save a change."));
+    }
 
     #[test]
     fn stable_hash_is_stable() {

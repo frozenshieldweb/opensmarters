@@ -15,6 +15,8 @@
 //! | [`task`] | [`task::Loader`] for background work |
 //! | [`sessions`] | Opening/switching profiles |
 //! | [`logging`] | Redacted logging |
+//! | [`platform`] | OS queries (Windows animation setting) and "open folder" |
+//! | [`window_state`] | Window size/position remembered between runs |
 //! | [`cli`], [`harness`] | Command line and the dev/test harness |
 
 #![forbid(unsafe_code)]
@@ -26,9 +28,11 @@ pub mod focus;
 pub mod harness;
 pub mod logging;
 pub mod nav;
+pub mod platform;
 pub mod playback;
 pub mod screens;
 pub mod services;
 pub mod sessions;
 pub mod task;
 pub mod ui;
+pub mod window_state;

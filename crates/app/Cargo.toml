@@ -53,6 +53,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "registry", "ansi"] }
 
+[target.'cfg(windows)'.dependencies]
+# Safe WinRT projection: `UISettings.AnimationsEnabled` (reduced motion follows Windows).
+windows = { version = "0.62", default-features = false, features = ["UI_ViewManagement"] }
+
 [dev-dependencies]
 fake-panel = { path = "../fake-panel" }
 

@@ -15,7 +15,11 @@
 //!   [`PlaybackController::notice`] ("Connection limit reached (3/3) …") instead of a
 //!   generic error.
 //! - **Subtitles are off by default** (mpv would auto-select embedded closed captions on
-//!   live channels). For VOD, a language the user picked in the track sheet is reused.
+//!   live channels). For VOD, the preferred subtitle language (Settings → Playback) or a
+//!   language the user picked in the track sheet is used; the preferred **audio** language
+//!   is selected when a stream has it (see [`tracks`]).
+//! - **Hardware decoding and the network buffer** come from Settings → Playback
+//!   ([`PlayerTuning`]) and apply when the player starts.
 //! - **VOD end of file = finished**, not an error: the resume point is marked finished.
 //! - **Progress** of movies/episodes/catch-up is saved every [`SAVE_EVERY`] and when
 //!   playback stops or switches.
@@ -27,6 +31,7 @@
 //! context while GL is current), then the player is dropped.
 
 pub mod request;
+pub mod tracks;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,14 +39,15 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use opensmarters_core::{DEFAULT_USER_AGENT, Redactor};
 use opensmarters_player::{
-    EndReason, LoadOptions, LogLevel, Player, PlayerConfig, PlayerEvent, PlayerState, TrackKind,
-    TrackSelection, UserAgent, VideoFit, VideoView,
+    EndReason, Hwdec, LoadOptions, LogLevel, Player, PlayerConfig, PlayerEvent, PlayerState,
+    TrackKind, TrackSelection, UserAgent, VideoFit, VideoView,
 };
 use opensmarters_store::{ItemSnapshot, PlaybackSnapshot};
 
 pub use request::{
     MediaKind, PlaybackItem, PlaybackRequest, StreamHeaders, ZapContext, stream_headers,
 };
+pub use tracks::{BufferPreset, PlayerTuning};
 
 use crate::services::Session;
 
@@ -127,6 +133,8 @@ pub struct PlaybackController {
     notice: Arc<std::sync::Mutex<Option<String>>>,
     last_limit_check: Option<Instant>,
     sub_pref: SubPref,
+    audio_pref: Option<String>,
+    tuning: PlayerTuning,
 }
 
 impl std::fmt::Debug for PlaybackController {
@@ -140,7 +148,8 @@ impl std::fmt::Debug for PlaybackController {
 
 impl PlaybackController {
     /// Creates the player. Without libmpv (or the glow renderer) the controller still
-    /// works but reports [`PlaybackStatus::Unavailable`].
+    /// works but reports [`PlaybackStatus::Unavailable`]. `tuning` (hardware decoding,
+    /// buffer) is fixed for the player's lifetime.
     pub fn new(
         get_proc_address: Option<opensmarters_player::GetProcAddress>,
         ctx: &egui::Context,
@@ -148,6 +157,7 @@ impl PlaybackController {
         fit_index: u8,
         volume: u8,
         mpv_log: LogLevel,
+        tuning: PlayerTuning,
     ) -> Self {
         let mut init_error = None;
         let engine = match get_proc_address {
@@ -158,7 +168,14 @@ impl PlaybackController {
             Some(gpa) => {
                 let config = PlayerConfig::default()
                     .log_level(mpv_log)
-                    .initial_volume(volume.min(100));
+                    .initial_volume(volume.min(100))
+                    .hwdec(if tuning.hw_decoding {
+                        Hwdec::AutoSafe
+                    } else {
+                        Hwdec::Disabled
+                    })
+                    .cache_mib(tuning.buffer.forward_mib, tuning.buffer.back_mib)
+                    .network_timeout(Duration::from_secs(tuning.buffer.timeout_secs));
                 let config = match UserAgent::new(DEFAULT_USER_AGENT) {
                     Ok(ua) => config.user_agent(ua),
                     Err(_) => config,
@@ -194,7 +211,22 @@ impl PlaybackController {
             notice: Arc::new(std::sync::Mutex::new(None)),
             last_limit_check: None,
             sub_pref: SubPref::Off,
+            audio_pref: None,
+            tuning,
         }
+    }
+
+    /// The hardware decoding / buffer options the player started with.
+    pub fn tuning(&self) -> PlayerTuning {
+        self.tuning
+    }
+
+    /// Sets the preferred audio and subtitle languages (Settings → Playback; codes as
+    /// stored in the preferences, `None` = stream default / off). Applies to the next
+    /// stream; a track-sheet choice still overrides the subtitle language for the run.
+    pub fn set_track_prefs(&mut self, audio: Option<String>, subtitles: Option<String>) {
+        self.audio_pref = audio;
+        self.sub_pref = subtitles.map_or(SubPref::Off, SubPref::Lang);
     }
 
     /// True if libmpv loaded.
@@ -428,16 +460,16 @@ impl PlaybackController {
             return;
         }
         a.subs_applied = true;
-        let pick = match (&self.sub_pref, a.req.kind.is_live()) {
-            (SubPref::Lang(lang), false) => st
-                .subtitle_tracks()
-                .find(|t| t.lang.as_deref() == Some(lang.as_str()))
-                .map(|t| TrackSelection::Id(t.id)),
-            _ => None,
+        let pref = match &self.sub_pref {
+            SubPref::Lang(lang) => Some(lang.as_str()),
+            SubPref::Off => None,
         };
-        let _ = engine
-            .player
-            .select_subtitle(pick.unwrap_or(TrackSelection::Off));
+        let subs = tracks::pick_subtitle(&st.tracks, pref, a.req.kind.is_live());
+        let _ = engine.player.select_subtitle(subs);
+        if let Some(id) = tracks::pick_audio(&st.tracks, self.audio_pref.as_deref()) {
+            tracing::debug!(id, "selecting the preferred audio language");
+            let _ = engine.player.select_audio(TrackSelection::Id(id));
+        }
     }
 
     /// Asks the provider whether the account's connection limit is exhausted (after a

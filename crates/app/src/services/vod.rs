@@ -324,6 +324,21 @@ pub fn episode_title(raw: &str, series_name: &str, number: u32) -> String {
     }
 }
 
+/// The series name: `info.name`, else guessed from the first episode's title
+/// (`"Show - S01E01 - Pilot"` → `"Show"`) for panels whose `info` is empty.
+pub fn series_name(info: &SeriesInfo) -> String {
+    if let Some(n) = info.info.name.as_deref().filter(|n| !n.trim().is_empty()) {
+        return n.to_owned();
+    }
+    let guess = info.episodes.values().flatten().next().and_then(|ep| {
+        let (head, rest) = ep.title.trim().split_once(" - ")?;
+        let b = rest.trim_start().as_bytes();
+        let code = b.len() >= 2 && b[0].eq_ignore_ascii_case(&b's') && b[1].is_ascii_digit();
+        (code && !head.trim().is_empty()).then(|| head.trim().to_owned())
+    });
+    guess.unwrap_or_default()
+}
+
 /// Every episode as `(season, number, id)` in season/episode order.
 pub fn episode_index(info: &SeriesInfo) -> Vec<(u32, u32, u64)> {
     let mut out = Vec::with_capacity(info.episode_count());
@@ -587,6 +602,18 @@ mod tests {
         assert_eq!(episode_code(3, 7), "S3·E7");
         assert_eq!(season_label(0), "Specials");
         assert_eq!(season_label(2), "Season 2");
+    }
+
+    #[test]
+    fn series_names_fall_back_to_episode_titles() {
+        let mut i = info(&[(1, &[1])]);
+        if let Some(e) = i.episodes.get_mut(&1).and_then(|v| v.first_mut()) {
+            e.title = "My Show - S01E01 - Pilot".into();
+        }
+        assert_eq!(series_name(&i), "My Show");
+        i.info.name = Some("Named".into());
+        assert_eq!(series_name(&i), "Named");
+        assert_eq!(series_name(&info(&[(1, &[1])])), "");
     }
 
     #[test]

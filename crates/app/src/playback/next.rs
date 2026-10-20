@@ -92,7 +92,7 @@ impl PlaybackController {
                     Ok(info) => {
                         let queue = EpisodeQueue {
                             series_id,
-                            series_name: info.info.name.clone().unwrap_or_default(),
+                            series_name: vod::series_name(&info),
                             artwork: session.safe_url(info.info.cover.as_deref()),
                             info,
                         };

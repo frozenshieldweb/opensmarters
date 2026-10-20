@@ -94,6 +94,15 @@ impl<'a> Dropdown<'a> {
         let (anchor, _) = ui.allocate_exact_size(size, Sense::hover());
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(anchor));
         let f = button.show(&mut child);
+        // Give the focus back to the button the frame after the menu closed (while it
+        // was open this frame its focus trap would send the focus back into the menu).
+        let refocus = self.id.with("refocus");
+        if ctx
+            .data_mut(|d| d.remove_temp::<bool>(refocus))
+            .unwrap_or(false)
+        {
+            focus::request(&ctx, Self::button_id(self.id));
+        }
         let mut open = Self::is_open(&ctx, self.id);
         if f.activated {
             open = !open;
@@ -187,7 +196,8 @@ impl<'a> Dropdown<'a> {
             });
             if chosen.is_some() || clicked_outside {
                 open = false;
-                focus::request(&ctx, Self::button_id(self.id));
+                ctx.data_mut(|d| d.insert_temp(refocus, true));
+                ctx.request_repaint();
             }
         }
         ctx.data_mut(|d| d.insert_temp(Self::open_id(self.id), open));

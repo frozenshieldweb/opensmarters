@@ -150,9 +150,11 @@ fn movie_header(info: &VodInfo) -> Header {
     }
 }
 
+use vod::series_name;
+
 fn series_header(info: &SeriesInfo) -> Header {
     let d = &info.info;
-    let raw = d.name.clone().unwrap_or_default();
+    let raw = series_name(info);
     let shown = vod::display_title(&raw);
     let year = vod::release_year(d.release_date.as_deref(), &raw).map(|y| y.to_string());
     let seasons = episodes::season_order(info)
@@ -201,7 +203,7 @@ pub struct DetailScreen {
     movie: Loader<Arc<VodInfo>>,
     series: Loader<Arc<SeriesInfo>>,
     movie_progress: Loader<Option<PlaybackProgress>>,
-    watch: Loader<SeriesWatch>,
+    watch: Loader<Arc<SeriesWatch>>,
     similar: Loader<Arc<Vec<VodStream>>>,
     progress_epoch: u64,
     header: Option<Header>,
@@ -271,7 +273,7 @@ impl DetailScreen {
             }
             DetailKind::Series(id) => {
                 self.watch.start(cx.rt(), &cx.egui, move |_| async move {
-                    session.series_watch(id).await
+                    session.series_watch(id).await.map(Arc::new)
                 });
             }
         }
@@ -357,7 +359,7 @@ impl DetailScreen {
         let Some((season, number, ep)) = vod::locate_episode(&info, episode_id) else {
             return;
         };
-        let name = info.info.name.clone().unwrap_or_default();
+        let name = series_name(&info);
         let artwork = self.header.as_ref().and_then(|h| h.poster.clone());
         match session.series_episode_request(
             series_id,
@@ -418,7 +420,7 @@ impl DetailScreen {
         let artwork = self.header.as_ref().and_then(|h| h.poster.clone());
         self.watch.start(cx.rt(), &cx.egui, move |_| async move {
             if let Some((season, number, ep)) = vod::locate_episode(&info, episode_id) {
-                let name = info.info.name.clone().unwrap_or_default();
+                let name = series_name(&info);
                 session
                     .set_episode_watched(
                         series_id,
@@ -431,7 +433,7 @@ impl DetailScreen {
                     )
                     .await?;
             }
-            session.series_watch(series_id).await
+            session.series_watch(series_id).await.map(Arc::new)
         });
     }
 }
@@ -959,12 +961,12 @@ impl DetailScreen {
         }
         let before = self.season;
         let images = cx.services.images.clone();
-        let name = info.info.name.clone().unwrap_or_default();
+        let name = series_name(&info);
         let artwork = self.header.as_ref().and_then(|h| h.poster.clone());
         let watch = self.watch.value().cloned();
         let e = Episodes {
             info: &info,
-            watch: watch.as_ref(),
+            watch: watch.as_deref(),
             series_name: &name,
             artwork: artwork.as_deref(),
             continue_id: target.map(|t| t.episode_id),

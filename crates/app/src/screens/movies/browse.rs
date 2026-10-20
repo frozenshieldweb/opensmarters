@@ -201,7 +201,7 @@ pub(crate) struct Browse<K: BrowseKind> {
     sort: VodSort,
     cat_filter: String,
     pin: Option<PinPrompt>,
-    progress: Loader<HashMap<u64, PlaybackProgress>>,
+    progress: Loader<Arc<HashMap<u64, PlaybackProgress>>>,
     progress_epoch: u64,
     scroll_to: Option<usize>,
     _kind: PhantomData<K>,
@@ -271,7 +271,7 @@ impl<K: BrowseKind> Browse<K> {
         let Some(session) = cx.session() else { return };
         self.progress_epoch = cx.playback.progress_epoch();
         self.progress.start(cx.rt(), &cx.egui, move |_| async move {
-            session.movie_progress_map().await
+            session.movie_progress_map().await.map(Arc::new)
         });
     }
 
@@ -745,9 +745,9 @@ impl<K: BrowseKind> Browse<K> {
                         picked = Some((Selection::All, all.clone()));
                     }
                     let (r, _) =
-                        ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
+                        ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
                     ui.painter().text(
-                        pos2(r.left() + 12.0, r.center().y),
+                        pos2(r.left() + 12.0, r.center().y + 4.0),
                         Align2::LEFT_CENTER,
                         "Loads everything: slower",
                         font::caption(),
@@ -832,6 +832,17 @@ impl<K: BrowseKind> Browse<K> {
                 .size(search_w, 44.0)
                 .show(ui, query);
             changed = r.changed;
+            // Right at the end of the text moves on to the sort menu (the field keeps
+            // Left/Right for editing otherwise).
+            if r.focus.focused && ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                let len = query.chars().count();
+                let at_end = egui::TextEdit::load_state(ui.ctx(), search_id.with("te"))
+                    .and_then(|s| s.cursor.char_range())
+                    .is_none_or(|c| c.primary.index.0 >= len);
+                if at_end {
+                    focus::request(ui.ctx(), Dropdown::button_id(sort_id));
+                }
+            }
             let w = ui.available_width();
             ui.allocate_ui_with_layout(
                 vec2(w, 44.0),

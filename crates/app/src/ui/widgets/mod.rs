@@ -22,7 +22,8 @@
 //! | [`clock`] | [`clock`](clock::clock) |
 //! | [`dropdown`] | [`Dropdown`] (sort menu with focus trap) |
 //! | [`episode_row`] | [`EpisodeRow`] (still, progress, title, synopsis, watched toggle) |
-//! | [`up_next`] | [`UpNextPrompt`] (next-episode countdown) |
+//! | [`up_next`] | [`UpNextPrompt`] (next-episode countdown), `UpNextCard` (last seconds) |
+//! | [`zap_banner`] | `ZapBanner` (channel banner on every live channel change) |
 
 pub mod button;
 pub mod callout;
@@ -42,6 +43,7 @@ pub mod pin_prompt;
 pub mod rail;
 pub mod toast;
 pub mod up_next;
+pub mod zap_banner;
 
 pub use button::{Button, ButtonKind, IconButton};
 pub use callout::{Badge, Callout, CalloutKind};

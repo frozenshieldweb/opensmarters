@@ -11,10 +11,13 @@ fuzz_target!(|data: &[u8]| {
         max_total_bytes: 1 << 20,
         max_line_len: 64 * 1024,
         max_entries: 100_000,
+        ..m3u::M3uLimits::default()
     };
     if let Ok(pl) = m3u::parse(data, &limits) {
         assert!(pl.entries.len() <= limits.max_entries);
+        assert!(pl.tvg_urls.len() <= limits.max_tvg_urls);
         for e in &pl.entries {
+            assert!(e.attributes.len() <= limits.max_attributes_per_line);
             assert!(!e.url.is_empty());
             assert!(!e.url.starts_with('#'));
             assert!(!e.title.contains(['\r', '\n']));

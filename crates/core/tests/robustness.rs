@@ -286,7 +286,7 @@ proptest! {
 
     #[test]
     fn m3u_limits_hold(doc in m3u_doc(), max_entries in 0usize..5, max_line in 1usize..64) {
-        let limits = m3u::M3uLimits { max_total_bytes: 4096, max_line_len: max_line, max_entries };
+        let limits = m3u::M3uLimits { max_total_bytes: 4096, max_line_len: max_line, max_entries, ..m3u::M3uLimits::default() };
         if let Ok(pl) = m3u::parse(doc.as_bytes(), &limits) {
             prop_assert!(pl.entries.len() <= max_entries);
         }

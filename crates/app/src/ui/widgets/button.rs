@@ -135,6 +135,14 @@ impl Button {
         self
     }
 
+    /// How much of the surroundings to bring into view with the button when it gets the
+    /// focus (default 16 pt), e.g. the whole hero band above Home's buttons.
+    #[must_use]
+    pub fn scroll_margin(mut self, margin: Vec2) -> Self {
+        self.opts = self.opts.scroll_margin2(margin);
+        self
+    }
+
     /// The size this button will take.
     pub fn size(&self, ui: &Ui) -> Vec2 {
         let (h, pad) = self.metrics();

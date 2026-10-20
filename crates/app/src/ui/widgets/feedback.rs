@@ -45,6 +45,90 @@ pub fn skeleton_line(ctx: &Context, painter: &Painter, pos: egui::Pos2, width: f
     skeleton(ctx, painter, Rect::from_min_size(pos, vec2(width, 12.0)), 4);
 }
 
+/// The card shape a [`skeleton_rail`] repeats.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SkeletonCard {
+    /// A 2:3 poster `width` wide, with the title and meta lines below it.
+    Poster(f32),
+    /// A 16:9 backdrop card or channel tile of this size (text inside).
+    Tile(egui::Vec2),
+}
+
+impl SkeletonCard {
+    /// Height of the card including any text below it (matches `PosterCard::height`).
+    pub fn height(self) -> f32 {
+        match self {
+            SkeletonCard::Poster(w) => (w * 1.5).round() + 10.0 + 22.0 + 20.0,
+            SkeletonCard::Tile(s) => s.y,
+        }
+    }
+
+    fn width(self) -> f32 {
+        match self {
+            SkeletonCard::Poster(w) => w,
+            SkeletonCard::Tile(s) => s.x,
+        }
+    }
+}
+
+/// Height of a content rail (§6.2, `widgets::Rail`) of `card`: the 40 pt heading row,
+/// 12 pt to the cards, 16 pt of paint allowance below them.
+pub fn rail_height(card: SkeletonCard) -> f32 {
+    40.0 + 12.0 + card.height() + 16.0
+}
+
+/// A loading content rail with exactly the real rail's geometry (§6.16): a heading bar
+/// and as many card skeletons as fit `slot` (first card at `margin`, 16 pt gaps; the last
+/// one is cut like the real rail's peek). `slot` is the rail's full rect
+/// ([`rail_height`] tall).
+pub fn skeleton_rail(
+    ctx: &Context,
+    painter: &Painter,
+    slot: Rect,
+    margin: f32,
+    card: SkeletonCard,
+    heading_width: f32,
+) {
+    let head_y = slot.top() + 20.0;
+    skeleton(
+        ctx,
+        painter,
+        Rect::from_min_size(
+            pos2(slot.left() + margin, head_y - 9.0),
+            vec2(heading_width, 18.0),
+        ),
+        4,
+    );
+    let p = painter.with_clip_rect(painter.clip_rect().intersect(slot));
+    let top = slot.top() + 52.0;
+    let w = card.width();
+    let mut x = slot.left() + margin;
+    while x < slot.right() {
+        match card {
+            SkeletonCard::Poster(_) => {
+                let img = Rect::from_min_size(pos2(x, top), vec2(w, (w * 1.5).round()));
+                skeleton(ctx, &p, img, 12);
+                skeleton(
+                    ctx,
+                    &p,
+                    Rect::from_min_size(pos2(x, img.bottom() + 14.0), vec2(w * 0.78, 12.0)),
+                    4,
+                );
+                skeleton(
+                    ctx,
+                    &p,
+                    Rect::from_min_size(pos2(x, img.bottom() + 36.0), vec2(w * 0.42, 10.0)),
+                    4,
+                );
+            }
+            SkeletonCard::Tile(s) => {
+                skeleton(ctx, &p, Rect::from_min_size(pos2(x, top), s), 12);
+            }
+        }
+        x += w + 16.0;
+    }
+}
+
 /// An empty/error state: illustration, Fraunces headline, body, one action.
 #[derive(Debug)]
 pub struct EmptyState<'a> {

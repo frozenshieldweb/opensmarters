@@ -1913,3 +1913,63 @@ fn continue_meta(p: &PlaybackProgress) -> String {
         _ => left,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn band(h: f32) -> Rect {
+        Rect::from_min_size(pos2(0.0, 0.0), vec2(1600.0, h))
+    }
+
+    #[test]
+    fn hero_text_fits_the_band() {
+        // 1080p desktop: two-line title and synopsis.
+        let l = HeroLayout::new(band(561.0), 48.0, false);
+        assert_eq!((l.title_rows, l.synopsis_rows), (2, 2));
+        // TV (≈ 620 pt tall): the band is ≈ 44% + the overlap; lines are dropped so the
+        // text never climbs above the band.
+        let l = HeroLayout::new(band((617.0_f32 * 0.44).round() + RAIL_OVERLAP), 40.0, true);
+        assert_eq!(l.title_rows, 1);
+        assert!(l.buttons_top > l.top);
+        // Buttons sit 24 pt above where the rails start.
+        let b = band(400.0);
+        let l = HeroLayout::new(b, 40.0, false);
+        assert_eq!(l.buttons_top + 52.0, b.bottom() - RAIL_OVERLAP - 24.0);
+    }
+
+    #[test]
+    fn basic_hero_keeps_the_backdrop_until_details_arrive() {
+        let m = MovieRef {
+            id: 7,
+            name: "FR | The Saltward Road (2026)".into(),
+            poster: Some("https://img.example/p.jpg".into()),
+            extension: Some("mkv".into()),
+            meta: "2026".into(),
+        };
+        let item = HeroItem::Movie(m);
+        let waiting = basic_hero(&item, false);
+        assert_eq!(waiting.title, "The Saltward Road");
+        assert!(
+            waiting.backdrop.is_none(),
+            "no poster flash before the real backdrop"
+        );
+        assert_eq!(
+            basic_hero(&item, true).backdrop.as_deref(),
+            Some("https://img.example/p.jpg"),
+            "the poster stands in when the details failed"
+        );
+        assert_eq!(item.key(), HeroKey::Movie(7));
+    }
+
+    #[test]
+    fn rail_slots_match_the_rail_geometry() {
+        // Heading 40 + 12 to the cards + card + 16 allowance (widgets::Rail).
+        assert_eq!(rail_height(SkeletonCard::Tile(vec2(296.0, 166.0))), 234.0);
+        assert_eq!(
+            SkeletonCard::Poster(168.0).height(),
+            PosterCard::height(168.0),
+            "skeleton posters are as tall as real ones"
+        );
+    }
+}

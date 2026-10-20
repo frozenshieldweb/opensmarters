@@ -7,6 +7,8 @@ This is the map of the desktop app for everyone who builds screens on top of it.
 ```powershell
 # Run against the built-in synthetic provider (nothing touches your real data or keychain)
 cargo run -p opensmarters --features demo -- --demo --ephemeral
+# With the dev/test harness flags (--route, --keys, screenshots…; §9)
+cargo run -p opensmarters --features demo,harness -- --demo --ephemeral --route live
 # All gates (use your own target dir when several agents build at once)
 $env:CARGO_TARGET_DIR="target/app"
 cargo fmt; cargo clippy -p opensmarters --all-targets --all-features -- -D warnings; cargo test -p opensmarters --all-features
@@ -21,21 +23,21 @@ cargo fmt; cargo clippy -p opensmarters --all-targets --all-features -- -D warni
 | `src/main.rs` | CLI parsing, logging, tokio runtime, store, `--demo`, `eframe::run_native` |
 | `src/app.rs` | `OpensmartersApp` (the `eframe::App`): frame loop, router, lifecycle hooks, zoom/TV mode, harness hook |
 | `src/screens/` | **One module per screen** + the [`Screen`](#3-the-screen-contract) trait and `AppCtx` (`screens/mod.rs`) |
-| `src/screens/shell.rs` | Side rail (§6.1), `status_cluster` (clock, offline, unencrypted), `page_title` |
+| `src/screens/shell.rs` | Side rail (§6.1; profile menu: Switch / Manage profiles, closed by `shell::close_menus`), `status_cluster` (clock, offline, a quiet unencrypted lock with a tooltip, "Not verified" account notice), `page_title` |
 | `src/screens/common/` | Logic shared by screens: `locks` (an item is locked when any of its categories is), `channel_list` (unlocked + sorted channel lists), `profile_data::delete_profile` (also forgets the profile's recent searches and remembered categories; use it wherever a profile is deleted) |
-| `src/nav/` | `Route` (typed routes, `--route` syntax), `Router` (back stack), `Navigator` (`cx.nav`) |
+| `src/nav/` | `Route` (typed routes, `--route` syntax, `back_label`), `Router` (back stack), `Navigator` (`cx.nav`), `nav::back_label(ctx)` (what the page below is called: "‹ Movies" back buttons) |
 | `src/focus/` | The spatial focus engine (`engine.rs`, pure + unit-tested) and its egui glue (`mod.rs`) |
 | `src/ui/` | Design system: `theme` (tokens, fonts, visuals), `icons` (Phosphor), `paint` (focus ring/glow, scrims, cover-fit), `text` (capping, truncation, timecodes), `motion`, `layout` (breakpoints), `assets` (bundled art), `widgets/` |
 | `src/services/` | `Services` (runtime, store, redactor, images, paths, background-error queue), `Session` (provider: catalogue, EPG, favourites, parental, playback requests; Phase-4 additions in child modules `session/*.rs`), `catalog` (`LiveChannel`, `LiveCatalog`, `Programme`), `images`, `epg`, `prefs` (app-wide preferences), `parental` (PIN length, lockout/wrong-PIN texts, "forgot PIN" check), `backup` (export/import without secrets or machine-local settings), `search_history` (recent searches per profile), `demo` |
-| `src/platform.rs` | Safe OS queries: Windows *Animation effects* (`UISettings.AnimationsEnabled` via the `windows` crate's WinRT projection) for reduced motion; "open folder" |
+| `src/platform.rs` | Safe OS queries: Windows *Animation effects* (`UISettings.AnimationsEnabled` via the `windows` crate's WinRT projection) for reduced motion; `open_folder` / `open_url` through `launcher()` — the system launcher by **absolute path** (`%SystemRoot%\explorer.exe`, `/usr/bin/open`, `xdg-open`), never a bare name resolved via the current directory or `PATH` (SR-16) |
 | `src/window_state.rs` | Window size/position/maximised remembered between runs (store setting `app.window`, physical px, debounced; never for `--ephemeral`/`--window-size`) |
 | `src/playback/tracks.rs` | Preferred audio/subtitle languages (ISO 639 normalisation, track choice), network buffer presets, `PlayerTuning` (hwdec + buffer at player start) |
 | `src/playback/` | `PlaybackController` (the one mpv player + video view, reconnect, progress), `PlaybackRequest` and header plumbing (`request.rs`) |
 | `src/sessions.rs` | `SessionManager` (`cx.sessions`): open/switch profiles |
 | `src/task.rs` | `Loader<T>`: background work with staleness protection |
 | `src/logging.rs` | Redacted `tracing` (stderr + rotating log file) |
-| `src/cli.rs`, `src/harness.rs` | Command line and the dev/test harness (scripted keys, screenshots) |
-| `tests/session.rs` | Integration tests against the in-process `fake-panel` |
+| `src/cli.rs`, `src/harness.rs` | Command line and the dev/test harness (scripted keys, screenshots; harness flags only with the `harness` feature) |
+| `tests/session.rs`, `tests/startup.rs` | Integration tests against the in-process `fake-panel` (startup: cached fast start + background check) |
 
 The crate is a binary **and** a library (`opensmarters_app`) so integration tests can drive
 the session layer, router and focus engine.
@@ -46,14 +48,22 @@ Every frame, in order:
 
 1. `raw_input_hook` — the harness injects scripted key events.
 2. Zoom: TV mode sets `zoom = window_px / 1100` (§3), else `--ppp` or 1.
-3. `sessions.poll()` — a finished profile open navigates to Home (+ pending `--route`).
+3. Startup profile: `Session::open_cached` (store/keychain only) opens a profile that has a
+   cached login **and** live catalogue at once, then `Session::verify` checks the account
+   in the background (network error → offline; refused → toast + quiet "Not verified"
+   header notice). Without a cache the normal sign-in runs while Home shows its skeleton
+   (no blocking "Signing in…" screen at startup; a failure lands on the profile picker).
+   `sessions.poll()` — a finished profile open navigates to Home (+ pending `--route`).
 4. `playback.update()` — mpv events, reconnect, stall detection, progress saves, debounced zaps.
 5. Top screen's `on_input(cx, ctx)` — **screens claim their keys first** (digits, PageUp…).
 6. `focus::begin_frame` — the engine consumes arrows/Enter/Space/Tab; Esc/Backspace = *back*.
 7. Back: the top screen's `on_back` may consume it (close a dialog, hide the OSD); else the
    router goes back; on the root, the focus moves to the side rail.
 8. Paint: background, the screen inside the content rect (focus group *content*), then the
-   side rail on its own layer (focus group *shell*), then toasts.
+   side rail on its own layer (focus group *shell*), then toasts. A route change fades the
+   new page in (§7 fade-through: 240 ms cubic-out with an 8 pt rise; reduced motion a
+   100 ms fade; not into the player, not between two instances of the same page). The page
+   always runs inside the same `with_visual_transform` scope, so ids are stable.
 9. `focus::end_frame` — resolves the pending arrow with this frame's geometry.
 10. Apply queued navigation (lifecycle hooks, focus save/restore), save preferences.
 
@@ -344,14 +354,21 @@ Rules and gotchas:
 
 ## 9. Dev/test harness
 
+The harness flags (`--route`, `--keys`, `--screenshot-after/-out`, `--window-size`, `--ppp`,
+`--exit-after`) are only parsed in builds with the **`harness` cargo feature** (SR-03):
+build with `--features demo,harness` for reviews and agents. Release builds reject them.
+`quit` (and `--exit-after`) wait until every requested screenshot is written, so
+`shot:x.png,quit` is safe; put a short `wait:` before a `shot:` that should catch an
+animation in its final state.
+
 | Flag | Effect |
 |---|---|
 | `--demo` (feature `demo`) | runs `fake-panel` in-process and signs in to a demo profile (`demo`/`demo`); with `--ephemeral` also sets the parental PIN **1234** (locked: "Adult Night") |
 | `--ephemeral` | in-memory database + in-memory keychain: never touches real data |
 | `--data-dir <dir>` | isolated database, image cache and `logs/opensmarters.log` |
-| `--route <route>` | open a route (after sign-in, or at once for `profiles`/`onboarding`) |
+| `--route <route>` | open a route (after sign-in, or at once for `profiles`/`onboarding`; with profiles on the machine `onboarding`/`welcome` open the picker's PIN-gated "Add profile", and `detail:` of an item in a locked category asks for the PIN) |
 | `--keys "<script>"` | comma-separated: key names (`Up Down Left Right Enter Space Esc Back Tab Shift+Tab PageUp PageDown 0–9 M F …`), `wait:<s>`, `text:<chars>`, `shot:<png>`, `quit`; one key per frame with a 0.18 s gap |
-| `--screenshot-after <s> --screenshot-out <png>` | screenshot then exit |
+| `--screenshot-after <s> --screenshot-out <png>` | screenshot then exit (feature `harness`, like the flags below except `--tv`) |
 | `--window-size WxH` | inner size in **physical pixels** |
 | `--ppp <f>` | force pixels-per-point (use `1` for 1:1 screenshots on a scaled display) |
 | `--tv` | TV mode for this run |
@@ -359,7 +376,7 @@ Rules and gotchas:
 | `--log-stderr`, `--mpv-log <level>` | logging (`OPENSMARTERS_LOG` sets the filter) |
 
 ```powershell
-$exe = "target/app/debug/opensmarters.exe"   # after: cargo build -p opensmarters --features demo
+$exe = "target/app/debug/opensmarters.exe"   # after: cargo build -p opensmarters --features demo,harness
 & $exe --demo --ephemeral --route live --window-size 1920x1080 --ppp 1 `
   --keys "wait:4,Enter,wait:3,Down,Down,shot:live.png,PageDown,wait:2,shot:zapped.png" --exit-after 12
 & $exe --demo --ephemeral --window-size 1920x1080 --tv --screenshot-after 6 --screenshot-out home-tv.png
@@ -373,7 +390,7 @@ Dev-only environment switches for `--demo`:
 
 | Variable | Effect |
 |---|---|
-| `OPENSMARTERS_DEMO_QUIRKS=huge,timeshift-smarters-only` | fake-panel quirks (`huge` = 50 000 channels; `timeshift-503` = every catch-up stream fails like the real panel; `timeshift-smarters-only` = only the Smarters start format plays, to exercise the fallback) |
+| `OPENSMARTERS_DEMO_QUIRKS=huge,timeshift-smarters-only` | fake-panel quirks (`slow` = 0–3 s per request, to see loading skeletons; `huge` = 50 000 channels; `timeshift-503` = every catch-up stream fails like the real panel; `timeshift-smarters-only` = only the Smarters start format plays, to exercise the fallback) |
 | `OPENSMARTERS_DEMO_FAVOURITES=1` | seeds a few synthetic favourites (live, films, series) |
 | `OPENSMARTERS_DEMO_XMLTV=1` | sets the demo profile's EPG URL override to the panel's `xmltv.xml.gz` (guide on the XMLTV path) |
 
@@ -392,7 +409,7 @@ Dev-only environment switches for `--demo`:
 - **Text**: `cap`/`cap_paragraph` (sanitise provider strings), `job`/`galley`/`line`/`block`
   (truncate with ellipsis to N rows), `overline`, `timecode`, `duration_short`, `remaining`.
 - **Widgets** (`ui::widgets`): `Button` (primary/secondary/ghost/danger, large/small, icon,
-  trailing), `IconButton` (round; `.primary()` for the OSD play), `Chip`, `Segmented`,
+  trailing, `scroll_margin` to bring surroundings into view on focus), `IconButton` (round; `.primary()` for the OSD play), `Chip`, `Segmented`,
   `Toggle`, `Tabs`, `chip::tag`, `chip::ChipRow` (sideways chip row with edge fades), `TextField` (label, password + reveal, error; it lays out
   label + field vertically, so wrap it in `ui.vertical` inside a horizontal row),
   `SearchField`, `Callout` (+ `Callout::unencrypted()`), `Badge::{live, live_dot, pill}`,
@@ -400,12 +417,13 @@ Dev-only environment switches for `--demo`:
   `Avatar`, `Rail` (heading + carousel, paint allowance, memory, See all), `VirtualList`,
   `VirtualGrid` (row-virtualised card grid; `columns_for(width)`),
   `MenuRow`, `SettingRow`, `Dialog` (modal, focus trap; actions right-to-left, primary
-  first), `Toasts`, `EmptyState` (+ an optional ghost `second_action`, read with `show_both`), `coming_soon`, `feedback::skeleton(_line)`, `PinPad`
+  first), `Toasts`, `EmptyState` (+ an optional ghost `second_action`, read with `show_both`), `coming_soon`, `feedback::skeleton(_line)`, `feedback::skeleton_rail` + `rail_height` + `SkeletonCard` (a loading rail with the real `Rail` geometry), `PinPad`
   (fixed length to check a PIN; `PinPad::variable` to choose one), `PinPrompt` (loads the
   PIN state first so a lockout shows at once, verifies off-thread; dialog or inline;
   passes immediately when no PIN is set), `clock::clock`.
 - **More widgets** (Phase 4A): `Dropdown` (menu with focus trap; close it from `on_back`),
-  `EpisodeRow` (still, progress, watched toggle), `UpNextPrompt`.
+  `EpisodeRow` (still, progress, "✓ Watched" pill; play glyph and watched toggle on the
+  focused row only), `UpNextPrompt`.
 - **VOD helpers** (`services::vod`): `display_title` (tag + trailing year split off),
   `release_year` (release date, else "(YYYY)"; never `added`), `movie_card_meta` /
   `series_card_meta`, `rating_label` (★ drawn with the icon font by `ui::text`),
@@ -438,7 +456,7 @@ reformatting existing code so parallel work merges cleanly.
 
 ## 13. Known gaps
 
-- Home: no backdrop crossfade on focus changes yet; "Recently added" samples the first
+- Home: "Recently added" samples the first
   categories when the VOD "All" list isn't cached.
 - The compact breakpoint (< 960 pt) uses the collapsed rail (no top bar); the window minimum
   keeps desktop use out of it.

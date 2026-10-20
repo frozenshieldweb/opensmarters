@@ -658,3 +658,33 @@ impl eframe::App for OpensmartersApp {
         color::BG.to_normalized_gamma_f32()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_transition_fades_in_and_rises_into_place() {
+        let t = Transition {
+            start: 10.0,
+            secs: 0.24,
+            rise: Transition::RISE,
+        };
+        let (a0, y0) = t.at(10.0).unwrap_or_else(|| panic!("running"));
+        assert!(a0 < 0.01 && (y0 - Transition::RISE).abs() < 0.01);
+        let (a1, y1) = t.at(10.12).unwrap_or_else(|| panic!("running"));
+        assert!(
+            a1 > 0.5 && a1 < 1.0,
+            "cubic-out is past halfway at half time"
+        );
+        assert!(y1 > 0.0 && y1 < Transition::RISE);
+        assert!(t.at(10.24).is_none(), "finished");
+        // Reduced motion: no movement.
+        let r = Transition {
+            start: 0.0,
+            secs: 0.1,
+            rise: 0.0,
+        };
+        assert_eq!(r.at(0.05).map(|(_, y)| y), Some(0.0));
+    }
+}

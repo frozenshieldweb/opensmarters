@@ -426,4 +426,13 @@ mod tests {
         assert_eq!(Route::Guide.section(), Some(Section::Guide));
         assert_eq!(Route::Profiles.section(), None);
     }
+
+    #[test]
+    fn back_labels_name_the_page_below() {
+        assert_eq!(Route::Movies { category: None }.back_label(), "Movies");
+        assert_eq!(Route::Series { category: None }.back_label(), "Series");
+        assert_eq!(Route::Home.back_label(), "Home");
+        assert_eq!(Route::live().back_label(), "Live TV");
+        assert_eq!(Route::MovieDetail { stream_id: 1 }.back_label(), "Back");
+    }
 }

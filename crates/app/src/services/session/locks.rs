@@ -31,7 +31,6 @@
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
@@ -203,8 +202,7 @@ pub(super) struct LockState {
     names: RwLock<HashMap<ContentKind, HashMap<String, String>>>,
     items: RwLock<HashMap<(ContentKind, u64), Vec<CategoryId>>>,
     unlocks: RwLock<Unlocks>,
-    epoch: Instant,
-    last_activity_ms: AtomicU64,
+    last_activity: Mutex<Instant>,
     resolve: FetchQueue<Resolve, ()>,
     resolve_failed: Mutex<HashMap<Resolve, Instant>>,
 }
@@ -215,8 +213,7 @@ impl Default for LockState {
             names: RwLock::default(),
             items: RwLock::default(),
             unlocks: RwLock::default(),
-            epoch: Instant::now(),
-            last_activity_ms: AtomicU64::new(0),
+            last_activity: Mutex::new(Instant::now()),
             resolve: FetchQueue::new(RESOLVE_WORKERS, Duration::from_secs(5), 512),
             resolve_failed: Mutex::default(),
         }
@@ -224,15 +221,11 @@ impl Default for LockState {
 }
 
 impl LockState {
-    fn now_ms(&self) -> u64 {
-        u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
-    }
-
     fn idle_for(&self) -> Duration {
-        Duration::from_millis(
-            self.now_ms()
-                .saturating_sub(self.last_activity_ms.load(Ordering::Relaxed)),
-        )
+        self.last_activity
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .elapsed()
     }
 
     pub(super) fn close(&self) {
@@ -289,12 +282,17 @@ impl Session {
     /// Reports user input (the session manager calls it every frame with input). After
     /// [`RELOCK_IDLE`] without input, every unlock of this session expires.
     pub fn note_activity(&self) {
-        let now = self.lock_state.now_ms();
-        let prev = self
-            .lock_state
-            .last_activity_ms
-            .swap(now, Ordering::Relaxed);
-        if Duration::from_millis(now.saturating_sub(prev)) >= RELOCK_IDLE {
+        let idle = {
+            let mut last = self
+                .lock_state
+                .last_activity
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let idle = last.elapsed();
+            *last = Instant::now();
+            idle
+        };
+        if idle >= RELOCK_IDLE {
             self.relock_all();
         }
     }
@@ -896,9 +894,86 @@ impl Session {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use opensmarters_core::parental::KeywordMatcher;
+
+    #[test]
+    fn unlocks_expire_after_thirty_minutes_without_input() {
+        use opensmarters_core::secrecy::SecretString;
+        use opensmarters_store::{
+            MemorySecretStore, NewProfile, NewProfileSource, PinHashParams, ProfileSettings, Store,
+            StoreOptions,
+        };
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let panel = rt
+            .block_on(fake_panel::spawn(fake_panel::Config::api_only()))
+            .unwrap();
+        let store = Arc::new(
+            Store::open(
+                StoreOptions::in_memory().with_pin_hash(PinHashParams {
+                    m_cost_kib: 64,
+                    t_cost: 1,
+                    p_cost: 1,
+                }),
+                Arc::new(MemorySecretStore::new()),
+            )
+            .unwrap(),
+        );
+        store
+            .parental()
+            .set_pin(&SecretString::from("1234"))
+            .unwrap();
+        let services = crate::services::Services::new(
+            rt.handle().clone(),
+            store,
+            opensmarters_core::Redactor::new(),
+            crate::services::Paths::default(),
+            true,
+            eframe::egui::Context::default(),
+        );
+        let id = services
+            .store
+            .profiles()
+            .create(NewProfile {
+                name: "T".into(),
+                source: NewProfileSource::Xtream {
+                    server_url: panel.base_url().to_owned(),
+                    username: "demo".into(),
+                    password: SecretString::from("demo"),
+                },
+                settings: ProfileSettings::default(),
+            })
+            .unwrap()
+            .id;
+        let session = rt
+            .block_on(Session::open(services, id))
+            .unwrap_or_else(|f| panic!("{}", f.error));
+        let adult = CategoryId::from("7");
+        assert!(session.is_category_locked(ContentKind::Live, &adult, "Adult Night"));
+        session.unlock_category(ContentKind::Live, &adult);
+        session.unlock_item(ContentKind::Movie, "42");
+        assert!(!session.is_category_locked(ContentKind::Live, &adult, "Adult Night"));
+        // Input keeps it unlocked.
+        session.note_activity();
+        assert!(!session.is_category_locked(ContentKind::Live, &adult, "Adult Night"));
+        // 31 minutes without input: locked again, even before the next input …
+        let ago = Instant::now()
+            .checked_sub(RELOCK_IDLE + Duration::from_secs(60))
+            .unwrap();
+        *session.lock_state.last_activity.lock().unwrap() = ago;
+        assert!(session.is_category_locked(ContentKind::Live, &adult, "Adult Night"));
+        assert!(!session.item_unlocked(ContentKind::Movie, "42"));
+        // … and the next input clears the unlocks for good.
+        session.note_activity();
+        assert!(session.is_category_locked(ContentKind::Live, &adult, "Adult Night"));
+        assert!(!session.item_unlocked(ContentKind::Movie, "42"));
+    }
 
     fn state(pin: bool) -> ParentalState {
         let mut locks = HashMap::new();

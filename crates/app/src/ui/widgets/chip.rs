@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Chips, segmented controls, toggles and tabs (§6.6, §8.6).
+//! Chips and chip rows, segmented controls, toggles and tabs (§6.6, §8.6).
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, Id, Rect, Sense, Ui, pos2, vec2};
 
@@ -26,7 +26,9 @@ impl Chip {
             count: None,
             selected: false,
             id: None,
-            opts: FocusOpts::default(),
+            // Sideways look-ahead: a chip scrolled into view clears the edge fade of a
+            // [`ChipRow`] and shows part of its neighbour.
+            opts: FocusOpts::default().scroll_margin2(vec2(64.0, 16.0)),
         }
     }
 
@@ -103,6 +105,78 @@ impl Chip {
             paint::focus_ring(&painter, rect, radius::FULL, 1.0);
         }
         f
+    }
+}
+
+/// A row of chips that scrolls sideways (category filters): no scroll bar, 8 pt of paint
+/// allowance for the focus ring, and a soft fade into the page colour at an edge where
+/// more chips hide, so a cut-off chip reads as "more this way" rather than as a glitch.
+/// The focus engine scrolls the focused chip into view.
+///
+/// ```ignore
+/// ChipRow::new(Id::unique("guide.chips")).show(ui, rect, |ui| {
+///     Chip::new("All").selected(true).show(ui);
+/// });
+/// ```
+/// `rect` is the whole row (chips + allowance); keep other controls outside it.
+#[derive(Debug)]
+pub struct ChipRow {
+    id: Id,
+    fade_to: Color32,
+}
+
+impl ChipRow {
+    /// Fade width at an overflowing edge.
+    const FADE: f32 = 56.0;
+
+    /// A row (its id also salts the scroll state).
+    pub fn new(id: Id) -> Self {
+        Self {
+            id,
+            fade_to: color::BG,
+        }
+    }
+
+    /// The colour behind the row (the fade ends in it). Default `bg`.
+    #[must_use]
+    pub fn fade_to(mut self, c: Color32) -> Self {
+        self.fade_to = c;
+        self
+    }
+
+    /// Adds the row in `rect`; `add` lays the chips out left to right (8 pt apart).
+    pub fn show<R>(self, ui: &mut Ui, rect: Rect, add: impl FnOnce(&mut Ui) -> R) -> R {
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+        child.set_clip_rect(rect.intersect(ui.clip_rect()));
+        let out = egui::ScrollArea::horizontal()
+            .id_salt(self.id.with("scroll"))
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .content_margin(egui::Margin::symmetric(8, 8))
+            .show(&mut child, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    add(ui)
+                })
+                .inner
+            });
+        focus::forward_scroll(&child);
+        let view = out.inner_rect;
+        let overflow = out.content_size.x - view.width();
+        if overflow > 1.0 {
+            let offset = out.state.clamped_offset().x;
+            let w = Self::FADE.min(view.width() * 0.25);
+            let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+            let clear = paint::with_alpha(self.fade_to, 0.0);
+            if offset < overflow - 1.0 {
+                let r = Rect::from_min_max(pos2(view.right() - w, view.top()), view.max);
+                paint::h_gradient(&painter, r, &[(0.0, clear), (1.0, self.fade_to)]);
+            }
+            if offset > 1.0 {
+                let r = Rect::from_min_max(view.min, pos2(view.left() + w, view.bottom()));
+                paint::h_gradient(&painter, r, &[(0.0, self.fade_to), (1.0, clear)]);
+            }
+        }
+        out.inner
     }
 }
 

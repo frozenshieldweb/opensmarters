@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>opensmarters — third-party licences</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #141013; color: #F4ECE4; max-width: 920px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  a { color: #E6BE91; }
+  h1, h2 { font-weight: 600; }
+  pre { white-space: pre-wrap; background: #20191E; padding: 1rem; border-radius: 8px; font-size: .85rem; }
+  .crates { color: #BFAFB6; font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>Third-party licences</h1>
+<p>opensmarters is licensed under the GNU General Public License v3.0 or later. It includes the Rust crates listed below.
+Bundled native components (libmpv/FFmpeg), fonts and icons are described in <code>THIRD_PARTY.md</code>.</p>
+<h2>Overview</h2>
+<ul>
+{{#each overview}}
+  <li><a href="#{{id}}">{{name}}</a> ({{count}})</li>
+{{/each}}
+</ul>
+<h2>Licence texts</h2>
+{{#each licenses}}
+  <h3 id="{{id}}">{{name}}</h3>
+  <p class="crates">Used by:
+  {{#each used_by}}<a href="{{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}}">{{crate.name}} {{crate.version}}</a>{{#unless @last}}, {{/unless}}{{/each}}
+  </p>
+  <pre>{{text}}</pre>
+{{/each}}
+</body>
+</html>

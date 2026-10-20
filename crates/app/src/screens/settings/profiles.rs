@@ -217,7 +217,9 @@ impl SettingsPageUi for ProfilesPage {
                     {
                         let store = cx.services.store.clone();
                         self.deleting.start_blocking(cx.rt(), &cx.egui, move || {
-                            store.profiles().delete(id)?;
+                            // Also its recent searches and remembered categories (the
+                            // dialog promises the history goes).
+                            crate::screens::common::profile_data::delete_profile(&store, id)?;
                             Ok(id)
                         });
                         close = true;

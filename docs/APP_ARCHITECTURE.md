@@ -137,6 +137,7 @@ Rules (unit-tested in `nav/router.rs`):
 | Favourites | `is_favourite(kind, id)`, `favourite_ids(kind)`, `toggle_favourite(kind, id, snapshot)` (optimistic, persisted in the background), `reload_favourites()` |
 | Parental | `parental_enabled()`, `is_category_locked(kind, &id, name)`, `is_selection_locked(..)`, `unlock_category(..)` (session-only), `reload_parental()` (call after Settings → Parental changes) |
 | Cache | `cached(key, ttl, fetch)` (generic SWR), `refresh()` (drop everything) |
+| Movies / series (`session/vod.rs`) | `movie_progress(id)`, `movie_progress_map()`, `series_watch(id)` → `SeriesWatch`, `set_episode_watched(..)`, `series_episode_request(..)` (title "Series · Episode", season/number from the info), `last_vod_category(kind)` / `remember_vod_category(kind, id)`, `resume_thresholds()` |
 
 **Caching** is stale-while-revalidate: memory memo → encrypted store cache → provider. TTLs:
 lists 6 h, VOD/series info 6 h, EPG 10 min (memory). An expired copy is returned at once and
@@ -231,6 +232,10 @@ match session.movie_request(id, ext.as_deref(), &title, Some(subtitle), poster, 
 - VOD end of file = **finished** (store `mark_finished`). Progress is saved every 10 s and on
   stop; `cx.playback.progress_epoch()` changes when a save lands (reload "continue
   watching" when it does).
+- **Next episode** (`playback/next.rs`): when an episode starts, the controller looks up its
+  series (cached); once it finishes, `cx.playback.up_next()` offers the following episode
+  (store `next_episode` order) and `play_up_next()` plays it. The player shows
+  `widgets::UpNextPrompt` (10 s countdown; Esc stops it).
 - Subtitles are **off** by default (mpv auto-selects embedded CC otherwise); a language the
   user picks in the track sheet is reused for later VOD (`choose_subtitle`).
 - Live OSD: LIVE badge + EPG programme progress, **never a scrubber** (mpv reports a
@@ -342,6 +347,12 @@ The demo provider is plain HTTP on `127.0.0.1:<random>`; to test onboarding by k
   `MenuRow`, `SettingRow`, `Dialog` (modal, focus trap; actions right-to-left, primary
   first), `Toasts`, `EmptyState`, `coming_soon`, `feedback::skeleton(_line)`, `PinPad`,
   `clock::clock`.
+- **More widgets** (Phase 4A): `Dropdown` (menu with focus trap; close it from `on_back`),
+  `EpisodeRow` (still, progress, watched toggle), `UpNextPrompt`.
+- **VOD helpers** (`services::vod`): `display_title` (tag + trailing year split off),
+  `release_year` (release date, else "(YYYY)"; never `added`), `movie_card_meta` /
+  `series_card_meta`, `rating_label` (★ drawn with the icon font by `ui::text`),
+  `VodSort`, season/episode labels, `next_episode_id`, `continue_target`, `youtube_id`.
 - **Layout**: `Layout::{breakpoint, content, margin, poster_width, poster_size,
   backdrop_card_size, channel_tile_size, rail_width, safe_area, grid_columns}`.
 

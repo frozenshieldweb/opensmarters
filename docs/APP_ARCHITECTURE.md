@@ -30,6 +30,7 @@ cargo fmt; cargo clippy -p opensmarters --all-targets --all-features -- -D warni
 | `src/window_state.rs` | Window size/position/maximised remembered between runs (store setting `app.window`, physical px, debounced; never for `--ephemeral`/`--window-size`) |
 | `src/playback/tracks.rs` | Preferred audio/subtitle languages (ISO 639 normalisation, track choice), network buffer presets, `PlayerTuning` (hwdec + buffer at player start) |
 | `src/playback/` | `PlaybackController` (the one mpv player + video view, reconnect, progress), `PlaybackRequest` and header plumbing (`request.rs`) |
+| `src/playback/multi.rs`, `src/screens/multiscreen/` | Multiscreen: `MultiView` (`cx.multi`, the tile players, budget/stagger/sound rules) and the screen (layouts, channel picker); see [§7.1](#71-multiscreen) |
 | `src/sessions.rs` | `SessionManager` (`cx.sessions`): open/switch profiles |
 | `src/task.rs` | `Loader<T>`: background work with staleness protection |
 | `src/logging.rs` | Redacted `tracing` (stderr + rotating log file) |
@@ -137,7 +138,7 @@ no profile shows `Route::Welcome` (explanation → onboarding, or restore a back
 `guide`, `movies[:category=<id>]`, `series[:category=<id>]`, `detail:movie=<id>`,
 `detail:series=<id>`, `catchup[:stream=<id>]`, `search[:q=<text>]`, `favourites`,
 `settings[:account|profiles|playback|parental|appearance|language|storage|privacy|about]`, `welcome`, `onboarding`,
-`profiles`, `player:live=<channel id or number>`.
+`profiles`, `player:live=<channel id or number>`, `multiscreen`.
 
 Rules (unit-tested in `nav/router.rs`):
 - `push` (no-op if the same page is on top), `replace`, `back` (no-op on the root),
@@ -265,7 +266,7 @@ match session.movie_request(id, ext.as_deref(), &title, Some(subtitle), poster, 
 - **One stream at a time** (providers count every open stream, `max_connections` is often 1–3,
   and exceeding it gets HTTP 403 on *everything* for a while): the controller stops the
   previous stream before loading, zapping is debounced (`play_after`, 450 ms), never open a
-  second player. Multiscreen (later) must stay within `max_connections`.
+  second player. Multiscreen stays within the connection budget ([§7.1](#71-multiscreen)).
 - Live reconnect: 2, 5, 10, 30, 30 s, then give up with a message. After a stream failure on
   Xtream the controller checks `account_info()`; `cx.playback.notice()` then says
   "Connection limit reached (3/3)…". Catch-up failures say "Catch-up isn't available for
@@ -289,6 +290,34 @@ live; PageUp/PageDown zap; digits = channel number entry (zaps after 1.5 s or En
 M mute, F window fullscreen, I show/hide OSD, A/S next audio/subtitle, +/− volume;
 Esc closes the track sheet, then hides the OSD, then leaves the player. Live TV has the
 same digits and PageUp/PageDown for the preview.
+
+### 7.1 Multiscreen
+
+Two to four live channels at once (`Route::Multiscreen`, `--route multiscreen`; Phase 7,
+`playback/multi.rs` + `screens/multiscreen.rs`). It opens with
+`screens::multiscreen::open(cx, replace)`: Live TV's preview column has a **Multiscreen**
+button (an icon button on medium/TV), the player's live OSD a `SQUARES_FOUR` button (it
+*replaces* the player, so Esc returns below it). Opening stops the main player (freeing its
+`Watch` lease) and carries its live channel into tile 1.
+
+| Rule | How |
+|---|---|
+| Budget | `multi::capacity(limit, holders)`: the limit minus what recordings hold (never preempted; downloads give way to viewing), at most 4. Below 2 it doesn't open: a toast says why (a direct `--route` shows a page). With a limit of 1: "raise Simultaneous streams in Settings › Playback". The screen shows the tiles plus one empty "Add a channel" slot while the budget allows another (`slot_count`), at least two. |
+| Tiles | One `PlaybackController` each, built like the main one (the main player's hwdec, the user's volume, aspect and audio language) but with the **Small** buffer and `set_connection_purpose(Purpose::Tile(n))`. Each takes its own lease when its stream opens (`acquire_for_viewing`); a tile that gets none shows `Busy::message()`. Reconnects are per tile (the controller's own). |
+| Staggered starts | No two tile streams open less than 0.8 s apart (`multi::next_start`), counting the main player's close and zaps (debounced 450 ms like the player). Real panels count a burst of opens as stale connections and then answer 403. |
+| Sound | Only the last focused tile is audible (`multi::follow_focus`; focus on the empty slot or a header button keeps it); the others are muted. M mutes that one too. The audible tile has a speaker icon and the footer names it. |
+| Layouts | `multiscreen/layout.rs` (pure): 1×2 for two slots, 2×2 for three or four (with a 3-stream budget the unused fourth cell says so), and *enlarged* (Enter on a playing tile: it goes big on the left, the others in a column). Tiles are 16:9 and every `VideoView` renders at its tile's size. |
+| Channel picker | `multiscreen/picker.rs`: a modal (`Dialog`, focus trap) with the categories (All, Favourites, provider categories), a `VirtualList` of channels ("In tile 2" marks) and number entry. Like Live TV, All/Favourites hide channels of locked categories; a locked category is unlocked in Live TV (with the PIN). |
+| Lifecycle | Leaving the screen (or being covered) stops every tile and frees its connection (`MultiView::stop_all`, logged with the budget's `in_use`); coming back to a covered multiscreen restarts them, staggered. Tiles of another profile stop at the next `MultiView::update`. The idle mpv cores are kept for reuse, so no render context is ever freed outside a GL context; `MultiView::destroy(gl)` frees them in `on_exit`. The sleep timer and profile switches use `is_active()` / `stop_all()`. |
+
+Keys: arrows move between the tiles (the sound follows) and the header buttons (**Change
+channel**, **Remove**: they act on the last focused tile, outlined in champagne while the
+focus is on a button); Enter: empty slot → picker, playing tile → enlarge / back to all
+tiles, stopped or failed tile → play again; PageUp/PageDown channel ± in the focused tile
+(its zap list); digits = channel number for the focused tile (its list, else all channels;
+on the empty slot it adds that channel); M mute, F window fullscreen, I show/hide the channel
+banners (they fade 3 s after the last key or channel change); Esc closes the picker, then the
+enlarged view, then leaves multiscreen.
 
 ## 8. The focus system
 
@@ -375,6 +404,7 @@ Dev-only environment switches for `--demo`:
 | `OPENSMARTERS_DEMO_QUIRKS=huge,timeshift-smarters-only` | fake-panel quirks (`huge` = 50 000 channels; `timeshift-503` = every catch-up stream fails like the real panel; `timeshift-smarters-only` = only the Smarters start format plays, to exercise the fallback) |
 | `OPENSMARTERS_DEMO_FAVOURITES=1` | seeds a few synthetic favourites (live, films, series) |
 | `OPENSMARTERS_DEMO_XMLTV=1` | sets the demo profile's EPG URL override to the panel's `xmltv.xml.gz` (guide on the XMLTV path) |
+| `OPENSMARTERS_DEMO_MAX_STREAMS=4` | sets the demo profile's "simultaneous streams" override (the demo account allows 2), e.g. to try multiscreen with 1, 3 or 4 tiles |
 
 ## 10. UI kit catalogue (`src/ui`)
 

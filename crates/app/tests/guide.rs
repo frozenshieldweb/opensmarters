@@ -111,7 +111,7 @@ fn archive_days_and_both_timeshift_formats() {
     assert!(row.full);
     let now = Utc::now();
     assert!(row.has_any_archive(now));
-    let days = archive_days(&row, &session.server_time_zone(), now);
+    let days = archive_days(&row, &session.server_time_zone(), now, &Utc);
     assert!(!days.is_empty());
     let p = days[0].programmes.last().expect("a replayable programme");
 

@@ -26,6 +26,16 @@ This tracks the phases in [BUILD_PROMPT.md](BUILD_PROMPT.md#7-how-to-work).
 - **Connection limit:** quick probing left the panel counting stale connections. Every stream then returns `403` (JSON) until they time out, which takes about 1–3 min each. The app must stop the old stream before zapping, retry with backoff, and explain the connection limit to the user.
 - **Live subtitles:** mpv auto-selected embedded closed captions on a live channel, so live subtitles should default to off.
 
+## Polish backlog (from the real-provider app test, 2026-10-20)
+
+- **Live: Enter on an idle preview card does nothing.** Before anything has played, it should play the channel that is highlighted or was last focused.
+- **Live: zapping gives no feedback.** After CH+/CH− (PageUp/PageDown) in fullscreen, show a channel banner (number, logo, name, now/next) for about 3 s. Show a buffering indicator over the last frame while the new stream starts.
+- **Live: stalls aren't caught.** If `time-pos` stops advancing for more than about 8 s while the player isn't paused, show "Stream stalled — reconnecting…" and reconnect with backoff. We saw a frozen frame for at least 12 s after a zap.
+- **Live: CH− wraps around.** From channel 001, CH− (PageDown) jumps to the last of 9,833 channels. Consider stopping at the ends of the list, or making the wrap visible in the banner.
+- **Live: channel logos are tiny.** Wide provider logos shrink into the square tile. Contain-fit them larger with less padding, and use a neutral plate behind transparent logos.
+- **Player: no OSD on fullscreen entry.** Briefly show the OSD when entering fullscreen.
+- **Home/VOD: the year comes from `added`.** Every card shows 2026. This was sent to the Phase 4A agent.
+
 ## Known issues / follow-ups
 
 - XMLTV in a non-UTF-8 encoding stops at the first invalid byte. The fix would be quick-xml's `encoding` feature.

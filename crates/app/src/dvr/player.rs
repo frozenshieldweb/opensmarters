@@ -15,6 +15,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use opensmarters_core::chrono::{DateTime, Utc};
@@ -109,7 +110,8 @@ fn free_output(cx: &AppCtx<'_>, dir: &std::path::Path, base: &str) -> Option<Med
         } else {
             files::numbered(base, n)
         };
-        if taken.contains(name.as_str()) {
+        if taken.contains(name.as_str()) || files::part_path(dir, &name).is_some_and(|p| p.exists())
+        {
             continue;
         }
         match MediaOutput::new(dir, &name) {
@@ -336,25 +338,49 @@ fn stop_player_recording(cx: &mut AppCtx<'_>, note: Option<&'static str>) {
     let wake = engine.waker();
     let id = rec.id;
     let path = rec.path;
-    cx.services
-        .blocking("finish recording through the player", move |s| {
+    let store = Arc::clone(&cx.services.store);
+    // mpv closes its recorder asynchronously: wait (up to ~6 s) until the file has
+    // settled before judging it.
+    cx.services.spawn(async move {
+        let mut last = None;
+        for _ in 0..12 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let p = path.clone();
+            let now = tokio::task::spawn_blocking(move || {
+                std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0)
+            })
+            .await
+            .unwrap_or(0);
+            if now > 0 && last == Some(now) {
+                break;
+            }
+            last = Some(now);
+        }
+        let done = tokio::task::spawn_blocking(move || {
             let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            if len > 0 && files::sniff_file(&path).is_some() {
-                s.recordings().set_progress(id, len, Some(len))?;
-                s.recordings().set_state(id, RecordingState::Done, note)?;
+            let r = if len > 0 && files::sniff_file(&path).is_some() {
+                store
+                    .recordings()
+                    .set_progress(id, len, Some(len))
+                    .and_then(|_| store.recordings().set_state(id, RecordingState::Done, note))
             } else {
                 if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
                     let _ = std::fs::remove_file(&path);
                 }
-                s.recordings().set_state(
+                store.recordings().set_state(
                     id,
                     RecordingState::Failed,
                     Some("Nothing was recorded through the player."),
-                )?;
+                )
+            };
+            if let Err(e) = r {
+                tracing::warn!(error = %e, "couldn't finish a player recording");
             }
-            wake();
-            Ok(())
-        });
+        })
+        .await;
+        let _ = done;
+        wake();
+    });
 }
 
 /// Per frame: player results, the clip window, the player's recording, resume points.

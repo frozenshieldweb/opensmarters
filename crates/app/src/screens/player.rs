@@ -759,7 +759,10 @@ impl PlayerScreen {
                 3,
             );
         }
-        let row = Rect::from_center_size(c + vec2(0.0, 120.0), vec2(360.0, 52.0));
+        // Centre the button row on the width it used last frame (one or two buttons).
+        let width_id = Id::unique("player.idle.row_width");
+        let row_w = ui.data(|d| d.get_temp::<f32>(width_id)).unwrap_or(360.0);
+        let row = Rect::from_center_size(c + vec2(0.0, 120.0), vec2(row_w, 52.0));
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(row)
@@ -800,6 +803,11 @@ impl PlayerScreen {
                 cx.nav.back();
             }
         });
+        let used = child.min_rect().width().max(1.0);
+        if (used - row_w).abs() > 0.5 {
+            ui.data_mut(|d| d.insert_temp(width_id, used));
+            ui.ctx().request_repaint();
+        }
     }
 
     fn osd(

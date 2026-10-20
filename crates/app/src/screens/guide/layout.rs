@@ -155,11 +155,15 @@ pub fn index_of_start(row: &EpgRow, start: i64) -> Option<usize> {
         .ok()
 }
 
-/// The time cursor after focusing a programme: its start, or the left edge when it
-/// started before the view (so ↑/↓ keep the position the user sees).
-pub fn cursor_for(p: &Programme, view_start: f64) -> DateTime<Utc> {
+/// The time cursor after focusing a programme, so ↑/↓ keep the position the user sees:
+/// **now** for the programme on air (when now is in view — otherwise ↓ from the on-air
+/// cell would land on a programme that already ended), else its start, or the left edge
+/// when it started before the view.
+pub fn cursor_for(p: &Programme, view_start: f64, now: DateTime<Utc>) -> DateTime<Utc> {
     let left = DateTime::from_timestamp(view_start.ceil() as i64, 0).unwrap_or(p.start);
-    if p.start < left && left < p.stop {
+    if p.start <= now && now < p.stop && now >= left {
+        now
+    } else if p.start < left && left < p.stop {
         left
     } else {
         p.start
@@ -297,9 +301,21 @@ mod tests {
         assert_eq!(programme_for_time(&EpgRow::default(), utc(20, 9, 0)), None);
         assert_eq!(index_of_start(&row, utc(20, 13, 0).timestamp()), Some(2));
         assert_eq!(index_of_start(&row, utc(20, 13, 5).timestamp()), None);
-        // Cursor: a programme that started before the view keeps the view's left edge.
+        // Cursor: a programme that started before the view keeps the view's left edge
+        // (here "now" is in the future, so no programme is on air in view).
         let left = utc(20, 11, 30).timestamp() as f64;
-        assert_eq!(cursor_for(&row.programmes[1], left), utc(20, 11, 30));
-        assert_eq!(cursor_for(&row.programmes[2], left), utc(20, 13, 0));
+        let later = utc(20, 23, 0);
+        assert_eq!(cursor_for(&row.programmes[1], left, later), utc(20, 11, 30));
+        assert_eq!(cursor_for(&row.programmes[2], left, later), utc(20, 13, 0));
+        // The on-air programme puts the cursor on now, not on the view's left edge
+        // (QA-01: ↓ from the on-air cell must land on the next row's on-air programme).
+        let now = utc(20, 12, 10);
+        assert_eq!(cursor_for(&row.programmes[1], left, now), now);
+        // …unless now is scrolled out of view to the left.
+        let far_left = utc(20, 12, 20).timestamp() as f64;
+        assert_eq!(
+            cursor_for(&row.programmes[1], far_left, now),
+            utc(20, 12, 20)
+        );
     }
 }

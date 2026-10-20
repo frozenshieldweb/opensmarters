@@ -1059,7 +1059,7 @@ impl SettingsPageUi for ParentalPage {
         for (i, (lead, body)) in [
             (
                 "What the PIN protects:",
-                "locked categories (until you close the app), this page, adding, editing or \
+                "locked categories (they lock again after 30 minutes without use), this page, adding, editing or \
                  deleting profiles, and importing a backup.",
             ),
             (

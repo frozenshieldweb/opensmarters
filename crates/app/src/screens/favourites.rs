@@ -962,7 +962,9 @@ impl FavouritesScreen {
             ui.ctx(),
             cx.services,
             title,
-            Some("It's in a locked category. The category stays unlocked until you close opensmarters."),
+            Some(
+                "It's in a locked category. The category locks again after 30 minutes without use.",
+            ),
         ) {
             PinPromptResult::Verified(_) => {
                 let (kind, item, unlock) = (g.kind, g.item.clone(), g.unlock.clone());

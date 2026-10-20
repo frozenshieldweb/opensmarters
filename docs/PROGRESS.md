@@ -48,6 +48,9 @@ Workspace gates at the end of Phase 6: `cargo fmt`, clippy (`-D warnings`, with 
 - **Settings:** hardware decoding and buffer changes apply at the next launch.
 - **Compact layout:** below 960 pt the collapsed rail stays; there is no top bar.
 - **Parental control:** an item whose category can't be resolved counts as locked while a PIN is set (fail closed). Continue watching checks only the primary category returned by `get_vod_info`.
+- **Final QA polish left open (S3):**
+  - Catch-up: after "Try another way" succeeds, focus lands on the channel list instead of the "Use it from now on" button.
+  - Typing a locked channel's number says "Channel not found", while opening it by route says "Channel locked".
 - **Phase 7 (parallel effort, separate branches):** recordings and reminders, connection budget and leases, multiscreen, sleep timer, live rewind.
 - **Release:**
   - Builds are not Authenticode-signed.

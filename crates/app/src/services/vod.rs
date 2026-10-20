@@ -133,11 +133,20 @@ pub fn movie_card_meta(m: &VodStream) -> String {
         [
             t.tag.map(str::to_owned),
             t.year.map(|y| y.to_string()),
-            rating_label(m.rating_out_of_5().map(|r| r * 2.0)),
+            rating_label(rating_10(m.rating, m.rating_5based)),
         ]
         .into_iter()
         .flatten(),
     )
+}
+
+/// The 10-point rating shown everywhere (cards, hero, detail): the provider's `rating`
+/// when present (detail pages use it too), else `rating_5based` × 2. Preferring the
+/// rounded 5-point value made cards disagree with Detail by 0.1 (final QA, QA-04).
+pub fn rating_10(rating: Option<f64>, rating_5based: Option<f64>) -> Option<f64> {
+    rating
+        .filter(|r| r.is_finite() && *r > 0.0)
+        .or(rating_5based.map(|r| r * 2.0))
 }
 
 /// Poster meta for a series list item: `"FR · 2010 · ★ 8.1"`.
@@ -147,7 +156,7 @@ pub fn series_card_meta(s: &Series) -> String {
         [
             t.tag.map(str::to_owned),
             release_year(s.release_date.as_deref(), &s.name).map(|y| y.to_string()),
-            rating_label(s.rating_out_of_5().map(|r| r * 2.0)),
+            rating_label(rating_10(s.rating, s.rating_5based)),
         ]
         .into_iter()
         .flatten(),

@@ -38,6 +38,15 @@ pub const VOD_MAX_RETRIES: u32 = 3;
 pub const STALL_AFTER: Duration = Duration::from_secs(10);
 /// Before its first progress after a (re)load, a live stream gets this long.
 pub const OPEN_TIMEOUT: Duration = Duration::from_secs(20);
+/// A film/episode/catch-up stream with no progress for this long (while not paused) is
+/// reconnected from its last position. Longer than live: a seek or a slow server may
+/// legitimately buffer for a while. Our libmpv fetches HTTP through libcurl, which has
+/// no read timeout, so a server that stops sending never produces an error or an
+/// end-of-file: this tracker is the only stall detector for every kind of stream.
+pub const VOD_STALL_AFTER: Duration = Duration::from_secs(30);
+/// Before its first progress after a (re)load, a film/episode/catch-up stream gets
+/// this long (covers a stream that never opens).
+pub const VOD_OPEN_TIMEOUT: Duration = Duration::from_secs(45);
 /// Continuous progress for this long after a (re)load resets the attempt counter.
 pub const RESET_AFTER: Duration = Duration::from_secs(30);
 /// A live stream that ended cleanly after this much playback reconnects without
@@ -116,10 +125,19 @@ impl ProgressTracker {
     /// True if a live stream should be reconnected: no progress for [`STALL_AFTER`]
     /// ([`OPEN_TIMEOUT`] before the first progress).
     pub fn is_stalled(&self, now: Instant) -> bool {
-        let limit = if self.progressed {
-            STALL_AFTER
-        } else {
-            OPEN_TIMEOUT
+        self.is_stalled_for(true, now)
+    }
+
+    /// True if the stream should be reconnected. Live: [`STALL_AFTER`] /
+    /// [`OPEN_TIMEOUT`]; films, episodes and catch-up: [`VOD_STALL_AFTER`] /
+    /// [`VOD_OPEN_TIMEOUT`]. Time spent paused by the user never counts (see
+    /// [`ProgressTracker::observe`]).
+    pub fn is_stalled_for(&self, live: bool, now: Instant) -> bool {
+        let limit = match (live, self.progressed) {
+            (true, true) => STALL_AFTER,
+            (true, false) => OPEN_TIMEOUT,
+            (false, true) => VOD_STALL_AFTER,
+            (false, false) => VOD_OPEN_TIMEOUT,
         };
         self.idle_for(now) > limit
     }
@@ -581,5 +599,40 @@ mod tests {
         g.started();
         assert!(g.is_current());
         assert!(g.generation() >= 5);
+    }
+
+    #[test]
+    fn vod_stall_uses_longer_thresholds() {
+        let t0 = Instant::now();
+        let mut t = ProgressTracker::new(t0);
+        t.observe(Some(100.0), false, t0);
+        t.observe(Some(101.0), false, t0 + Duration::from_secs(1));
+        // A live stream would be stalled after 10 s; a film keeps buffering until 30 s.
+        let later = t0 + Duration::from_secs(1) + Duration::from_secs(20);
+        assert!(t.is_stalled_for(true, later));
+        assert!(!t.is_stalled_for(false, later));
+        assert!(t.is_stalled_for(false, later + Duration::from_secs(11)));
+    }
+
+    #[test]
+    fn vod_that_never_opens_times_out() {
+        let t0 = Instant::now();
+        let t = ProgressTracker::new(t0);
+        assert!(!t.is_stalled_for(false, t0 + Duration::from_secs(40)));
+        assert!(t.is_stalled_for(false, t0 + Duration::from_secs(46)));
+    }
+
+    #[test]
+    fn user_pause_is_never_a_vod_stall() {
+        let t0 = Instant::now();
+        let mut t = ProgressTracker::new(t0);
+        t.observe(Some(10.0), false, t0);
+        t.observe(Some(11.0), false, t0 + Duration::from_secs(1));
+        let mut now = t0 + Duration::from_secs(1);
+        for _ in 0..120 {
+            now += Duration::from_secs(1);
+            t.observe(Some(11.0), true, now); // paused by the user
+        }
+        assert!(!t.is_stalled_for(false, now));
     }
 }

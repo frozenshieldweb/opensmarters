@@ -619,7 +619,10 @@ impl PlaybackController {
         let start = if from_resume {
             a.req.resume_from
         } else {
-            a.last_pos.filter(|_| !a.req.kind.is_live())
+            // A retry before any progress keeps the item's own resume point.
+            a.last_pos
+                .or(a.req.resume_from)
+                .filter(|_| !a.req.kind.is_live())
         };
         // Record a live channel as recently watched when its stream really opens (not for
         // channels skipped while zapping, nor on reconnects).
@@ -948,18 +951,21 @@ impl PlaybackController {
             }
         }
 
-        // Live stall detection.
+        // Stall detection for every kind of stream: libcurl (which fetches all HTTP in
+        // our libmpv) has no read timeout, so a server that stops sending never yields an
+        // error or end-of-file. Films/episodes/catch-up resume from the last position.
         let mut stop_stalled = false;
-        if live
-            && end.is_none()
+        if end.is_none()
             && a.reconnect.pending().is_none()
             && a.failed.is_none()
+            && !a.finished
             && !held_load
-            && a.tracker.is_stalled(now)
+            && a.tracker.is_stalled_for(live, now)
         {
             tracing::info!(
                 idle_secs = a.tracker.idle_for(now).as_secs(),
-                "live stream stalled; reconnecting"
+                live,
+                "stream stalled; reconnecting"
             );
             end = Self::schedule(a, Cause::Stalled, Duration::ZERO, now);
             stop_stalled = end.is_none();

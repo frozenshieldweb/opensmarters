@@ -22,6 +22,14 @@ pub enum AppError {
     /// Input validation or another user-facing problem (already plain language).
     #[error("{0}")]
     Message(String),
+    /// A user-facing problem with its own headline ("Channel not found").
+    #[error("{title}: {message}")]
+    Titled {
+        /// The headline.
+        title: &'static str,
+        /// The explanation (plain language).
+        message: String,
+    },
     /// The task was superseded or cancelled.
     #[error("cancelled")]
     Cancelled,
@@ -57,6 +65,14 @@ impl AppError {
         AppError::Message(s.into())
     }
 
+    /// A plain message with its own headline.
+    pub fn titled(title: &'static str, message: impl Into<String>) -> Self {
+        AppError::Titled {
+            title,
+            message: message.into(),
+        }
+    }
+
     /// True for connection problems (show the offline state, retry later).
     pub fn is_network(&self) -> bool {
         matches!(
@@ -89,6 +105,7 @@ impl AppError {
             AppError::Store(_) => "Storage problem",
             AppError::Player(_) => "Playback problem",
             AppError::Message(_) => "Check the details",
+            AppError::Titled { title, .. } => title,
             AppError::Cancelled => "Cancelled",
         }
     }
@@ -143,6 +160,7 @@ impl AppError {
             AppError::Store(e) => format!("Local storage problem: {e}."),
             AppError::Player(e) => e.clone(),
             AppError::Message(m) => m.clone(),
+            AppError::Titled { message, .. } => message.clone(),
             AppError::Cancelled => "Cancelled.".into(),
         }
     }

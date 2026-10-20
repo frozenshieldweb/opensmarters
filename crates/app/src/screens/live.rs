@@ -25,13 +25,12 @@ use eframe::egui::{
     self, Align2, Color32, CornerRadius, Id, Key, Modifiers, Rect, Sense, Stroke, StrokeKind, Ui,
     pos2, vec2,
 };
-use opensmarters_core::catalog::{
-    CatalogItem, CategorySelection, SearchQuery, SortOrder, sorted_indices,
-};
+use opensmarters_core::catalog::{CatalogItem, CategorySelection, SearchQuery, SortOrder};
 use opensmarters_core::chrono::Local;
 use opensmarters_core::{CategoryId, chrono};
 use opensmarters_store::{ContentKind, ItemSnapshot, PinOutcome};
 
+use super::common::channel_list;
 use super::player::{NumberMatch, paint_number_box};
 use super::{AppCtx, Screen, shell};
 use crate::error::AppError;
@@ -51,7 +50,7 @@ use crate::ui::widgets::callout::Badge;
 use crate::ui::widgets::feedback::skeleton;
 use crate::ui::widgets::{
     Button, ChannelLogo, Chip, Dialog, EmptyState, IconButton, MenuRow, PinPad, PinPadEvent,
-    SearchField, VirtualList, zap_banner,
+    SearchField, VirtualList, chip::ChipRow, zap_banner,
 };
 use crate::ui::{paint, text};
 
@@ -85,9 +84,10 @@ fn preview_button_ids() -> [Id; 3] {
     ]
 }
 
-/// Parental control for channel lists: a channel is hidden while one of its categories
-/// is locked (and not unlocked with the PIN in this session). Cached per category, so a
-/// 50 000-channel list costs one check per category.
+/// Parental control for channel lists: a channel is hidden while **any** of its
+/// categories is locked (and not unlocked with the PIN in this session) — the same rule
+/// as [`super::common::locks`] (SR-15). Cached per category, so a 50 000-channel list
+/// costs one lock check per category, not one per channel.
 pub(crate) struct LockFilter<'a> {
     session: &'a Session,
     catalog: &'a LiveCatalog,
@@ -136,23 +136,13 @@ impl<'a> LockFilter<'a> {
 /// channel number that isn't in the current list).
 pub(crate) fn all_by_number(session: &Session, cat: &LiveCatalog) -> Vec<LiveChannel> {
     let mut locks = LockFilter::new(session, cat);
-    let mut picked: Vec<LiveChannel> = cat
+    let picked: Vec<LiveChannel> = cat
         .channels
         .iter()
         .filter(|c| !locks.is_locked(c))
         .cloned()
         .collect();
-    sort_channels(&mut picked, SortOrder::NumberAsc);
-    picked
-}
-
-fn sort_channels(list: &mut Vec<LiveChannel>, sort: SortOrder) {
-    let order = sorted_indices(list, sort);
-    let mut slots: Vec<Option<LiveChannel>> = list.drain(..).map(Some).collect();
-    *list = order
-        .into_iter()
-        .filter_map(|i| slots.get_mut(i).and_then(Option::take))
-        .collect();
+    channel_list::sorted(picked, SortOrder::NumberAsc)
 }
 
 /// The visible list for a selection (off the UI thread).
@@ -172,7 +162,7 @@ fn compute_list(
 ) -> ListResult {
     let mut locks = LockFilter::new(session, cat);
     let in_server_category = key.selection.server_category().is_some();
-    let mut picked: Vec<LiveChannel> = cat
+    let picked: Vec<LiveChannel> = cat
         .select(&key.selection, favs)
         .into_iter()
         .filter_map(|i| cat.channels.get(i))
@@ -180,7 +170,7 @@ fn compute_list(
         .filter(|c| in_server_category || !locks.is_locked(c))
         .cloned()
         .collect();
-    sort_channels(&mut picked, key.sort);
+    let picked = channel_list::sorted(picked, key.sort);
     let all_count = cat.channels.iter().filter(|c| !locks.is_locked(c)).count();
     ListResult {
         key,
@@ -444,7 +434,7 @@ impl LiveScreen {
                 self.pending_number = Some(number);
             }
             NumberMatch::Unknown => self.pending_number = Some(number),
-            _ => cx.toasts.info(format!("There's no channel {number}.")),
+            _ => cx.toasts.info("Channel not found"),
         }
     }
 
@@ -990,48 +980,42 @@ impl LiveScreen {
     ) {
         let Some(cat) = catalog else { return };
         let mut picked: Option<(CategorySelection, String)> = None;
-        egui::ScrollArea::horizontal()
-            .id_salt("live.chips.scroll")
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .content_margin(egui::Margin::symmetric(8, 8))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    if Chip::new("All")
-                        .selected(self.selection == CategorySelection::All)
-                        .id(Id::unique("live.chip.all"))
-                        .show(ui)
-                        .activated
-                    {
-                        picked = Some((CategorySelection::All, "All".into()));
-                    }
-                    if Chip::new("Favourites")
-                        .selected(self.selection == CategorySelection::Favourites)
-                        .id(Id::unique("live.chip.favs"))
-                        .show(ui)
-                        .activated
-                    {
-                        picked = Some((CategorySelection::Favourites, "Favourites".into()));
-                    }
-                    for c in &cat.categories {
-                        let sel = CategorySelection::Category(c.id.clone());
-                        let label = if session.is_category_locked(ContentKind::Live, &c.id, &c.name)
-                        {
-                            format!("{} {}", icons::LOCK_SIMPLE, c.name)
-                        } else {
-                            c.name.clone()
-                        };
-                        if Chip::new(label)
-                            .selected(self.selection == sel)
-                            .id(Id::unique(("live.chip", c.id.as_str())))
-                            .show(ui)
-                            .activated
-                        {
-                            picked = Some((sel, c.name.clone()));
-                        }
-                    }
-                });
-            });
+        let row = ui.max_rect();
+        // Edge fade where more chips hide; the focused chip scrolls into view.
+        ChipRow::new(Id::unique("live.chips.row")).show(ui, row, |ui| {
+            if Chip::new("All")
+                .selected(self.selection == CategorySelection::All)
+                .id(Id::unique("live.chip.all"))
+                .show(ui)
+                .activated
+            {
+                picked = Some((CategorySelection::All, "All".into()));
+            }
+            if Chip::new("Favourites")
+                .selected(self.selection == CategorySelection::Favourites)
+                .id(Id::unique("live.chip.favs"))
+                .show(ui)
+                .activated
+            {
+                picked = Some((CategorySelection::Favourites, "Favourites".into()));
+            }
+            for c in &cat.categories {
+                let sel = CategorySelection::Category(c.id.clone());
+                let label = if session.is_category_locked(ContentKind::Live, &c.id, &c.name) {
+                    format!("{} {}", icons::LOCK_SIMPLE, c.name)
+                } else {
+                    c.name.clone()
+                };
+                if Chip::new(label)
+                    .selected(self.selection == sel)
+                    .id(Id::unique(("live.chip", c.id.as_str())))
+                    .show(ui)
+                    .activated
+                {
+                    picked = Some((sel, c.name.clone()));
+                }
+            }
+        });
         if let Some((sel, name)) = picked {
             self.select(cx, sel, &name);
         }

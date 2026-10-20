@@ -225,7 +225,7 @@ impl PlayerScreen {
                 }
             }
             NumberMatch::Unknown => self.pending_number = Some(n),
-            NumberMatch::Missing => cx.toasts.info(format!("There's no channel {n}.")),
+            NumberMatch::Missing => cx.toasts.info("Channel not found"),
         }
     }
 
@@ -282,13 +282,20 @@ impl Screen for PlayerScreen {
                                 })
                             })
                             .ok_or_else(|| {
-                                crate::error::AppError::msg(format!("There's no channel {key}."))
+                                crate::error::AppError::titled(
+                                    "Channel not found",
+                                    format!(
+                                        "There's no channel {} in your list.",
+                                        crate::ui::text::cap(&key, 40)
+                                    ),
+                                )
                             })?;
                         // Parental control: never open (or zap into) a locked category.
                         let mut locks = LockFilter::new(&session, &cat);
                         let target = cat.channels[index].clone();
                         if locks.is_locked(&target) {
-                            return Err(crate::error::AppError::msg(
+                            return Err(crate::error::AppError::titled(
+                                "Channel locked",
                                 "This channel is in a locked category. Open it from Live TV \
                                  and enter the PIN.",
                             ));

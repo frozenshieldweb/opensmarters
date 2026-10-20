@@ -7,6 +7,10 @@
 //!   everything). The previous stream is always stopped before the next one is loaded,
 //!   and zapping is debounced ([`ZAP_DEBOUNCE`]): pressing channel-up five times opens one
 //!   stream, not five.
+//! - **Two choke points:** `open_stream` is the only place a provider stream is opened
+//!   (first open, reconnects, retry, replay) and `end_stream` the only place an item's
+//!   stream ends for good (finished, failed / gave up, stopped, replaced); a reconnect
+//!   stops and reopens without ending the item. Connection accounting belongs there.
 //! - **Stream health** ([`tracker`], pure and unit-tested): a live stream whose position
 //!   stops advancing for [`tracker::STALL_AFTER`] (while not paused) is stopped and
 //!   reconnected ("Stream stalled — reconnecting…"); `EndFile(Error)` and a live
@@ -147,6 +151,17 @@ struct Engine {
     video: VideoView,
 }
 
+/// How an item's stream ended for good ([`PlaybackController::end_stream`]).
+#[derive(Debug, Clone, PartialEq)]
+enum StreamEnd {
+    /// Watched to the end (VOD).
+    Finished,
+    /// Failed, or gave up after the reconnects (message for the user).
+    Failed(String),
+    /// Stopped by the user, or replaced by another item.
+    Stopped,
+}
+
 struct Active {
     req: PlaybackRequest,
     session: Arc<Session>,
@@ -166,6 +181,9 @@ struct Active {
     /// Deferred start (debounced zapping).
     load_at: Option<Instant>,
     subs_applied: bool,
+    /// Between [`PlaybackController::open_stream`] and
+    /// [`PlaybackController::end_stream`] (reconnects in between keep it).
+    stream_open: bool,
 }
 
 impl Active {
@@ -191,6 +209,7 @@ impl Active {
             started: false,
             load_at,
             subs_applied: false,
+            stream_open: false,
         }
     }
 }
@@ -506,7 +525,9 @@ impl PlaybackController {
         self.start(session, req, Some(Instant::now() + delay));
     }
 
-    /// Stops the player's current stream on purpose (its late events are ignored).
+    /// Stops mpv's current stream on purpose (its late events are ignored). Low level:
+    /// a reconnect uses it without ending the item; [`end_stream`](Self::end_stream) for
+    /// good.
     fn stop_stream(&mut self) {
         if let Some(e) = &self.engine {
             if e.player.has_pending_load() {
@@ -517,6 +538,34 @@ impl PlaybackController {
         self.guard.abandon();
     }
 
+    /// **The one place where the current item's provider stream ends for good**:
+    /// finished, failed / gave up after the reconnects, stopped by the user, or replaced
+    /// by another item. Runs its "stream closed" part at most once per
+    /// [`open_stream`](Self::open_stream) (a reconnect in between doesn't end the item).
+    /// A connection budget would release its lease here.
+    fn end_stream(&mut self, how: StreamEnd) {
+        let Some(a) = &mut self.active else {
+            return;
+        };
+        let was_open = std::mem::take(&mut a.stream_open);
+        a.reconnect.reset();
+        a.load_at = None;
+        match &how {
+            StreamEnd::Finished => a.finished = true,
+            StreamEnd::Failed(msg) => a.failed = Some(msg.clone()),
+            StreamEnd::Stopped => {}
+        }
+        if was_open {
+            tracing::debug!(?how, "stream ended for good");
+        }
+        match how {
+            // mpv is already at the end of the file.
+            StreamEnd::Finished => self.mark_finished(),
+            // Free the provider connection (and ignore the stream's late events).
+            StreamEnd::Failed(_) | StreamEnd::Stopped => self.stop_stream(),
+        }
+    }
+
     fn start(&mut self, session: Arc<Session>, req: PlaybackRequest, load_at: Option<Instant>) {
         self.save_progress(true);
         let prev = self
@@ -525,7 +574,7 @@ impl PlaybackController {
             .map(|a| (a.req.kind, a.req.item.clone()));
         // Free the provider connection before opening another one.
         if prev.is_some() {
-            self.stop_stream();
+            self.end_stream(StreamEnd::Stopped);
         }
         // Live → live keeps the old picture (under a scrim) until the new one arrives;
         // anything else starts from black.
@@ -555,11 +604,15 @@ impl PlaybackController {
             self.ctx
                 .request_repaint_after(at.saturating_duration_since(Instant::now()));
         } else {
-            self.load_current(true);
+            self.open_stream(true);
         }
     }
 
-    fn load_current(&mut self, from_resume: bool) {
+    /// **The one place where a provider stream is opened** (`Player::load`): the first
+    /// open of an item (`from_resume`: from its resume point) and every reconnect, retry
+    /// and replay (from the last position). A connection budget would acquire its lease
+    /// here (`Active::stream_open` tells whether the item already holds one).
+    fn open_stream(&mut self, from_resume: bool) {
         let (Some(engine), Some(a)) = (&self.engine, &mut self.active) else {
             return;
         };
@@ -596,33 +649,36 @@ impl PlaybackController {
         };
         tracing::info!(kind = ?a.req.kind, resume = ?start, "opening stream");
         let was_held = engine.player.has_pending_load();
-        match engine.player.load(&a.req.url, &opts) {
+        let refused = match engine.player.load(&a.req.url, &opts) {
             Ok(()) => {
+                a.stream_open = true;
                 // A held load (no video view yet) replacing another held one adds no
                 // StartFile.
                 if !(was_held && engine.player.has_pending_load()) {
                     self.guard.issued();
                 }
+                None
             }
             Err(e) => {
                 tracing::warn!(error = %e, "load refused");
-                a.failed = Some(crate::error::AppError::from(e).user_message());
+                Some(crate::error::AppError::from(e).user_message())
             }
-        }
+        };
         let _ = engine.player.play();
         let now = Instant::now();
         a.tracker.reset(now);
         a.file_loaded = false;
         a.started = false;
         a.subs_applied = false;
+        if let Some(msg) = refused {
+            self.end_stream(StreamEnd::Failed(msg));
+        }
     }
 
     /// Stops playback (saving progress).
     pub fn stop(&mut self) {
         self.save_progress(true);
-        if self.active.is_some() {
-            self.stop_stream();
-        }
+        self.end_stream(StreamEnd::Stopped);
         if let Some(e) = &self.engine {
             e.video.forget_frame();
         }
@@ -639,7 +695,7 @@ impl PlaybackController {
             a.last_pos = Some(0.0);
             a.req.resume_from = None;
         }
-        self.load_current(false);
+        self.open_stream(false);
     }
 
     /// Selects a subtitle track chosen by the user and remembers its language for later
@@ -743,7 +799,7 @@ impl PlaybackController {
             a.failed = None;
             a.reconnect.reset();
         }
-        self.load_current(false);
+        self.open_stream(false);
     }
 
     /// Per-frame housekeeping: player events, reconnects, stalls, progress saves.
@@ -807,7 +863,7 @@ impl PlaybackController {
                 if let Some(a) = &mut self.active {
                     a.load_at = None;
                 }
-                self.load_current(true);
+                self.open_stream(true);
                 return;
             }
             self.ctx.request_repaint_after(at - now);
@@ -854,39 +910,37 @@ impl PlaybackController {
         }
         let played = a.tracker.progressing_for(now);
 
-        let mut finished_now = false;
-        let mut failed_now = false;
+        // What the end of the file means; every "for good" goes through `end_stream`.
+        let mut end: Option<StreamEnd> = None;
+        let mut stream_error = false;
         let live = a.req.kind.is_live();
         match ended {
             None | Some(EndReason::Stop | EndReason::Quit | EndReason::Redirect) => {}
             Some(EndReason::Eof) if live => {
                 tracing::info!(played_secs = played.as_secs(), "the live stream ended");
-                Self::schedule(a, Cause::Ended, played, now);
+                end = Self::schedule(a, Cause::Ended, played, now);
             }
             Some(EndReason::Eof) => {
                 match tracker::vod_end(a.last_pos, a.duration.or(a.req.duration_hint)) {
-                    VodEnd::Finished => {
-                        a.finished = true;
-                        finished_now = true;
-                    }
+                    VodEnd::Finished => end = Some(StreamEnd::Finished),
                     VodEnd::Dropped { at } => {
                         tracing::info!(at, "the stream ended before the end; resuming");
-                        Self::schedule(a, Cause::Ended, played, now);
+                        end = Self::schedule(a, Cause::Ended, played, now);
                     }
                     VodEnd::Failed => {
-                        a.failed = Some(Self::vod_failure(a.req.kind));
-                        failed_now = true;
+                        stream_error = true;
+                        end = Some(StreamEnd::Failed(Self::vod_failure(a.req.kind)));
                     }
                 }
             }
             Some(EndReason::Error(e)) => {
-                failed_now = true;
+                stream_error = true;
                 if live || a.loaded_once {
                     tracing::info!(error = %e, "stream error");
-                    Self::schedule(a, Cause::Failed, played, now);
+                    end = Self::schedule(a, Cause::Failed, played, now);
                 } else {
                     tracing::info!(error = %e, "playback failed");
-                    a.failed = Some(Self::vod_failure(a.req.kind));
+                    end = Some(StreamEnd::Failed(Self::vod_failure(a.req.kind)));
                 }
             }
             Some(EndReason::Unknown(code)) => {
@@ -897,6 +951,7 @@ impl PlaybackController {
         // Live stall detection.
         let mut stop_stalled = false;
         if live
+            && end.is_none()
             && a.reconnect.pending().is_none()
             && a.failed.is_none()
             && !held_load
@@ -906,24 +961,24 @@ impl PlaybackController {
                 idle_secs = a.tracker.idle_for(now).as_secs(),
                 "live stream stalled; reconnecting"
             );
-            Self::schedule(a, Cause::Stalled, Duration::ZERO, now);
-            stop_stalled = true;
+            end = Self::schedule(a, Cause::Stalled, Duration::ZERO, now);
+            stop_stalled = end.is_none();
         }
         let due = a.reconnect.take_due(now);
         let retry_at = a.reconnect.pending();
 
-        if finished_now {
-            self.mark_finished();
-        }
-        if failed_now {
+        if stream_error {
             self.check_connection_limit();
         }
-        if stop_stalled {
-            // Free the provider connection now; the frame stays up under the overlay.
+        if let Some(how) = end {
+            self.end_stream(how);
+        } else if stop_stalled {
+            // Not the end of the item: free the provider connection until the reconnect;
+            // the frame stays up under the overlay.
             self.stop_stream();
         }
         if due {
-            self.load_current(false);
+            self.open_stream(false);
         } else if let Some(at) = retry_at {
             self.ctx
                 .request_repaint_after(at.saturating_duration_since(now));
@@ -953,7 +1008,8 @@ impl PlaybackController {
         }
     }
 
-    fn schedule(a: &mut Active, cause: Cause, played: Duration, now: Instant) {
+    /// Schedules a reconnect; returns the end for good when the policy gives up.
+    fn schedule(a: &mut Active, cause: Cause, played: Duration, now: Instant) -> Option<StreamEnd> {
         match a.reconnect.schedule(cause, played, now) {
             Schedule::Retry { attempt, at } => {
                 tracing::info!(
@@ -962,19 +1018,21 @@ impl PlaybackController {
                     delay_secs = at.saturating_duration_since(now).as_secs(),
                     "reconnecting"
                 );
+                None
             }
             Schedule::AlreadyPending => {
                 tracing::debug!(?cause, "a reconnect is already pending");
+                None
             }
             Schedule::GiveUp => {
                 tracing::info!(?cause, "giving up after repeated failures");
-                a.failed = Some(if a.req.kind.is_live() {
+                Some(StreamEnd::Failed(if a.req.kind.is_live() {
                     "The channel stopped and didn't come back. Try again, or pick another \
                      channel."
                         .to_owned()
                 } else {
                     "The connection dropped and didn't come back.".to_owned()
-                });
+                }))
             }
         }
     }
@@ -1306,6 +1364,7 @@ impl PlaybackController {
     /// GL context).
     pub fn destroy(&mut self, gl: &eframe::glow::Context) {
         self.save_progress_now();
+        self.end_stream(StreamEnd::Stopped);
         if let Some(e) = &mut self.engine {
             e.video.destroy(gl);
         }

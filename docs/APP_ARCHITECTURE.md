@@ -26,7 +26,7 @@ cargo fmt; cargo clippy -p opensmarters --all-targets --all-features -- -D warni
 | `src/nav/` | `Route` (typed routes, `--route` syntax), `Router` (back stack), `Navigator` (`cx.nav`) |
 | `src/focus/` | The spatial focus engine (`engine.rs`, pure + unit-tested) and its egui glue (`mod.rs`) |
 | `src/ui/` | Design system: `theme` (tokens, fonts, visuals), `icons` (Phosphor), `paint` (focus ring/glow, scrims, cover-fit), `text` (capping, truncation, timecodes), `motion`, `layout` (breakpoints), `assets` (bundled art), `widgets/` |
-| `src/services/` | `Services` (runtime, store, redactor, images, paths, background-error queue), `Session` (provider: catalogue, EPG, favourites, parental, playback requests; Phase-4 additions in child modules `session/*.rs`), `catalog` (`LiveChannel`, `LiveCatalog`, `Programme`), `images`, `epg`, `prefs` (app-wide preferences), `parental` (PIN length, lockout/wrong-PIN texts, "forgot PIN" check), `backup` (export/import without secrets or machine-local settings), `search_history` (recent searches per profile), `demo` |
+| `src/services/` | `Services` (runtime, store, redactor, images, paths, background-error queue, FIFO store writer `writer`), `fetch_queue` (bounded "what is on screen" request queue), `Session` (provider: catalogue, EPG, favourites, parental, playback requests; Phase-4 additions in child modules `session/*.rs`; parental locks at the point of use in `session/locks.rs`), `catalog` (`LiveChannel`, `LiveCatalog`, `Programme`), `images`, `epg`, `prefs` (app-wide preferences), `parental` (PIN length, lockout/wrong-PIN texts, "forgot PIN" check with a limiter persisted in the store: `forgot_pin_attempt`), `backup` (export/import without secrets or machine-local settings), `search_history` (recent searches per profile), `demo` |
 | `src/platform.rs` | Safe OS queries: Windows *Animation effects* (`UISettings.AnimationsEnabled` via the `windows` crate's WinRT projection) for reduced motion; "open folder" |
 | `src/window_state.rs` | Window size/position/maximised remembered between runs (store setting `app.window`, physical px, debounced; never for `--ephemeral`/`--window-size`) |
 | `src/playback/tracks.rs` | Preferred audio/subtitle languages (ISO 639 normalisation, track choice), network buffer presets, `PlayerTuning` (hwdec + buffer at player start) |
@@ -155,22 +155,40 @@ Rules (unit-tested in `nav/router.rs`):
 
 | Area | API |
 |---|---|
-| Info | `profile()`, `profile_id()`, `kind()`, `is_xtream()`, `account()` (status, expiry, connections…), `login()`, `is_insecure()`, `is_offline()`, `user_agent()`, `allowed_live_containers()`, `live_container()`, `xtream()` (raw client), `playlist()` (M3U), `http()` |
-| Catalogue | `live_catalog()` → `LiveCatalog` (channels + categories, M3U groups too), `vod_categories()`, `vod_streams(Option<CategoryId>)`, `series_categories()`, `series_list(Option<CategoryId>)`, `vod_info(id)`, `series_info(id)`, `epg_table(stream_id)` (catch-up), `peek_cached::<T>(key)` (cache only, no network) |
-| EPG | `epg(&channel)` → `EpgState` (non-blocking, fetches in the background), `now_next(&channel, now)` |
-| Requests | `live_request(&channel, Option<ZapContext>)`, `movie_request(..)`, `episode_request(..)`, `catchup_request(&channel, &ArchiveProgramme, resume)`, `resume_request(&PlaybackProgress)` |
-| Favourites | `is_favourite(kind, id)`, `favourite_ids(kind)`, `toggle_favourite(kind, id, snapshot)` (optimistic, persisted in the background), `reload_favourites()` |
-| Parental | `parental_enabled()`, `pin_length()` (4–8: create PIN pads with `PinPad::new(id, session.pin_length())`, or use `widgets::PinPrompt`), `is_category_locked(kind, &id, name)`, `is_selection_locked(..)`, `unlock_category(..)` (session-only), `reload_parental()` (call after Settings → Parental changes) |
-| Cache | `cached(key, ttl, fetch)` (generic SWR), `refresh()` (drop everything) |
+| Info | `profile()`, `profile_id()`, `kind()`, `is_xtream()`, `account()` (status, expiry, connections…), `login()`, `is_insecure()` / `insecure_reason()` → `InsecureReason::{PlainAccount, PlainStreams, PlainPlaylistEntries{count}}` (+ `.message()`; SR-12: an https panel that hands out http stream URLs, or http playlist entries, also count), `is_offline()`, `user_agent()`, `allowed_live_containers()`, `live_container()`, `xtream()` (raw client), `playlist()` (M3U), `http()` |
+| Lifetime | `close()` / `is_closed()`: called by `SessionManager` when another open replaces the session (or it is closed); queued EPG/guide/look-up/image work is dropped and background tasks stop before their next provider call |
+| Catalogue | `live_catalog()` → `LiveCatalog` (channels + categories, M3U groups too; rebuilt only when its lists change), `last_live_catalog()` (no I/O), `vod_categories()`, `vod_streams(Option<CategoryId>)`, `series_categories()`, `series_list(Option<CategoryId>)`, `vod_info(id)`, `series_info(id)`, `epg_table(stream_id)` (catch-up), `peek_cached::<T>(key)` (cache only, no network) |
+| EPG | `epg(&channel)` → `EpgState::{Loading, Missing, Ready(Arc<EpgRow>)}` and `now_next(&channel, now)`: non-blocking, **call every frame for the rows on screen**. Served from the guide's bounded row cache (one cache for every screen), else one short `get_short_epg` through the shared bounded queue (≤ 3 requests, newest rows first, rows that left the screen dropped). Expired rows stay visible while they refresh. `epg_queue_stats()` for logs/tests |
+| Requests | `live_request(&channel, Option<ZapContext>)`, `movie_request(..)`, `episode_request(..)`, `catchup_request(&channel, &ArchiveProgramme, resume)`, `resume_request(&PlaybackProgress)` — all return `AppError::Locked(LockedItem)` for items of locked categories (see Parental) |
+| Favourites | `is_favourite(kind, id)`, `favourites(kind)` → `Arc<HashSet<String>>` (shared, no copy), `favourites_len(kind)`, `favourites_generation()` (bumped on every change: use it to know when to rebuild a filtered list), `toggle_favourite(kind, id, snapshot)` (optimistic, persisted in order), `reload_favourites()`. `favourite_ids(kind)` copies the set: kept for compatibility, don't call it every frame |
+| Parental | `parental_enabled()`, `pin_length()` (4–8: create PIN pads with `PinPad::new(id, session.pin_length())`, or use `widgets::PinPrompt`), `is_category_locked(kind, &id, name)`, `is_selection_locked(..)`, `unlock_category(..)`, `reload_parental()` (call after Settings → Parental changes; wipes the image disk cache when a PIN was just set). **Items** (`session/locks.rs`): `is_item_locked(kind, &[CategoryId])` (every category counts), `categories_lock(kind, &cats)` / `item_lock(kind, id, Option<&cats>)` → `ItemLock::{Unlocked, Locked{category, name}, Unknown}`, `locked_category(..)`, `is_locked(&item)`, `filter_unlocked(items)`, `retain_unlocked(&mut vec)` for any `Lockable` (channels, films, series, favourites, resume points, recent channels), `check_unlocked(..)`, `verify_item(kind, id).await`, `unlock_item(kind, id)`, `relock_all()`, `note_activity()`, `category_name(kind, &id)` |
+| Cache | `cached(key, ttl, fetch)` (generic SWR), `refresh()` (drop everything; `SessionManager::reopen_fresh(&services, &session)` awaits it and then reopens the profile — use that for "Refresh") |
 | Movies / series (`session/vod.rs`) | `movie_progress(id)`, `movie_progress_map()`, `series_watch(id)` → `SeriesWatch`, `set_episode_watched(..)`, `series_episode_request(..)` (title "Series · Episode", season/number from the info), `last_vod_category(kind)` / `remember_vod_category(kind, id)`, `resume_thresholds()` |
 
 **Caching** is stale-while-revalidate: memory memo → encrypted store cache → provider. TTLs:
 lists 6 h, VOD/series info 6 h, EPG 10 min (memory). An expired copy is returned at once and
 refreshed in the background; a failed fetch falls back to the expired copy. When the
 provider is unreachable at sign-in, the session opens **offline** from the cached login.
+JSON (tens of MB for "All" lists), M3U parsing and catalogue builds run on the blocking pool,
+never on the async workers; cache writes go through the store writer (not awaited).
 
 **Item ids** for favourites/history: Xtream ids as strings; M3U channels use
-`m3u:<hash>` (`catalog::m3u_key`) — **never URLs** (they carry credentials).
+`m3u:<hash>` (`catalog::m3u_key`) — **never URLs** (they carry credentials). Repeats of
+the same entry (same `tvg-id`, title and group, e.g. backup streams) get `m3u:<hash>#2`,
+`#3`, … in playlist order; unique entries keep their ids.
+
+**Parental locks at the point of use** (SR-02). A request for an item of a locked category
+returns `AppError::Locked(LockedItem { kind, item, category, category_name })`
+(`err.locked()`). The UI flow: `category: Some(c)` → `PinPrompt` → `unlock_category(kind,
+&c)` → retry. `category: None` means the item's categories aren't known yet (e.g. a
+Continue-watching film whose list was never loaded; a cached look-up already started):
+`session.verify_item(kind, &item).await`, then retry; if it is still unverified (offline),
+`PinPrompt` → `unlock_item(kind, &item)` → retry. Unknown counts as locked while a PIN is
+set (fail closed). Lists use `filter_unlocked`/`retain_unlocked` (Home rails, Favourites,
+"More like this", zap lists); `screens::common::locks::is_item_locked` delegates to the
+same rule. **Re-lock policy:** unlocks are never stored; they end with the session
+(profile switch, restart) and expire after 30 min without user input
+(`SessionManager::poll` reports input every frame); `relock_all()` locks at once.
 
 ### Real-provider scale (measured on a real panel — design for it)
 
@@ -181,6 +199,11 @@ provider is unreachable at sign-in, the session opens **offline** from the cache
   or the first few categories.
 - ⇒ Every list is virtualised (`widgets::VirtualList` for rows, `widgets::VirtualGrid` for poster grids); search over large
   lists runs off the UI thread (in a `Loader`), incrementally, with `catalog::SearchIndex`.
+- ⇒ **Per-row requests are bounded**: EPG (≤ 3 at a time) and artwork (≤ 6 downloads,
+  ≤ 2 decodes) go through `services::fetch_queue::FetchQueue`: most recently drawn first,
+  work for rows no longer drawn is dropped before it reaches the network. Paging 40 pages of
+  Live TV against the slow fake panel sends ~10 EPG requests instead of one per row
+  (`tests/bounded.rs`).
 - The store cache cap (512 MiB default) fits a 30–60 MB list; keep "All" caching optional.
 - Provider names often carry prefixes (`"FR | Title (2003)"`): use
   `catalog::split_tag(name)` to show the prefix as a small tag (`widgets::chip::tag`).
@@ -191,24 +214,35 @@ provider is unreachable at sign-in, the session opens **offline** from the cache
 ### Images
 
 `cx.services.images.get(url, ImageSize::{Logo, Poster, Card, Backdrop})` → `ImageSlot`
-(`None | Loading | Ready(TextureHandle) | Failed`). http/https only, 10 MB cap, 8192 px
-dimension limit, downscaled to the size class, memory LRU (192 MB) + disk cache
-(`<data>/images`, PNG, trimmed at 256 MB). Cards draw placeholders until ready. Bundled art:
-`ui::assets::Asset` (`paint_cover`, `paint_contain`, `paint_exact`, `forget`).
+(`None | Loading | Ready(TextureHandle) | Failed`); call it every frame while the image is
+drawn (that keeps its download wanted). http/https only, 10 MB cap, decode limits 4096 px /
+64 MiB / 2 decodes at a time (SR-10), downscaled to the size class, memory LRU (192 MB) +
+disk cache (`<data>/images`, PNG, trimmed to 80 % of 256 MB at startup and after every
+16 MB written). Failures are retried after 5 min (bounded LRU). Artwork of locked
+categories is registered private by the session (`mark_private`): memory only, cached
+files deleted (SR-13); `clear_image_disk_cache()` wipes the disk cache;
+`cancel_pending()` drops queued downloads; `queue_stats()`. An https image may follow a
+redirect to http only when its URL carries no credential. Cards draw placeholders until
+ready. Bundled art: `ui::assets::Asset` (`paint_cover`, `paint_contain`, `paint_exact`,
+`forget`).
 
 ### Store rules
 
 The store is synchronous and **must not be called on the UI thread** (fsync, keychain IPC,
-Argon2). Use `Loader::start_blocking(..)` to read and `cx.services.blocking("what", |s| ..)`
-for fire-and-forget writes.
+Argon2). Reads: `Loader::start_blocking(..)` or `cx.services.read(|s| ..).await`. **Writes
+go through one FIFO writer thread**, so they land in the order they were made (progress
+saves, read-modify-write settings maps, preferences): `cx.services.blocking("what", |s| ..)`
+to fire and forget (errors and panics become a toast), `cx.services.write("what", |s| ..)`
+→ `WriteHandle<T>` to await a result. A read that must see earlier writes can go through
+`write` too.
 
 ### Guide, catch-up and search (Phase 4B, `services/session/{guide,catchup}.rs`)
 
 | API | Use |
 |---|---|
-| `guide_row(&channel)` → `RowState::{Loading, Missing, Ready(Arc<EpgRow>)}` | Non-blocking; call every frame for the rows **on screen**. Xtream: `get_simple_data_table` (else `get_short_epg`), bounded LRU (320 rows, 10 min), 3 requests at a time, requests for rows that scrolled away are dropped. XMLTV profiles read the session guide. |
+| `guide_row(&channel)` → `RowState::{Loading, Missing, Ready(Arc<EpgRow>)}` | Non-blocking; call every frame for the rows **on screen**. Xtream: `get_simple_data_table` (else `get_short_epg`), bounded LRU (320 rows, 10 min), 3 requests at a time, requests for rows that scrolled away are dropped; the same cache and queue serve `epg`/`now_next` (a short now/next row is shown at once and upgraded to the full schedule). Expired rows stay visible while refreshing (and after a failed refresh). XMLTV profiles read the session guide. |
 | `full_row(&channel).await` | The `get_simple_data_table` schedule (archive flags, server-local starts) for Catch-up. |
-| `guide_uses_xmltv()`, `start_guide()`, `xmltv_status()`, `loaded_xmltv()` | XMLTV path: the profile's EPG URL override (keychain), else the M3U `url-tvg`. Parsed off-thread with `core::xmltv::parse_filtered` (window −36 h…+7 d, known channels only, short texts, ≤ 400 k programmes); also feeds Live TV now/next. |
+| `guide_uses_xmltv()`, `start_guide()`, `xmltv_status()`, `loaded_xmltv()` | XMLTV path: the profile's EPG URL override (keychain), else the M3U `url-tvg`. Parsed off-thread with `core::xmltv::parse_filtered` (window −36 h…+7 d, known channels only, short texts, ≤ 400 k programmes kept, ≤ 2 M looked at, 256 MiB decompressed, 1 MiB text nodes — SR-11); also feeds Live TV now/next. |
 | `cached_guide_rows()` | Schedules already fetched (Search's programme results). |
 | `server_time_zone()` | Panel zone for server-local strings / catch-up day tabs. |
 | `timeshift_format()`, `saved_timeshift_format()`, `set_timeshift_format(f, persist)` | The format in use (a session choice after the fallback worked, else the profile's); `persist` saves it to the profile in the background. |
@@ -244,6 +278,9 @@ fn ui(&mut self, cx: &mut AppCtx<'_>, ui: &mut egui::Ui) {
 - Restarting a loader bumps its generation and aborts the old task: a slow old result can
   never overwrite a newer one (unit-tested).
 - `emit.partial(v)` delivers an early value (e.g. cached) before the final one.
+- A task that panics (or is dropped) without a result ends with `AppError::Internal`
+  ("Something went wrong…"), never an endless spinner. `cx.services.spawn(..)` reports a
+  panicking task as a background-error toast.
 - `start_blocking(rt, ctx, || ..)` for store/keychain work.
 - `AppError::user_message()` / `title()` give plain-language text; never show raw errors.
 

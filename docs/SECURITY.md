@@ -220,9 +220,16 @@ Guide, Catch-up and Search; "All"/"Favourites" lists in Live/Movies/Series hide 
 items. The PIN also guards the parental settings page, profile add/edit/delete and backup
 import. "Forgot PIN" requires an Xtream password or M3U address stored on the PC.
 
-**Known gaps** at the time of the review are listed as SR-02, SR-03 and SR-14 in §7: the
-gate is enforced in browse lists, not at the point where a playback request or a detail
-page is created.
+Locks are also enforced **where content is used**: Session::live_request,
+movie_request, episode_request, catchup_request(_with) and esume_request refuse
+an item when *any* of its categories is locked (AppError::Locked, the UI asks for the
+PIN and retries); items whose categories aren't known yet are refused until a cached
+get_vod_info/get_series_info look-up settles them (crates/app/src/services/session/locks.rs).
+Unlocks live only in memory and expire after 30 minutes without user input, on profile
+switch and on restart. Artwork of locked categories is never written to the image disk
+cache, and the cache is wiped when a PIN is set. The "Forgot PIN" limiter is persisted.
+
+**Known gaps** at the time of the review are listed in §7 (SR-02's screen part, SR-03).
 
 ### 4.8 Supply chain
 
@@ -274,8 +281,8 @@ page is created.
 - **SSRF to LAN** via provider image/stream URLs (GET only) is accepted. libcurl in mpv
   follows a redirect to `ftp://` (SR-09).
 - **Large-but-bounded resource use**: a 667 KiB gzip XMLTV within the default limits takes
-  ~1.8 GiB and ~30 s (debug build) to parse (SR-11); 6 concurrent maximum-size images can
-  take ~1.5 GiB (SR-10).
+  ~1.8 GiB and ~30 s (debug build) to parse with the core's default limits (SR-11; guide
+  downloads now use far tighter ones); artwork decoding is capped at 2 × 64 MiB (SR-10).
 
 ## 6. Design rules for contributors
 
@@ -298,7 +305,7 @@ against the fake panel and the real DLL (commands in §8).
 | ID | Severity | Component | Finding | Status |
 |---|---|---|---|---|
 | SR-01 | High | core redact | M3U playlists using the short live form `http://host/{user}/{pass}/{id}` were not recognised by the redactor and only the whole playlist URL was registered, so mpv's warning lines ("stream: Failed to open <url>", logged at the default level on every 403/404) wrote the username and percent-encoded password to `opensmarters.log` (reproduced: 3 lines at default level, 4 with debug) | Fixed (`0953800`) |
-| SR-02 | High | app | Locked content is reachable without the PIN: Home's *Continue watching*, *Live now* (favourites/recently watched) and *Recently added* rails, the Favourites screen (incl. zapping), the Detail page ("More like this" lists the locked category) and `Session::live_request`/`movie_request`/`episode_request` do not check locks | Open (app fix) |
+| SR-02 | High | app | Locked content is reachable without the PIN: Home's *Continue watching*, *Live now* (favourites/recently watched) and *Recently added* rails, the Favourites screen (incl. zapping), the Detail page ("More like this" lists the locked category) and `Session::live_request`/`movie_request`/`episode_request` do not check locks | Service part fixed (fix batch B): the request builders refuse items of locked categories with `AppError::Locked` (every category of an item counts; unknown categories fail closed until a cached look-up settles them), list helpers `filter_unlocked`/`retain_unlocked`; the screens must still filter Home rails / Favourites / Detail and turn the error into a PIN prompt (UI batch) |
 | SR-03 | Medium | app | Dev-harness flags are available in release builds: `--route player:live=<id>` and `--route detail:movie=<id>` play locked items without the PIN (verified; zapping then covers the whole catalogue), `--route onboarding` adds a profile without the "add profile" PIN gate, which lets a child add an M3U playlist they know and use it for "Forgot PIN" | Open (app fix) |
 | SR-04 | Medium | core m3u | Attribute-heavy M3U lines grew ~21× in memory (64 MiB → 1.36 GiB peak; ~5 GiB at the 256 MiB cap) | Fixed (`9d0f8e6`, now 71 MiB) |
 | SR-06 | Medium | player | Release builds searched every `PATH` directory for `libmpv-2.dll`, and the process DLL search order was not restricted for DLLs libmpv/drivers load by name | Fixed in player (`2cca850`); app should also call `harden_dll_search_path()` first in `main` |
@@ -306,11 +313,11 @@ against the fake panel and the real DLL (commands in §8).
 | SR-05 | Low | core m3u | Quadratic duplicate check on `url-tvg` lists: 1 MiB of header took 36 s; a few MiB hang the playlist load | Fixed (`9d0f8e6`) |
 | SR-08 | Low | CI | `cargo audit` (CI `rustsec/audit-check`) fails: the five accepted advisories are ignored only in `deny.toml` | Open (add `.cargo/audit.toml`) |
 | SR-09 | Low | libmpv | libcurl follows provider redirects to `ftp://`/`ftps://` (13 other protocols refused; never plays or reads files) | Accepted (test documents it) |
-| SR-10 | Low | app images | Decode limits (8192 px, 256 MiB, 6 concurrent) allow ~1.5 GiB of transient memory from hostile artwork | Open (app: tighten) |
-| SR-11 | Low | core xmltv / app | Default XMLTV limits let a 667 KiB gzip cost ~1.8 GiB and ~30 s | Open (consider lower limits or a time window) |
-| SR-12 | Low | app | The "Unencrypted" warning reflects only the API/playlist URL; stream URLs built from `server_info` (or M3U entries) may be `http` with credentials | Open (app) |
-| SR-13 | Low | app | Artwork of unlocked adult categories is cached as plain PNGs in `images\` (viewable in Explorer); history/search history are plain SQLite | Open (app) |
-| SR-14 | Low | app | "Forgot PIN" rate limit lives in memory (restart = 3 new tries); unlocked categories stay unlocked for the whole session | Open (app) |
+| SR-10 | Low | app images | Decode limits (8192 px, 256 MiB, 6 concurrent) allow ~1.5 GiB of transient memory from hostile artwork | Fixed (fix batch B): 4096 px, 64 MiB decoder budget, 2 decodes at a time, area-average downscale (no full-size float buffers); worst case ≈ 2 × 64 MiB |
+| SR-11 | Low | core xmltv / app | Default XMLTV limits let a 667 KiB gzip cost ~1.8 GiB and ~30 s | Fixed for guide downloads (fix batch B): `parse_filtered` with 256 MiB decompressed, 1 MiB text nodes, 1 KiB texts, window −36 h…+7 d, ≤ 400 k programmes kept, ≤ 2 M looked at, titles 240 B / descriptions 360 B kept (core defaults unchanged) |
+| SR-12 | Low | app | The "Unencrypted" warning reflects only the API/playlist URL; stream URLs built from `server_info` (or M3U entries) may be `http` with credentials | Fixed in the session (fix batch B): `is_insecure()` is also true when the stream base (`server_info`) or any playlist entry is `http`; `insecure_reason()` says which (UI wording pending) |
+| SR-13 | Low | app | Artwork of unlocked adult categories is cached as plain PNGs in `images\` (viewable in Explorer); history/search history are plain SQLite | Artwork fixed (fix batch B): images of locked categories stay in memory (their cached files are deleted) and the disk cache is wiped when a PIN is set; history remains plain SQLite (accepted, §5) |
+| SR-14 | Low | app | "Forgot PIN" rate limit lives in memory (restart = 3 new tries); unlocked categories stay unlocked for the whole session | Fixed (fix batch B): the limiter is persisted in the settings table (`app.parental.reset_limiter`, machine-local); unlocks expire after 30 min without input, and on profile switch / restart |
 | SR-15 | Low | app | Search hides locked VOD only by the primary `category_id` and applies keyword locks only when the category list is cached | Open (app) |
 | SR-16 | Low | app | `explorer` is started by bare name (`platform.rs`, `trailer.rs`); no panic hook (panic text goes unredacted to stderr in debug builds) | Open (app) |
 | SR-17 | Info | store | Lockout can be shortened by moving the clock forward (admin); DB edits remove the PIN | Accepted (§5) |

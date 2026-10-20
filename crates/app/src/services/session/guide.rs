@@ -625,6 +625,7 @@ impl Session {
                 }
                 let s = ext.queue.stats();
                 tracing::debug!(
+                    target: "opensmarters::queue",
                     pending = s.pending,
                     running = s.running,
                     peak = s.peak_running,

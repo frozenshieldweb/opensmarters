@@ -410,6 +410,16 @@ async fn worker(inner: &Arc<Inner>) {
                     .put(key.clone(), Instant::now());
             }
         }
+        let s = inner.queue.stats();
+        tracing::debug!(
+            target: "opensmarters::queue",
+            pending = s.pending,
+            running = s.running,
+            peak = s.peak_running,
+            started = s.started,
+            dropped = s.dropped,
+            "image queue"
+        );
         inner.ctx.request_repaint();
     }
 }

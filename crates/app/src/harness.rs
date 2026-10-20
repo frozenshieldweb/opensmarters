@@ -24,6 +24,9 @@ pub enum Step {
     Shot(PathBuf),
     /// Close the app.
     Quit,
+    /// Delay after each following key/text step (default [`KEY_GAP_SECS`]); a short gap
+    /// lets a `shot:` catch an animation mid-way (e.g. `gap:0.05,Enter,shot:fade.png`).
+    Gap(f64),
 }
 
 /// Default delay after each key so the UI settles (focus, scroll, animations).
@@ -47,6 +50,12 @@ pub fn parse_script(script: &str) -> Result<Vec<Step>, String> {
                 .parse()
                 .map_err(|_| format!("bad wait {tok:?}"))?;
             steps.push(Step::Wait(s.clamp(0.0, 600.0)));
+        } else if let Some(secs) = tok.strip_prefix("gap:") {
+            let s: f64 = secs
+                .trim()
+                .parse()
+                .map_err(|_| format!("bad gap {tok:?}"))?;
+            steps.push(Step::Gap(s.clamp(0.0, 10.0)));
         } else if let Some(t) = tok.strip_prefix("text:") {
             steps.push(Step::Text(t.to_owned()));
         } else if let Some(p) = tok.strip_prefix("shot:") {
@@ -137,6 +146,7 @@ pub struct Harness {
     closing: bool,
     pending: PendingShots,
     quit_requested_at: Option<f64>,
+    key_gap: Option<f64>,
 }
 
 impl Harness {
@@ -155,6 +165,7 @@ impl Harness {
             closing: false,
             pending: PendingShots::default(),
             quit_requested_at: None,
+            key_gap: None,
         }
     }
 
@@ -214,17 +225,15 @@ impl Harness {
                             modifiers,
                         });
                     }
-                    if key == Key::Space {
-                        // egui also expects a text event for typing into fields.
-                    }
-                    self.next_at = now + KEY_GAP_SECS;
+                    self.next_at = now + self.key_gap.unwrap_or(KEY_GAP_SECS);
                     break;
                 }
                 Step::Text(t) => {
                     raw.events.push(egui::Event::Text(t));
-                    self.next_at = now + KEY_GAP_SECS;
+                    self.next_at = now + self.key_gap.unwrap_or(KEY_GAP_SECS);
                     break;
                 }
+                Step::Gap(s) => self.key_gap = Some(s),
                 Step::Shot(path) => {
                     screenshot(ctx, path, false, &self.pending);
                     self.next_at = now + 0.3;
@@ -315,6 +324,10 @@ mod tests {
         assert_eq!(s[8], Step::Text("ab".into()));
         assert_eq!(s[9], Step::Shot(PathBuf::from("x.png")));
         assert_eq!(s[10], Step::Quit);
+        assert_eq!(
+            parse_script("gap:0.05,Enter").unwrap_or_else(|e| panic!("{e}"))[0],
+            Step::Gap(0.05)
+        );
         assert!(parse_script("Nope").is_err());
         assert!(parse_script("wait:x").is_err());
     }

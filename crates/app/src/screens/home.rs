@@ -564,16 +564,6 @@ impl HomeScreen {
 
     /// Follows the focus: a rail card that keeps the focus for 250 ms becomes the hero.
     fn follow_focus(&mut self, ctx: &egui::Context) {
-        if !self.hero.interacted {
-            self.hero.interacted = ctx.input(|i| {
-                i.events.iter().any(|e| {
-                    matches!(
-                        e,
-                        egui::Event::Key { pressed: true, .. } | egui::Event::PointerMoved(_)
-                    )
-                })
-            });
-        }
         if self.hero.featured.is_none() || !self.hero.interacted {
             return;
         }
@@ -1419,6 +1409,21 @@ async fn resume_hero(session: &Arc<Session>, p: &PlaybackProgress, item: HeroIte
 impl Screen for HomeScreen {
     fn on_enter(&mut self, cx: &mut AppCtx<'_>) {
         self.load(cx);
+    }
+
+    fn on_input(&mut self, _cx: &mut AppCtx<'_>, ctx: &egui::Context) {
+        // Runs before the focus engine consumes the arrows: note that the user is
+        // driving the focus (the hero follows it only then).
+        if !self.hero.interacted {
+            self.hero.interacted = ctx.input(|i| {
+                i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key { pressed: true, .. } | egui::Event::PointerMoved(_)
+                    )
+                })
+            });
+        }
     }
 
     fn section(&self) -> Option<Section> {

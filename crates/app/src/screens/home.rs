@@ -283,11 +283,14 @@ impl HomeScreen {
 
     fn play_movie(cx: &mut AppCtx<'_>, m: &VodStream) {
         let Some(session) = cx.session() else { return };
+        // The player shows the catalogue title without the provider tag and "(1981)".
+        let shown = vod::display_title(&m.name);
+        let year = vod::release_year(None, &m.name).map(|y| y.to_string());
         match session.movie_request(
             m.stream_id,
             m.container_extension.as_deref(),
-            &m.name,
-            None,
+            shown.title,
+            year,
             m.stream_icon.as_deref(),
             None,
         ) {

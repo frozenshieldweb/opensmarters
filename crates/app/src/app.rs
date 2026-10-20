@@ -406,14 +406,16 @@ impl eframe::App for OpensmartersApp {
         }
         let keys = focus::begin_frame(&ctx);
         if keys.back {
-            let consumed = match self.router.top_mut() {
-                Some(entry) => {
-                    let screen = &mut entry.screen;
-                    let mut cx = cx!(self, layout, None);
-                    screen.on_back(&mut cx)
-                }
-                None => false,
-            };
+            // The shell's own popups (the rail's profile menu) close first.
+            let consumed = shell::close_menus(&ctx)
+                || match self.router.top_mut() {
+                    Some(entry) => {
+                        let screen = &mut entry.screen;
+                        let mut cx = cx!(self, layout, None);
+                        screen.on_back(&mut cx)
+                    }
+                    None => false,
+                };
             if !consumed {
                 if self.router.len() > 1 {
                     self.nav.back();

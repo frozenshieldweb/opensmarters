@@ -8,10 +8,12 @@
 //!   platforms report `None` (unknown), and the manual setting applies.
 //! - [`SystemMotion`]: polls that value every few seconds so turning animations off in
 //!   Windows applies while the app runs.
-//! - [`open_folder`]: shows a folder in the file manager (Explorer, Finder, xdg-open). The
-//!   path is passed as a single argument, never through a shell.
+//! - [`open_folder`] / [`open_url`]: show a folder in the file manager or an https page in
+//!   the browser through the system launcher ([`launcher`]: Explorer, `open`,
+//!   `xdg-open`), always started by **absolute path** (never resolved through the current
+//!   directory or `PATH`), with the path/URL as a single argument, never through a shell.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// How often [`SystemMotion::poll`] asks the OS again.
@@ -63,8 +65,61 @@ impl SystemMotion {
     }
 }
 
-/// Opens `dir` in the system file manager. The path is one argument to the program (no
-/// shell involved).
+/// The system "open this" launcher by **absolute path** (Explorer, `open`, `xdg-open`).
+///
+/// Never a bare program name: `Command::new("explorer")` searches the current directory
+/// and `PATH` first on Windows, so a planted `explorer.exe` next to the working directory
+/// would run instead (SR-16). On Windows the path is `%SystemRoot%\explorer.exe`, and the
+/// variable must be an absolute path to an existing directory.
+///
+/// # Errors
+///
+/// `NotFound` if the launcher can't be located safely.
+pub fn launcher() -> std::io::Result<PathBuf> {
+    let not_found = |what: &str| std::io::Error::new(std::io::ErrorKind::NotFound, what.to_owned());
+    #[cfg(windows)]
+    {
+        let root = std::env::var_os("SystemRoot")
+            .or_else(|| std::env::var_os("windir"))
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute() && p.is_dir())
+            .ok_or_else(|| not_found("the Windows folder (%SystemRoot%) isn't set"))?;
+        let exe = root.join("explorer.exe");
+        if exe.is_file() {
+            Ok(exe)
+        } else {
+            Err(not_found("explorer.exe isn't in the Windows folder"))
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let exe = PathBuf::from("/usr/bin/open");
+        if exe.is_file() {
+            Ok(exe)
+        } else {
+            Err(not_found("/usr/bin/open is missing"))
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        [
+            "/usr/bin/xdg-open",
+            "/bin/xdg-open",
+            "/usr/local/bin/xdg-open",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_file())
+        .ok_or_else(|| not_found("xdg-open isn't installed"))
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        Err(not_found("no launcher on this platform"))
+    }
+}
+
+/// Opens `dir` in the system file manager. The launcher is started by absolute path
+/// ([`launcher`]) and the folder is its single argument (no shell involved).
 ///
 /// # Errors
 ///
@@ -76,16 +131,35 @@ pub fn open_folder(dir: &Path) -> std::io::Result<()> {
             "the folder doesn't exist",
         ));
     }
-    let program = if cfg!(windows) {
-        "explorer"
-    } else if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    std::process::Command::new(program)
+    std::process::Command::new(launcher()?)
         .arg(dir)
         .spawn()
+        .map(|_| ())
+}
+
+/// Opens an `https://` URL in the default browser through the system launcher (by
+/// absolute path, the URL as its single argument, no shell). Callers validate the URL
+/// against their own allow-list first; this only refuses anything that isn't https.
+///
+/// # Errors
+///
+/// Not an https URL, or the launcher couldn't be started.
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    let ok = url.starts_with("https://")
+        && url.len() <= 2048
+        && url
+            .chars()
+            .all(|c| c.is_ascii_graphic() && !matches!(c, '"' | '\'' | '`' | '\\' | '^' | '|'));
+    if !ok {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "only plain https:// addresses are opened",
+        ));
+    }
+    // explorer.exe reports 1 even when it worked, so only a failure to start counts.
+    std::process::Command::new(launcher()?)
+        .arg(url)
+        .status()
         .map(|_| ())
 }
 
@@ -108,5 +182,33 @@ mod tests {
     fn open_folder_rejects_missing_dirs() {
         let missing = std::env::temp_dir().join("opensmarters-no-such-dir-4b1c");
         assert!(open_folder(&missing).is_err());
+    }
+
+    #[test]
+    fn the_launcher_is_an_absolute_path() {
+        // Never a bare name resolved through the current directory or PATH (SR-16).
+        if let Ok(exe) = launcher() {
+            assert!(exe.is_absolute(), "{}", exe.display());
+            assert!(exe.is_file());
+            #[cfg(windows)]
+            assert!(
+                exe.file_name()
+                    .is_some_and(|n| n.eq_ignore_ascii_case("explorer.exe"))
+            );
+        }
+    }
+
+    #[test]
+    fn open_url_refuses_non_https_and_shell_characters() {
+        for bad in [
+            "http://example.org/",
+            "file:///C:/Windows/System32/calc.exe",
+            "https://example.org/\"&calc",
+            "https://example.org/ x",
+            "javascript:alert(1)",
+            "",
+        ] {
+            assert!(open_url(bad).is_err(), "{bad}");
+        }
     }
 }

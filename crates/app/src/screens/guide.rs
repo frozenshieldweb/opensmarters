@@ -976,6 +976,7 @@ impl GuideScreen {
                                 r,
                                 "No information for this time",
                                 false,
+                                false,
                             ) {
                                 if act {
                                     activated = Some((ri, None));
@@ -1062,6 +1063,7 @@ impl GuideScreen {
                                 "No programme information"
                             },
                             loading,
+                            Some(ri) == first_visible && focus_now.is_none(),
                         ) {
                             if act {
                                 activated = Some((ri, None));
@@ -1463,6 +1465,7 @@ fn weekday(w: opensmarters_core::chrono::Weekday) -> &'static str {
 }
 
 /// A row-wide placeholder cell (loading / no guide). Returns `(focused, activated)`.
+#[allow(clippy::too_many_arguments)]
 fn placeholder_cell(
     ui: &mut Ui,
     painter: &egui::Painter,
@@ -1471,8 +1474,14 @@ fn placeholder_cell(
     r: Rect,
     label: &str,
     loading: bool,
+    autofocus: bool,
 ) -> Option<(bool, bool)> {
-    let (_, f) = focus::focusable(ui, cell_id(&ch.key, None), r, FocusOpts::default());
+    let (_, f) = focus::focusable(
+        ui,
+        cell_id(&ch.key, None),
+        r,
+        FocusOpts::default().autofocus_if(autofocus),
+    );
     if !loading {
         painter.rect_filled(
             r,

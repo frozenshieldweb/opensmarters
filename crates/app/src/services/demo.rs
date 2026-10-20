@@ -59,6 +59,17 @@ pub fn start(rt: &tokio::runtime::Runtime, store: &Store, set_pin: bool) -> anyh
     if std::env::var_os("OPENSMARTERS_DEMO_FAVOURITES").is_some() {
         seed_favourites(store, profile.id, &panel)?;
     }
+    // Dev only: `OPENSMARTERS_DEMO_XMLTV=1` sets the profile's EPG URL override to the
+    // panel's gzipped XMLTV, so the guide runs on the XMLTV path.
+    if std::env::var_os("OPENSMARTERS_DEMO_XMLTV").is_some() {
+        let url = SecretString::from(format!(
+            "{}/xmltv.xml.gz",
+            panel.base_url().trim_end_matches('/')
+        ));
+        store
+            .profiles()
+            .set_epg_url_override(profile.id, Some(&url))?;
+    }
     tracing::info!("demo provider running on 127.0.0.1:{}", panel.port());
     Ok(Demo {
         panel,

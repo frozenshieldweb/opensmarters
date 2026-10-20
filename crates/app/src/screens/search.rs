@@ -12,6 +12,9 @@
 //! - **Keyboard first:** typing anywhere goes to the field; ↓ (or Enter) from the field
 //!   jumps to the first result. Recent searches (per profile, `services::search_history`; Settings › Storage clears them) show as chips.
 //! - Parental locks apply: items of locked categories are never listed.
+//! - **Programmes (Phase 7):** Enter on one on air or coming up opens the Guide's actions
+//!   (Watch, Record, Remind me, Switch to it when it starts); rows show a bell for a
+//!   reminder and a red dot for a recording.
 
 mod engine;
 
@@ -437,6 +440,11 @@ impl SearchScreen {
                 };
                 let p = &h.programme;
                 let now = cx.now;
+                // Phase 7 C: on air → the actions menu (Watch / Record until it ends).
+                if p.start <= now && now < p.stop {
+                    self.details = Some(h);
+                    return;
+                }
                 if p.start <= now && now < p.stop {
                     let channels = Arc::clone(&src.channels);
                     match session.live_request(
@@ -1389,6 +1397,14 @@ fn programme_row(
         font::caption(),
         color::TEXT_3,
         r.right() - right_w - tx,
+    );
+    // Phase 7 C: reminder bell / recording dot.
+    crate::services::reminders::paint_row_marks(
+        &painter,
+        &cx.alerts.reminders,
+        ch.map(|c| c.key.as_str()),
+        p,
+        r,
     );
     let rx = r.right() - 16.0;
     if p.start <= now && now < p.stop {

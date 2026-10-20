@@ -104,6 +104,12 @@ pub(crate) fn on_frame(cx: &mut AppCtx<'_>) {
     }
 }
 
+/// Opens a dialog (drawn by the hook of the screen that opened it).
+fn open_dialog(cx: &mut AppCtx<'_>, d: DvrDialog) {
+    cx.dvr.ui.drawn_pass = cx.egui.cumulative_pass_nr();
+    cx.dvr.ui.dialog = Some(d);
+}
+
 fn close_dialog(cx: &mut AppCtx<'_>) {
     if let Some(d) = cx.dvr.ui.dialog.take() {
         focus::request(&cx.egui, d.back());
@@ -373,11 +379,14 @@ pub fn movie_download(cx: &mut AppCtx<'_>, ui: &mut Ui, t: &MovieTarget<'_>) {
                 .show(ui)
                 .activated
             {
-                cx.dvr.ui.dialog = Some(DvrDialog::Delete {
-                    id: r.id,
-                    title: r.title.clone(),
-                    back: del,
-                });
+                open_dialog(
+                    cx,
+                    DvrDialog::Delete {
+                        id: r.id,
+                        title: r.title.clone(),
+                        back: del,
+                    },
+                );
             }
         }
         Some(r) if r.state == RecordingState::Failed => {
@@ -694,7 +703,7 @@ pub fn episode_action(
                 .row(id)
                 .and_then(|r| r.item_id.parse::<u64>().ok())
                 .map_or(Id::NULL, |e| Id::unique(("detail.ep.download", e)));
-            cx.dvr.ui.dialog = Some(DvrDialog::Copy { id, title, back });
+            open_dialog(cx, DvrDialog::Copy { id, title, back });
         }
     }
 }
@@ -807,7 +816,7 @@ fn dialogs(cx: &mut AppCtx<'_>) {
                 close_dialog(cx);
                 play_saved(cx, id);
             } else if delete {
-                cx.dvr.ui.dialog = Some(DvrDialog::Delete { id, title, back });
+                open_dialog(cx, DvrDialog::Delete { id, title, back });
             } else if close {
                 close_dialog(cx);
             }
@@ -939,9 +948,12 @@ pub fn player_buttons(cx: &mut AppCtx<'_>, ui: &mut Ui, right: f32, y: f32) {
     }
     let mut c = ui.new_child(egui::UiBuilder::new().max_rect(clip_rect));
     if clip.show(&mut c).activated {
-        cx.dvr.ui.dialog = Some(DvrDialog::Clip {
-            back: Id::unique("player.dvr.clip"),
-        });
+        open_dialog(
+            cx,
+            DvrDialog::Clip {
+                back: Id::unique("player.dvr.clip"),
+            },
+        );
     }
 }
 

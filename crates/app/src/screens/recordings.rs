@@ -539,10 +539,13 @@ impl Screen for RecordingsScreen {
             .find(|r| cur == row_id((0, r.id.0)))
             .cloned();
         if let Some(r) = row {
-            if r.state == RecordingState::Done || r.state == RecordingState::Failed {
-                self.confirm = Some((r.id, r.title));
-            } else {
+            // Nothing saved yet: just cancel. Anything with a file asks first.
+            if matches!(r.state, RecordingState::Scheduled | RecordingState::Queued)
+                && r.bytes_done == 0
+            {
                 cx.dvr.cancel(r.id);
+            } else {
+                self.confirm = Some((r.id, r.title));
             }
         }
     }

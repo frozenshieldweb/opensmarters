@@ -24,7 +24,7 @@ use opensmarters_core::download::DownloadRequest;
 use opensmarters_core::hls::{self, HlsError, HlsLimits, Media, Playlist};
 use opensmarters_core::url::Url;
 use opensmarters_player::{Container, SNIFF_BYTES, sniff_container};
-use opensmarters_store::{Recording, RecordingId, RecordingState, Timestamp};
+use opensmarters_store::{Recording, RecordingId, RecordingState};
 use tokio::sync::watch;
 
 use super::engine::{Control, INTERRUPTED, Shared, live_window};
@@ -342,28 +342,33 @@ async fn record(
         Stop::Fatal(msg) => Some(format!("Stopped early: {msg}")),
         _ => None,
     };
-    // Rename the part to the final name.
+    // Rename the part to the final name (another one if that was taken meanwhile).
+    let taken = sh.taken_names().await;
     let (d, n) = (dir.clone(), name.clone());
     let renamed = tokio::task::spawn_blocking(move || {
         let part = files::part_path(&d, &n)?;
-        let fin = files::path_in(&d, &n)?;
-        if fin.exists() {
-            return None;
+        let mut final_name = n.clone();
+        if files::path_in(&d, &n)?.exists() {
+            let mut others = taken;
+            others.remove(&n);
+            final_name = files::unique_name(&d, &others, &n)?;
         }
-        std::fs::rename(part, fin).ok()
+        std::fs::rename(part, files::path_in(&d, &final_name)?).ok()?;
+        Some(final_name)
     })
     .await
     .ok()
     .flatten();
-    if renamed.is_none() {
+    let Some(final_name) = renamed else {
         return Outcome::Failed("The recording couldn't be saved under its final name.".to_owned());
-    }
+    };
     sh.store("finish a recording", move |s| {
+        if final_name != name {
+            s.recordings().set_file_name(id, &final_name)?;
+        }
         s.recordings().set_progress(id, bytes, Some(bytes))
     })
     .await;
-    // A recording stopped by the user before the programme ended is just done.
-    let _ = Timestamp::now();
     Outcome::Done(note)
 }
 

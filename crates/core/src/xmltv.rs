@@ -15,6 +15,9 @@
 //! - **Leniency:** end-tag names are not checked; a programme without a parseable
 //!   `start` or without `channel` is skipped (counted); a syntax error or truncated file
 //!   after some data keeps what was parsed and records a warning.
+//! - **Filtering:** [`parse_filtered`] offers each programme to a callback that can trim
+//!   it and decide whether to keep it (e.g. a time window of a multi-GB guide), so memory
+//!   follows what the caller keeps, not the document size.
 //! - **Times:** `YYYYMMDDhhmmss ±hhmm` (seconds optional, offset optional = UTC, also
 //!   `±hh:mm`, `Z`, `UTC`, `GMT`).
 //!
@@ -384,7 +387,35 @@ pub fn parse_bytes(input: &[u8], limits: &XmltvLimits) -> Result<Epg, XmltvError
 /// # Errors
 ///
 /// See [`XmltvError`].
-pub fn parse<R: Read>(mut reader: R, limits: &XmltvLimits) -> Result<Epg, XmltvError> {
+pub fn parse<R: Read>(reader: R, limits: &XmltvLimits) -> Result<Epg, XmltvError> {
+    parse_inner(reader, limits, None)
+}
+
+/// Like [`parse`], but every programme is first offered to `keep`: it may trim the
+/// programme in place (drop categories, shorten descriptions…) and returns whether to
+/// store it. Rejected programmes are dropped at once and do **not** count against
+/// [`XmltvLimits::max_programmes`], so a caller can keep a time window of a huge guide
+/// (or move the data into its own compact index) with memory bounded by what it keeps
+/// rather than by the document.
+///
+/// # Errors
+///
+/// See [`XmltvError`].
+pub fn parse_filtered<R: Read>(
+    reader: R,
+    limits: &XmltvLimits,
+    mut keep: impl FnMut(&mut XmltvProgramme) -> bool,
+) -> Result<Epg, XmltvError> {
+    parse_inner(reader, limits, Some(&mut keep))
+}
+
+type KeepFn<'k> = &'k mut dyn FnMut(&mut XmltvProgramme) -> bool;
+
+fn parse_inner<R: Read>(
+    mut reader: R,
+    limits: &XmltvLimits,
+    keep: Option<KeepFn<'_>>,
+) -> Result<Epg, XmltvError> {
     let mut head = [0u8; 2];
     let mut got = 0;
     while got < 2 {
@@ -411,7 +442,7 @@ pub fn parse<R: Read>(mut reader: R, limits: &XmltvLimits) -> Result<Epg, XmltvE
         max_run: limits.max_token_bytes,
         run: 0,
     };
-    parse_reader(BufReader::with_capacity(64 * 1024, limited), limits)
+    parse_reader(BufReader::with_capacity(64 * 1024, limited), limits, keep)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -471,7 +502,7 @@ fn local_name(name: QName<'_>) -> String {
     name.local_name().as_ref().to_ascii_lowercase()
 }
 
-struct State<'l> {
+struct State<'l, 'k> {
     limits: &'l XmltvLimits,
     epg: Epg,
     ctx: Ctx,
@@ -480,9 +511,12 @@ struct State<'l> {
     saw_tv: bool,
     channel_count: usize,
     programme_count: usize,
+    /// Programmes seen (kept or filtered out), for "has data" decisions.
+    seen_programmes: usize,
+    keep: Option<KeepFn<'k>>,
 }
 
-impl State<'_> {
+impl State<'_, '_> {
     fn push_text(&mut self, s: &str) {
         let max = self.limits.max_text_len;
         if let Some(c) = self.capture.as_mut().filter(|c| c.text.len() < max) {
@@ -629,14 +663,9 @@ impl State<'_> {
                 self.epg.skipped_programmes += 1;
                 return Ok(());
             };
-            self.programme_count += 1;
-            if self.programme_count > self.limits.max_programmes {
-                return Err(XmltvError::TooManyProgrammes {
-                    limit: self.limits.max_programmes,
-                });
-            }
+            self.seen_programmes += 1;
             let stop = p.stop.filter(|s| *s >= start);
-            let prog = XmltvProgramme {
+            let mut prog = XmltvProgramme {
                 channel: p.channel.clone(),
                 start,
                 stop,
@@ -648,17 +677,32 @@ impl State<'_> {
                 episode_nums: p.episode_nums,
                 catchup_id: p.catchup_id,
             };
+            if let Some(keep) = self.keep.as_mut()
+                && !keep(&mut prog)
+            {
+                return Ok(());
+            }
+            self.programme_count += 1;
+            if self.programme_count > self.limits.max_programmes {
+                return Err(XmltvError::TooManyProgrammes {
+                    limit: self.limits.max_programmes,
+                });
+            }
             self.epg.programmes.entry(p.channel).or_default().push(prog);
         }
         Ok(())
     }
 
     fn has_data(&self) -> bool {
-        !self.epg.channels.is_empty() || self.programme_count > 0
+        !self.epg.channels.is_empty() || self.seen_programmes > 0
     }
 }
 
-fn parse_reader<R: BufRead>(input: R, limits: &XmltvLimits) -> Result<Epg, XmltvError> {
+fn parse_reader<R: BufRead>(
+    input: R,
+    limits: &XmltvLimits,
+    keep: Option<KeepFn<'_>>,
+) -> Result<Epg, XmltvError> {
     let mut reader = quick_xml::Reader::from_reader(input);
     {
         let config = reader.config_mut();
@@ -676,6 +720,8 @@ fn parse_reader<R: BufRead>(input: R, limits: &XmltvLimits) -> Result<Epg, Xmltv
         saw_tv: false,
         channel_count: 0,
         programme_count: 0,
+        seen_programmes: 0,
+        keep,
     };
     let mut buf = Vec::new();
     loop {
@@ -1001,6 +1047,49 @@ mod tests {
         };
         let epg = parse_bytes(doc.as_bytes(), &limits).unwrap();
         assert_eq!(epg.programmes_for("c0")[0].title(None), "x".repeat(10));
+    }
+
+    #[test]
+    fn filtered_parse_keeps_a_window_and_trims() {
+        use chrono::Timelike;
+        let mut doc = String::from("<tv>");
+        for h in 0..10 {
+            doc.push_str(&format!(
+                "<programme channel=\"c\" start=\"202401010{h}0000\" stop=\"202401010{h}3000\">\
+                 <title>T{h}</title><desc>{}</desc><category>News</category></programme>",
+                "d".repeat(50)
+            ));
+        }
+        doc.push_str("</tv>");
+        // Rejected programmes do not count against the limit.
+        let limits = XmltvLimits {
+            max_programmes: 3,
+            ..XmltvLimits::default()
+        };
+        let mut offered = 0;
+        let epg = parse_filtered(doc.as_bytes(), &limits, |p| {
+            offered += 1;
+            p.categories.clear();
+            if let Some(d) = p.descriptions.first_mut() {
+                d.text.truncate(5);
+            }
+            (3..6).contains(&p.start.hour())
+        })
+        .unwrap();
+        assert_eq!(offered, 10);
+        let kept = epg.programmes_for("c");
+        assert_eq!(kept.len(), 3);
+        assert_eq!(kept[0].title(None), "T3");
+        assert_eq!(kept[0].description(None), Some("ddddd"));
+        assert!(kept[0].categories.is_empty());
+        // Keeping too many still hits the limit.
+        assert_eq!(
+            parse_filtered(doc.as_bytes(), &limits, |_| true),
+            Err(XmltvError::TooManyProgrammes { limit: 3 })
+        );
+        // Everything filtered out is still a valid (empty) guide.
+        let epg = parse_filtered(doc.as_bytes(), &limits, |_| false).unwrap();
+        assert_eq!(epg.programme_count(), 0);
     }
 
     #[test]

@@ -70,11 +70,17 @@ pub struct UiState {
     dialog: Option<DvrDialog>,
     drawn_pass: u64,
     play: Option<oneshot::Receiver<AppResult<PlaybackRequest>>>,
+    /// Where the focus goes back after a dialog (requested the next frame, once the
+    /// dialog's focus trap is gone).
+    refocus: Option<Id>,
 }
 
 /// Per frame: plays a saved file once its request is ready, closes a dialog on
 /// Esc/Backspace (before the screen sees the key) or when its screen went away.
 pub(crate) fn on_frame(cx: &mut AppCtx<'_>) {
+    if let Some(id) = cx.dvr.ui.refocus.take() {
+        focus::request(&cx.egui, id);
+    }
     if let Some(rx) = &mut cx.dvr.ui.play {
         match rx.try_recv() {
             Ok(Ok(req)) => {
@@ -112,7 +118,7 @@ fn open_dialog(cx: &mut AppCtx<'_>, d: DvrDialog) {
 
 fn close_dialog(cx: &mut AppCtx<'_>) {
     if let Some(d) = cx.dvr.ui.dialog.take() {
-        focus::request(&cx.egui, d.back());
+        cx.dvr.ui.refocus = Some(d.back());
     }
 }
 
@@ -782,7 +788,7 @@ fn dialogs(cx: &mut AppCtx<'_>) {
             if yes {
                 cx.dvr.delete(id);
                 cx.dvr.ui.dialog = None;
-                focus::request(&cx.egui, Id::unique("detail.download"));
+                cx.dvr.ui.refocus = Some(Id::unique("detail.download"));
                 cx.toasts.info("Download deleted.");
             } else if no {
                 close_dialog(cx);

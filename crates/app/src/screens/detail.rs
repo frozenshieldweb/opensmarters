@@ -25,6 +25,7 @@ use opensmarters_core::{CategoryId, SeriesInfo, VodInfo, VodStream};
 use opensmarters_store::{ContentKind, ItemSnapshot, PlaybackProgress};
 
 use super::{AppCtx, Screen, shell};
+use crate::focus;
 use crate::nav::{Route, Section};
 use crate::playback::next::EpisodeQueue;
 use crate::services::session::SeriesWatch;
@@ -35,7 +36,9 @@ use crate::ui::assets::{self, Asset, Illustration};
 use crate::ui::theme::{color, font, radius};
 use crate::ui::widgets::chip::tag;
 use crate::ui::widgets::feedback::skeleton;
-use crate::ui::widgets::{Button, EmptyState, IconButton, PosterCard, Rail};
+use crate::ui::widgets::{
+    Button, EmptyState, IconButton, PinPrompt, PinPromptResult, PosterCard, Rail,
+};
 use crate::ui::{icons, paint, text};
 use episodes::{EpisodeAction, Episodes};
 
@@ -213,6 +216,23 @@ pub struct DetailScreen {
     plot_expanded: bool,
     trailer: trailer::TrailerPrompt,
     scroll_y: f32,
+    /// The item's category (id, name) for the parental check; `None` = no category.
+    category: Loader<Option<(CategoryId, String)>>,
+    /// The PIN prompt of a locked item.
+    pin: Option<PinPrompt>,
+    /// The prompt was opened once automatically.
+    pin_offered: bool,
+}
+
+/// Whether the page may show the item (parental control).
+#[derive(Debug, Clone, PartialEq)]
+enum Gate {
+    /// No PIN, not locked, or unlocked this session.
+    Open,
+    /// Still finding out (nothing about the item is shown meanwhile).
+    Checking,
+    /// The item's category is locked: PIN first.
+    Locked(CategoryId),
 }
 
 impl DetailScreen {
@@ -232,6 +252,101 @@ impl DetailScreen {
             plot_expanded: false,
             trailer: trailer::TrailerPrompt::default(),
             scroll_y: 0.0,
+            category: Loader::new(),
+            pin: None,
+            pin_offered: false,
+        }
+    }
+
+    fn content_kind(&self) -> ContentKind {
+        match self.kind {
+            DetailKind::Movie(_) => ContentKind::Movie,
+            DetailKind::Series(_) => ContentKind::Series,
+        }
+    }
+
+    /// Parental gate: an item in a locked category (opened from anywhere: search,
+    /// favourites, `--route detail:`) needs the PIN before anything about it is shown.
+    // TODO(batch B): use `Session::is_item_locked(kind, &[CategoryId])` once it lands, so
+    // every category id of the item counts (newer panels list several).
+    fn gate(&mut self, cx: &AppCtx<'_>) -> Gate {
+        let Some(session) = cx.session() else {
+            return Gate::Checking;
+        };
+        if !session.parental_enabled() {
+            return Gate::Open;
+        }
+        let Some(header) = &self.header else {
+            return Gate::Checking;
+        };
+        if self.category.is_idle() {
+            let cat = header.category.clone();
+            let kind = self.kind;
+            let s = Arc::clone(&session);
+            self.category.start(cx.rt(), &cx.egui, move |_| async move {
+                let Some(cat) = cat else { return Ok(None) };
+                let cats = match kind {
+                    DetailKind::Movie(_) => s.vod_categories().await,
+                    DetailKind::Series(_) => s.series_categories().await,
+                };
+                // Without the list, the id still matches manual locks.
+                let name = cats
+                    .ok()
+                    .and_then(|l| l.iter().find(|c| c.id == cat).map(|c| c.name.clone()))
+                    .unwrap_or_default();
+                Ok(Some((cat, name)))
+            });
+        }
+        match (self.category.value(), self.category.error()) {
+            (Some(None), _) => Gate::Open,
+            (Some(Some((id, name))), _) => {
+                if session.is_category_locked(self.content_kind(), id, name) {
+                    Gate::Locked(id.clone())
+                } else {
+                    Gate::Open
+                }
+            }
+            // Fail closed: an error keeps the item hidden behind the PIN.
+            (None, Some(_)) => header.category.clone().map_or(Gate::Open, Gate::Locked),
+            (None, None) => Gate::Checking,
+        }
+    }
+
+    /// The locked state: lock illustration, "Enter PIN" and the PIN dialog.
+    fn locked(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui, category: &CategoryId) {
+        let content = cx.layout.content;
+        let m = cx.layout.margin;
+        let mut child = ui.new_child(UiBuilder::new().max_rect(content.shrink2(vec2(m, 64.0))));
+        let what = match self.kind {
+            DetailKind::Movie(_) => "This movie is in a locked category",
+            DetailKind::Series(_) => "This series is in a locked category",
+        };
+        if EmptyState::new(
+            Id::unique("detail.locked"),
+            Illustration::ParentalLock,
+            what,
+            "Enter your PIN to see it. It stays unlocked until you close the app.",
+        )
+        .action("Enter PIN", true)
+        .show(&mut child)
+        .is_some_and(|f| f.activated)
+        {
+            self.pin = Some(PinPrompt::new(Id::unique("detail.pin")));
+        }
+        let Some(prompt) = &mut self.pin else { return };
+        let ctx = cx.egui.clone();
+        match prompt.show_dialog(&ctx, cx.services, "Enter your PIN", None) {
+            PinPromptResult::Verified(_) => {
+                self.pin = None;
+                if let Some(s) = cx.session() {
+                    s.unlock_category(self.content_kind(), category);
+                }
+            }
+            PinPromptResult::Cancelled | PinPromptResult::Forgot => {
+                self.pin = None;
+                focus::request(&ctx, Id::unique("detail.locked").with("action"));
+            }
+            PinPromptResult::Pending => {}
         }
     }
 
@@ -453,7 +568,7 @@ impl Screen for DetailScreen {
     }
 
     fn on_back(&mut self, _cx: &mut AppCtx<'_>) -> bool {
-        self.trailer.close()
+        self.pin.take().is_some() || self.trailer.close()
     }
 
     fn section(&self) -> Option<Section> {
@@ -473,10 +588,25 @@ impl Screen for DetailScreen {
             self.load_progress(cx);
         }
         self.refresh_header(cx);
+        self.category.poll();
+        let gate = self.gate(cx);
+        let open = gate == Gate::Open;
 
         let content = cx.layout.content;
         let m = cx.layout.margin;
-        self.paint_backdrop(cx, ui, content);
+        self.paint_backdrop(cx, ui, content, open);
+
+        if let Gate::Locked(category) = &gate {
+            if !self.pin_offered {
+                // Ask straight away; Cancel leaves the "Enter PIN" state.
+                self.pin_offered = true;
+                self.pin = Some(PinPrompt::new(Id::unique("detail.pin")));
+            }
+            let category = category.clone();
+            self.locked(cx, ui, &category);
+            shell::status_cluster(cx, ui);
+            return;
+        }
 
         if let Some(err) = self.info_error() {
             let mut child = ui.new_child(UiBuilder::new().max_rect(content.shrink2(vec2(m, 64.0))));
@@ -526,7 +656,7 @@ impl Screen for DetailScreen {
             .id_salt(("detail.scroll", self.kind_id()))
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| self.page(cx, ui));
+            .show(ui, |ui| self.page(cx, ui, open));
         self.scroll_y = out.state.clamped_offset().y;
         // Keep the clock legible once the page scrolls under it.
         if self.scroll_y > 1.0 {
@@ -555,12 +685,13 @@ impl DetailScreen {
         }
     }
 
-    /// Backdrop (fixed) with tint and scrims; darkens as the page scrolls.
-    fn paint_backdrop(&self, cx: &AppCtx<'_>, ui: &Ui, content: Rect) {
+    /// Backdrop (fixed) with tint and scrims; darkens as the page scrolls. `show_art`
+    /// false (parental check pending or locked) paints the ambient art only.
+    fn paint_backdrop(&self, cx: &AppCtx<'_>, ui: &Ui, content: Rect, show_art: bool) {
         let painter = ui.painter().clone();
         painter.rect_filled(content, 0.0, color::BG);
         let images = &cx.services.images;
-        let h = self.header.as_ref();
+        let h = self.header.as_ref().filter(|_| show_art);
         let backdrop = h.and_then(|h| h.backdrop.as_deref());
         let mut drawn = false;
         for (url, tint) in [
@@ -615,7 +746,8 @@ impl DetailScreen {
     }
 
     /// The scrolling page: back, header, actions, then episodes or "More like this".
-    fn page(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {
+    /// `open` false (parental check pending) shows the loading skeleton only.
+    fn page(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui, open: bool) {
         ui.spacing_mut().item_spacing.y = 0.0;
         let content = cx.layout.content;
         let m = cx.layout.margin;
@@ -624,10 +756,10 @@ impl DetailScreen {
         let text_w = (full - 2.0 * m).min(640.0);
         let painter = ui.painter().clone();
 
-        // Back.
+        // Back: says where it leads ("‹ Movies", "‹ Home"), like the concept.
         ui.add_space(34.0);
         let (row, _) = ui.allocate_exact_size(vec2(full, 44.0), Sense::hover());
-        let back = Button::ghost("Back")
+        let back = Button::ghost(crate::nav::back_label(&cx.egui).unwrap_or("Back"))
             .icon(icons::CARET_LEFT)
             .small()
             .id(Id::unique("detail.back"));
@@ -639,14 +771,17 @@ impl DetailScreen {
         if back.show(&mut child).activated {
             cx.nav.back();
         }
-        let header = self.header.clone();
+        let header = self.header.clone().filter(|_| open);
         let tv = cx.layout.tv;
         let top = (content.height() * if tv { 0.18 } else { 0.26 } - 78.0).max(16.0);
         ui.add_space(top);
 
         let Some(h) = header else {
             // Loading: skeleton lines where the header will be.
-            if self.movie.show_skeleton() || self.series.show_skeleton() {
+            if self.movie.show_skeleton()
+                || self.series.show_skeleton()
+                || self.category.show_skeleton()
+            {
                 let (r, _) = ui.allocate_exact_size(vec2(full, 260.0), Sense::hover());
                 let ctx = cx.egui.clone();
                 skeleton(

@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Align2, Color32, Id, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use opensmarters_core::catalog::{CatalogItem, SearchIndex, SearchQuery, sorted_indices};
 use opensmarters_core::{Category, CategoryId};
-use opensmarters_store::{ContentKind, PinOutcome, PlaybackProgress};
+use opensmarters_store::{ContentKind, PlaybackProgress};
 
 use crate::error::{AppError, AppResult};
 use crate::focus;
@@ -33,13 +33,13 @@ use crate::screens::{AppCtx, shell};
 use crate::services::vod::{self, VodSort};
 use crate::services::{ImageSize, Session};
 use crate::task::Loader;
-use crate::ui::assets::{self, Asset, Illustration};
+use crate::ui::assets::Illustration;
 use crate::ui::icons::{self, Style};
 use crate::ui::layout::Breakpoint;
 use crate::ui::theme::{color, font, radius};
 use crate::ui::widgets::feedback::skeleton;
 use crate::ui::widgets::{
-    Button, Chip, Dialog, Dropdown, EmptyState, MenuRow, PinPad, PinPadEvent, PosterCard,
+    Button, Chip, Dropdown, EmptyState, MenuRow, PinPrompt, PinPromptResult, PosterCard,
     SearchField, VirtualGrid,
 };
 use crate::ui::{paint, text};
@@ -176,12 +176,13 @@ fn compute_view<T: CatalogItem<Key = u64>>(
     order.iter().copied().filter(|&i| keep[i]).collect()
 }
 
+/// A locked category waiting for the PIN ([`PinPrompt`] does the pad, the lockout and
+/// the off-thread check).
 #[derive(Debug)]
-struct PinPrompt {
+struct PinGate {
     selection: Selection,
     name: String,
-    pad: PinPad,
-    verify: Loader<PinOutcome>,
+    prompt: PinPrompt,
 }
 
 /// The browse screen state. See the [module docs](self).
@@ -200,7 +201,7 @@ pub(crate) struct Browse<K: BrowseKind> {
     applied_query: String,
     sort: VodSort,
     cat_filter: String,
-    pin: Option<PinPrompt>,
+    pin: Option<PinGate>,
     progress: Loader<Arc<HashMap<u64, PlaybackProgress>>>,
     progress_epoch: u64,
     scroll_to: Option<usize>,
@@ -303,11 +304,10 @@ impl<K: BrowseKind> Browse<K> {
         if let Selection::Category(id) = &sel
             && session.is_category_locked(K::CONTENT, id, name)
         {
-            self.pin = Some(PinPrompt {
+            self.pin = Some(PinGate {
                 selection: sel,
                 name: name.to_owned(),
-                pad: PinPad::new(self.id("pin"), session.pin_length()),
-                verify: Loader::new(),
+                prompt: PinPrompt::new(self.id("pin")),
             });
             return;
         }
@@ -372,42 +372,6 @@ impl<K: BrowseKind> Browse<K> {
             .map(|c| Selection::Category(c.id.clone()));
         let sel = remembered.or(first_unlocked).unwrap_or(Selection::All);
         self.apply_selection(cx, sel);
-    }
-
-    fn poll_pin(&mut self, cx: &mut AppCtx<'_>) {
-        let Some(p) = &mut self.pin else { return };
-        if !p.verify.poll() {
-            if let Some(e) = p.verify.error().cloned() {
-                p.pad.set_wrong(e.user_message());
-                p.verify = Loader::new();
-            }
-            return;
-        }
-        match p.verify.take() {
-            Some(PinOutcome::Ok) => {
-                if let (Some(session), Selection::Category(id)) = (cx.session(), &p.selection) {
-                    session.unlock_category(K::CONTENT, id);
-                }
-                let sel = p.selection.clone();
-                self.pin = None;
-                self.apply_selection(cx, sel);
-            }
-            Some(PinOutcome::Wrong {
-                remaining_before_lockout,
-            }) => {
-                let msg = if remaining_before_lockout == 1 {
-                    "Wrong PIN. 1 attempt left".to_owned()
-                } else {
-                    format!("Wrong PIN. {remaining_before_lockout} attempts left")
-                };
-                p.pad.set_wrong(msg);
-            }
-            Some(PinOutcome::LockedOut { until }) => {
-                let now = opensmarters_store::Timestamp::now();
-                p.pad.set_locked_until(until.duration_since(now));
-            }
-            None => {}
-        }
     }
 
     fn locked_categories(&self, session: &Session) -> Vec<CategoryId> {
@@ -515,7 +479,6 @@ impl<K: BrowseKind> Browse<K> {
         self.list.poll();
         self.view.poll();
         self.progress.poll();
-        self.poll_pin(cx);
         if K::PROGRESS && cx.playback.progress_epoch() != self.progress_epoch {
             self.load_progress(cx);
         }
@@ -1091,43 +1054,22 @@ impl<K: BrowseKind> Browse<K> {
     fn pin_dialog(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {
         let Some(p) = &mut self.pin else { return };
         let title = format!("\u{201c}{}\u{201d} is locked", text::cap(&p.name, 40));
-        let mut submitted = None;
-        let mut cancel = false;
-        let cancel_id = Id::unique((K::KEY, "pin-cancel"));
-        Dialog::new(Id::unique((K::KEY, "pin-dialog")), "")
-            .width(440.0)
-            .show_custom(ui.ctx(), |ui| {
-                ui.vertical_centered(|ui| {
-                    let painter = ui.painter().clone();
-                    let (ir, _) = ui.allocate_exact_size(vec2(96.0, 96.0), Sense::hover());
-                    assets::paint_contain(
-                        ui,
-                        &painter,
-                        Asset::Illustration(Illustration::ParentalLock),
-                        ir,
-                        Color32::WHITE,
-                    );
-                    ui.add_space(8.0);
-                    if let PinPadEvent::Submitted(pin) = p.pad.show(ui, &title) {
-                        submitted = Some(pin);
-                    }
-                    ui.add_space(12.0);
-                    if Button::ghost("Cancel").id(cancel_id).show(ui).activated {
-                        cancel = true;
-                    }
-                });
-            });
-        if let Some(pin) = submitted {
-            let store = cx.services.store.clone();
-            p.verify.start_blocking(cx.rt(), &cx.egui, move || {
-                store.parental().verify_pin(&pin).map_err(AppError::from)
-            });
-        }
-        if cancel {
-            self.pin = None;
-            if self.selection.is_none() {
-                self.decide_initial(cx);
+        match p.prompt.show_dialog(ui.ctx(), cx.services, &title, None) {
+            PinPromptResult::Verified(_) => {
+                if let (Some(session), Selection::Category(id)) = (cx.session(), &p.selection) {
+                    session.unlock_category(K::CONTENT, id);
+                }
+                let sel = p.selection.clone();
+                self.pin = None;
+                self.apply_selection(cx, sel);
             }
+            PinPromptResult::Cancelled | PinPromptResult::Forgot => {
+                self.pin = None;
+                if self.selection.is_none() {
+                    self.decide_initial(cx);
+                }
+            }
+            PinPromptResult::Pending => {}
         }
     }
 }

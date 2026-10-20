@@ -3,14 +3,21 @@
 //! Files are served with `tower-http`'s `ServeFile`, so `Range` requests (206) work.
 //! Credentials in the path are validated (403 otherwise); unknown ids are 404; missing
 //! media is 503 with an explanation.
+//!
+//! Recording/download quirks: `slow-media` paces film/episode bodies (Range still
+//! works), `live-endless` loops a live clip forever at its real bitrate, `media-html` /
+//! `media-playlist` answer `200 OK` with something that isn't video.
 
+use std::convert::Infallible;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::NaiveDateTime;
+use futures_util::StreamExt as _;
 use tower::ServiceExt as _;
 use tower_http::services::ServeFile;
 
@@ -24,6 +31,12 @@ use crate::users::{self, TestUser, USERS};
 
 const TS: &str = "video/mp2t";
 const HLS: &str = "application/vnd.apple.mpegurl";
+/// `slow-media` pace.
+const SLOW_BYTES_PER_SEC: f64 = 256.0 * 1024.0;
+/// Length of the generated live clips (see `media.rs`), for `live-endless` pacing.
+const LIVE_CLIP_SECS: f64 = 20.0;
+/// `live-endless` chunk size.
+const LIVE_CHUNK: usize = 32 * 1024;
 
 fn forbidden() -> Response {
     (StatusCode::FORBIDDEN, "fake-panel: invalid credentials").into_response()
@@ -75,6 +88,68 @@ async fn serve_file(path: PathBuf, content_type: &'static str, req: Request) -> 
     res
 }
 
+/// `slow-media`: re-sends `res`'s body at [`SLOW_BYTES_PER_SEC`] (headers untouched, so
+/// `206`/`Content-Range` stay valid).
+fn throttled(res: Response) -> Response {
+    let (parts, body) = res.into_parts();
+    let paced = body.into_data_stream().then(|chunk| async move {
+        if let Ok(c) = &chunk {
+            tokio::time::sleep(Duration::from_secs_f64(c.len() as f64 / SLOW_BYTES_PER_SEC)).await;
+        }
+        chunk
+    });
+    Response::from_parts(parts, Body::from_stream(paced))
+}
+
+/// `live-endless`: the clip at `path` looped forever at about its real bitrate.
+async fn endless_live(path: PathBuf) -> Response {
+    let data = match tokio::fs::read(&path).await {
+        Ok(d) if !d.is_empty() => Bytes::from(d),
+        _ => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "fake-panel: live clip unreadable",
+            )
+                .into_response();
+        }
+    };
+    let rate = (data.len() as f64 / LIVE_CLIP_SECS).max(1.0);
+    let stream = futures_util::stream::unfold((data, 0usize), move |(data, pos)| async move {
+        let end = (pos + LIVE_CHUNK).min(data.len());
+        let chunk = data.slice(pos..end);
+        tokio::time::sleep(Duration::from_secs_f64(chunk.len() as f64 / rate)).await;
+        let next = if end >= data.len() { 0 } else { end };
+        Some((Ok::<_, Infallible>(chunk), (data, next)))
+    });
+    ([(header::CONTENT_TYPE, TS)], Body::from_stream(stream)).into_response()
+}
+
+/// `media-html` / `media-playlist`: a `200 OK` that isn't video, or `None`.
+fn bogus_media(st: &PanelState, live: bool) -> Option<Response> {
+    if st.quirks.media_html {
+        return Some(
+            (
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                "<!DOCTYPE html><html><body><h1>Service temporarily unavailable</h1></body></html>",
+            )
+                .into_response(),
+        );
+    }
+    if st.quirks.media_playlist && !live {
+        return Some(
+            (
+                [(header::CONTENT_TYPE, TS)],
+                "#EXTM3U
+#EXTINF:-1,Not a film
+file:///C:/Windows/win.ini
+",
+            )
+                .into_response(),
+        );
+    }
+    None
+}
+
 /// Opaque per-user token used in HLS segment URLs (like real panels' `/hls/<token>/…`).
 pub(crate) fn hls_token(st: &PanelState, user: &TestUser) -> String {
     let h = mix(
@@ -121,9 +196,19 @@ async fn serve_live(st: &PanelState, u: &str, p: &str, file: &str, req: Request)
         return r;
     }
     if ext == "m3u8" {
-        playlist_response(st, user, ch.clip)
+        return playlist_response(st, user, ch.clip);
+    }
+    if let Some(r) = bogus_media(st, true) {
+        return r;
+    }
+    if st.quirks.live_endless {
+        return endless_live(st.media.live_ts(ch.clip)).await;
+    }
+    let res = serve_file(st.media.live_ts(ch.clip), TS, req).await;
+    if st.quirks.slow_media {
+        throttled(res)
     } else {
-        serve_file(st.media.live_ts(ch.clip), TS, req).await
+        res
     }
 }
 
@@ -170,8 +255,16 @@ pub(crate) async fn movie(
     if let Some(r) = media_gate(&st) {
         return r;
     }
+    if let Some(r) = bogus_media(&st, false) {
+        return r;
+    }
     let ext = m.container_extension;
-    serve_file(st.media.movie_file(ext), movie_content_type(ext), req).await
+    let res = serve_file(st.media.movie_file(ext), movie_content_type(ext), req).await;
+    if st.quirks.slow_media {
+        throttled(res)
+    } else {
+        res
+    }
 }
 
 /// `GET /series/{u}/{p}/{episode_id}.{ext}`.
@@ -190,8 +283,16 @@ pub(crate) async fn series(
     if let Some(r) = media_gate(&st) {
         return r;
     }
+    if let Some(r) = bogus_media(&st, false) {
+        return r;
+    }
     let ext = ep.container_extension;
-    serve_file(st.media.movie_file(ext), movie_content_type(ext), req).await
+    let res = serve_file(st.media.movie_file(ext), movie_content_type(ext), req).await;
+    if st.quirks.slow_media {
+        throttled(res)
+    } else {
+        res
+    }
 }
 
 /// Parse a catch-up start in one of the two accepted formats.

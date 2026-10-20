@@ -812,7 +812,12 @@ impl Screen for SearchScreen {
         }
 
         if hits.total() == 0 {
-            self.first_result = None;
+            // ↓/Enter from the field lands on "Clear search" (the first thing below).
+            let clear = Id::unique("search.none").with("action");
+            self.first_result = Some(clear);
+            if std::mem::take(&mut self.focus_first) {
+                focus::request(&cx.egui, clear);
+            }
             self.no_matches(cx, ui, &session, &res.sources, area);
             self.overlays(cx, ui, &session);
             return;

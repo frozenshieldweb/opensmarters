@@ -135,6 +135,14 @@ fn archive_days_and_both_timeshift_formats() {
             .contains(&local.format("/%Y-%m-%d:%H:%M:%S/").to_string())
     );
     assert_eq!(smarters.resume_from, Some(12.0));
+    // Resume points are looked up with the id the player saves them under.
+    assert_eq!(
+        std_req.item.progress_id(),
+        Some(opensmarters_app::services::session::catchup::progress_id(
+            ch.stream_id().unwrap(),
+            p
+        ))
+    );
     assert!(std_url.contains(&format!("/{}/", p.duration_minutes())));
 
     // The session choice overrides the profile until it is saved.

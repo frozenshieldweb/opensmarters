@@ -1044,7 +1044,10 @@ impl CatchupScreen {
             }
         }
         let playing = Self::playing(cx);
-        let failed = matches!(cx.playback.status(), PlaybackStatus::Failed(_));
+        let failed = matches!(
+            cx.playback.status(),
+            PlaybackStatus::Failed(_) | PlaybackStatus::Finished
+        );
         let thresholds = session.store().playback().thresholds();
         let progress = self.progress.value().cloned().unwrap_or_default();
         let mut activated: Option<usize> = None;
@@ -1343,6 +1346,24 @@ impl CatchupScreen {
                         4,
                     );
                 }
+                PlaybackStatus::Finished => {
+                    painter.rect_filled(video, CornerRadius::same(radius::MD), color::BG_DEEP);
+                    icons::paint(
+                        &painter,
+                        video.center() - vec2(0.0, 18.0),
+                        icons::CHECK_CIRCLE,
+                        32.0,
+                        Style::Regular,
+                        color::SAGE,
+                    );
+                    painter.text(
+                        video.center() + vec2(0.0, 20.0),
+                        Align2::CENTER_CENTER,
+                        "Finished · Enter to watch it again",
+                        font::body(),
+                        color::TEXT_2,
+                    );
+                }
                 _ => {}
             }
         } else {
@@ -1399,6 +1420,7 @@ impl CatchupScreen {
             paint::focus_ring(&painter, video, radius::MD, 1.0);
         }
         let failed = matches!(status, PlaybackStatus::Failed(_));
+        let finished = matches!(status, PlaybackStatus::Finished);
         if (vf.activated || vresp.double_clicked()) && is_playing && !failed {
             self.open_fullscreen(cx);
         }
@@ -1565,7 +1587,7 @@ impl CatchupScreen {
                 let mut full = false;
                 child.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
-                    if is_playing && !failed {
+                    if is_playing && !failed && !finished {
                         full = Button::primary("Fullscreen")
                             .icon(icons::CORNERS_OUT)
                             .id(Id::unique("catchup.fullscreen"))
@@ -1575,6 +1597,7 @@ impl CatchupScreen {
                         let label = match resume {
                             Some(s) => format!("Resume {}", text::timecode(s)),
                             None if failed && is_playing => "Try again".to_owned(),
+                            None if finished && is_playing => "Watch again".to_owned(),
                             None => "Play".to_owned(),
                         };
                         play = Button::primary(label)

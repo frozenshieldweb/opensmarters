@@ -15,8 +15,9 @@ use super::{AppCtx, Screen};
 use crate::error::AppError;
 use crate::nav::{Route, Section};
 use crate::playback::ZapContext;
-use crate::services::catalog::{LiveCatalog, LiveChannel, split_tag};
+use crate::services::catalog::{LiveCatalog, LiveChannel};
 use crate::services::session::{series_key, vod_streams_key};
+use crate::services::vod;
 use crate::services::{ImageSize, ImageSlot};
 use crate::task::Loader;
 use crate::ui::assets::{self, Asset, Illustration};
@@ -208,10 +209,10 @@ impl HomeScreen {
                             };
                             let (title, synopsis, backdrop) = match &info {
                                 Some(i) => (
-                                    i.info
-                                        .name
-                                        .clone()
-                                        .unwrap_or_else(|| p.snapshot.title.clone()),
+                                    i.info.name.as_deref().map_or_else(
+                                        || p.snapshot.title.clone(),
+                                        |n| vod::display_title(n).title.to_owned(),
+                                    ),
                                     i.info.plot.clone().unwrap_or_default(),
                                     i.info
                                         .backdrop_path
@@ -323,19 +324,18 @@ fn movie_hero(
     let mut synopsis = String::new();
     let mut backdrop = None;
     let mut title = fallback_title.to_owned();
+    let mut release_date = None;
     if let Some(i) = info {
         let d = &i.info;
         if let Some(n) = &d.name {
             title = n.clone();
         }
-        if let Some(y) = d.release_date.as_deref().and_then(|r| r.get(..4)) {
-            meta.push(y.to_owned());
-        }
+        release_date = d.release_date.clone();
         if let Some(secs) = d.duration_secs {
             meta.push(text::duration_short(secs as f64));
         }
-        if let Some(r) = d.rating.filter(|r| *r > 0.0) {
-            meta.push(format!("{} {r:.1}", icons::STAR));
+        if let Some(r) = vod::rating_label(d.rating) {
+            meta.push(r);
         }
         if let Some(g) = &d.genre {
             meta.push(text::cap(g, 40).into_owned());
@@ -347,11 +347,17 @@ fn movie_hero(
             .cloned()
             .or_else(|| d.movie_image.clone());
     }
-    let (tag, clean) = split_tag(&title);
-    if let Some(tag) = tag {
+    // Year from the release date, else a trailing "(YYYY)" in the name.
+    if let Some(y) = vod::release_year(release_date.as_deref(), &title)
+        .or_else(|| vod::display_title(fallback_title).year)
+    {
+        meta.insert(0, y.to_string());
+    }
+    let shown = vod::display_title(&title);
+    if let Some(tag) = shown.tag {
         meta.insert(0, tag.to_owned());
     }
-    let title = clean.to_owned();
+    let title = shown.title.to_owned();
     Hero {
         kicker: String::new(),
         title,
@@ -557,7 +563,7 @@ impl Screen for HomeScreen {
                                 let f = PosterCard::new(
                                     Id::unique(("home.movie", mv.stream_id)),
                                     &img,
-                                    split_tag(&mv.name).1,
+                                    vod::display_title(&mv.name).title,
                                     poster_w,
                                 )
                                 .meta(Some(&meta))
@@ -592,7 +598,7 @@ impl Screen for HomeScreen {
                                 let f = PosterCard::new(
                                     Id::unique(("home.series", s.series_id)),
                                     &img,
-                                    split_tag(&s.name).1,
+                                    vod::display_title(&s.name).title,
                                     poster_w,
                                 )
                                 .meta(Some(&meta))
@@ -830,30 +836,11 @@ impl HomeScreen {
     }
 }
 
+// Year from the release date or a trailing "(YYYY)" in the name — never `added`.
 fn movie_meta(m: &VodStream) -> String {
-    let mut parts = Vec::new();
-    if let (Some(tag), _) = split_tag(&m.name) {
-        parts.push(tag.to_owned());
-    }
-    if let Some(y) = m.added.map(|a| a.format("%Y").to_string()) {
-        parts.push(y);
-    }
-    if let Some(r) = m.rating_out_of_5().filter(|r| *r > 0.0) {
-        parts.push(format!("{} {:.1}", icons::STAR, r * 2.0));
-    }
-    parts.join(" · ")
+    vod::movie_card_meta(m)
 }
 
 fn series_meta(s: &Series) -> String {
-    let mut parts = Vec::new();
-    if let (Some(tag), _) = split_tag(&s.name) {
-        parts.push(tag.to_owned());
-    }
-    if let Some(y) = s.release_date.as_deref().and_then(|r| r.get(..4)) {
-        parts.push(y.to_owned());
-    }
-    if let Some(r) = s.rating_out_of_5().filter(|r| *r > 0.0) {
-        parts.push(format!("{} {:.1}", icons::STAR, r * 2.0));
-    }
-    parts.join(" · ")
+    vod::series_card_meta(s)
 }

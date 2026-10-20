@@ -1,43 +1,88 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Series (stub). Phase 4 replaces this file; the route, section and factory entry
-//! already exist (`Route::Series`, `screens::create`).
+//! Series (§8.4): the same browse experience as Movies (per-category loading, "All"
+//! last and lazy, search, sort, parental locks, favourite hearts) for the provider's
+//! series; Enter opens the series page with seasons and episodes.
 
-use eframe::egui::{self, Id};
+use std::sync::Arc;
 
-use super::{AppCtx, Screen, shell};
+use eframe::egui;
+use opensmarters_core::{Category, CategoryId, Series};
+use opensmarters_store::ContentKind;
+
+use super::movies::browse::{Browse, BrowseKind};
+use super::{AppCtx, Screen};
+use crate::error::AppResult;
 use crate::nav::{Route, Section};
-use crate::ui::assets::Illustration;
-use crate::ui::widgets;
+use crate::services::Session;
+use crate::services::vod;
 
-/// Series screen (placeholder).
+/// Series in the browse screen.
+#[derive(Debug)]
+pub(crate) struct SeriesKind;
+
+impl BrowseKind for SeriesKind {
+    type Item = Series;
+    const CONTENT: ContentKind = ContentKind::Series;
+    const TITLE: &'static str = "Series";
+    const PLURAL: &'static str = "series";
+    const SINGULAR: &'static str = "series";
+    const KEY: &'static str = "series";
+    const PROGRESS: bool = false;
+
+    async fn categories(s: Arc<Session>) -> AppResult<Arc<Vec<Category>>> {
+        s.series_categories().await
+    }
+
+    async fn list(s: Arc<Session>, category: Option<CategoryId>) -> AppResult<Arc<Vec<Series>>> {
+        s.series_list(category).await
+    }
+
+    fn poster(item: &Series) -> Option<&str> {
+        item.poster()
+    }
+
+    fn meta(item: &Series) -> String {
+        vod::series_card_meta(item)
+    }
+
+    fn item_categories(item: &Series) -> Vec<&CategoryId> {
+        item.category_id
+            .iter()
+            .chain(item.category_ids.iter())
+            .collect()
+    }
+
+    fn detail(id: u64) -> Route {
+        Route::SeriesDetail { series_id: id }
+    }
+}
+
+/// The Series screen.
 #[derive(Debug)]
 pub struct SeriesScreen {
-    /// Route parameter (kept for the real implementation).
-    pub category: Option<String>,
+    inner: Browse<SeriesKind>,
 }
 
 impl SeriesScreen {
-    /// Creates the screen.
+    /// Creates the screen, optionally on a category id (or `"all"`).
     pub fn new(category: Option<String>) -> Self {
-        Self { category }
+        Self {
+            inner: Browse::new(category),
+        }
     }
 }
 
 impl Screen for SeriesScreen {
+    fn on_enter(&mut self, cx: &mut AppCtx<'_>) {
+        self.inner.on_enter(cx);
+    }
+
+    fn on_back(&mut self, cx: &mut AppCtx<'_>) -> bool {
+        self.inner.on_back(cx)
+    }
+
     fn ui(&mut self, cx: &mut AppCtx<'_>, ui: &mut egui::Ui) {
-        shell::status_cluster(cx, ui);
-        let ill: Option<Illustration> = None;
-        if widgets::coming_soon(
-            ui,
-            Id::unique("series.coming-soon"),
-            "Series",
-            "Series are on their way",
-            "Seasons, episodes and “up next” will live here.",
-            ill,
-            cx.layout.margin,
-        ) {
-            cx.nav.section(Route::Home);
-        }
+        self.inner.ui(cx, ui);
     }
 
     fn section(&self) -> Option<Section> {

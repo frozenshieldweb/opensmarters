@@ -36,6 +36,7 @@ use crate::ui::assets::{self, Asset};
 use crate::ui::icons::{self, Style};
 use crate::ui::theme::{color, elevation, font, radius};
 use crate::ui::widgets::callout::Badge;
+use crate::ui::widgets::up_next::{self, UpNextAction, UpNextPrompt};
 use crate::ui::widgets::{Button, IconButton, clock};
 use crate::ui::{motion, paint, text};
 
@@ -44,6 +45,10 @@ const NUMBER_ENTRY_TIMEOUT: Duration = Duration::from_millis(1500);
 
 fn scrubber_id() -> Id {
     Id::unique("player.scrubber")
+}
+
+fn up_next_id() -> Id {
+    Id::unique("player.up-next")
 }
 
 /// The player screen.
@@ -206,6 +211,10 @@ impl Screen for PlayerScreen {
             focus::request(&cx.egui, Id::unique("player.tracks"));
             return true;
         }
+        // Esc first stops the next-episode countdown.
+        if cx.playback.up_next().is_some() && up_next::cancel(&cx.egui, up_next_id()) {
+            return true;
+        }
         let paused = cx.playback.state().paused;
         let ended = matches!(
             cx.playback.status(),
@@ -219,11 +228,13 @@ impl Screen for PlayerScreen {
     }
 
     fn on_input(&mut self, cx: &mut AppCtx<'_>, ctx: &egui::Context) {
+        // Esc/Backspace are "back", not activity: counting them would re-show the OSD
+        // that `on_back` then hides, so the player could never be left while playing.
         let any_input = ctx.input(|i| {
-            i.events
-                .iter()
-                .any(|e| matches!(e, Event::Key { pressed: true, .. }))
-                || i.pointer.delta() != egui::Vec2::ZERO
+            i.events.iter().any(|e| {
+                matches!(e, Event::Key { pressed: true, key, .. }
+                    if !matches!(key, Key::Escape | Key::Backspace))
+            }) || i.pointer.delta() != egui::Vec2::ZERO
         });
         let osd = self.osd_visible(cx);
         let live = Self::is_live(cx);
@@ -471,7 +482,8 @@ impl Screen for PlayerScreen {
             _ => {}
         }
 
-        let visible = self.osd_visible(cx);
+        // The next-episode prompt has its own controls.
+        let visible = self.osd_visible(cx) && cx.playback.up_next().is_none();
         let alpha = motion::animate_bool(
             &cx.egui,
             Id::unique("player.osd"),
@@ -513,6 +525,36 @@ impl PlayerScreen {
             Color32::WHITE,
         ) {
             painter.rect_filled(screen, 0.0, color::BG);
+        }
+        // A finished episode offers the next one, with a countdown.
+        if finished && let Some(next) = cx.playback.up_next() {
+            let img = cx
+                .services
+                .images
+                .get(next.artwork.as_deref(), crate::services::ImageSize::Card);
+            let action = UpNextPrompt::new(
+                up_next_id(),
+                next.after,
+                &next.code,
+                &next.title,
+                &next.series,
+                &img,
+            )
+            .show(ui, screen);
+            match action {
+                UpNextAction::Play => {
+                    if cx.playback.play_up_next() {
+                        self.poke();
+                    }
+                }
+                UpNextAction::Replay => {
+                    cx.playback.replay();
+                    self.poke();
+                }
+                UpNextAction::Back => cx.nav.back(),
+                UpNextAction::None => {}
+            }
+            return;
         }
         let c = screen.center();
         let sym = Rect::from_center_size(c - vec2(0.0, 72.0), vec2(64.0, 64.0));

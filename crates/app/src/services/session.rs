@@ -57,6 +57,10 @@ use super::epg::{EpgCache, EpgState};
 use crate::error::{AppError, AppResult};
 use crate::playback::{MediaKind, PlaybackItem, PlaybackRequest, ZapContext, stream_headers};
 
+// Movies/series: watch state, mark watched, remembered categories (`session/vod.rs`).
+mod vod;
+pub use vod::SeriesWatch;
+
 /// TTL of category and stream lists.
 pub const LIST_TTL: Duration = Duration::from_secs(6 * 3600);
 /// TTL of VOD/series detail.

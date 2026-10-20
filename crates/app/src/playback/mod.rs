@@ -17,6 +17,7 @@
 //! - **Subtitles are off by default** (mpv would auto-select embedded closed captions on
 //!   live channels). For VOD, a language the user picked in the track sheet is reused.
 //! - **VOD end of file = finished**, not an error: the resume point is marked finished.
+//!   A finished episode offers the next one ([`next`]: `up_next`, `play_up_next`).
 //! - **Progress** of movies/episodes/catch-up is saved every [`SAVE_EVERY`] and when
 //!   playback stops or switches.
 //! - **Recent channels** are recorded when a live channel starts.
@@ -26,6 +27,7 @@
 //! Shutdown: [`PlaybackController::destroy`] from `eframe::App::on_exit` (frees the render
 //! context while GL is current), then the player is dropped.
 
+pub mod next;
 pub mod request;
 
 use std::sync::Arc;
@@ -127,6 +129,8 @@ pub struct PlaybackController {
     notice: Arc<std::sync::Mutex<Option<String>>>,
     last_limit_check: Option<Instant>,
     sub_pref: SubPref,
+    /// The playing episode's series, for "Next episode" (see [`next`]).
+    queue: Arc<std::sync::Mutex<Option<next::EpisodeQueue>>>,
 }
 
 impl std::fmt::Debug for PlaybackController {
@@ -194,6 +198,7 @@ impl PlaybackController {
             notice: Arc::new(std::sync::Mutex::new(None)),
             last_limit_check: None,
             sub_pref: SubPref::Off,
+            queue: Arc::default(),
         }
     }
 
@@ -332,6 +337,7 @@ impl PlaybackController {
             load_at,
             subs_applied: false,
         });
+        self.sync_episode_queue();
         if let Some(at) = load_at {
             self.ctx
                 .request_repaint_after(at.saturating_duration_since(Instant::now()));

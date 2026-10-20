@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Track preferences (Settings → Playback): preferred audio and subtitle languages,
-//! language-code normalisation, and the network buffer presets.
+//! Track preferences (Settings → Playback): preferred audio and subtitle languages and
+//! language-code normalisation. Buffering lives in [`super::tuning`].
 //!
 //! Containers and HLS playlists tag tracks with ISO 639-1 (`fr`), ISO 639-2/B (`fre`),
 //! ISO 639-2/T (`fra`) or even English names (`French`). [`canonical`] maps all of these
@@ -154,67 +154,6 @@ pub fn pick_subtitle(tracks: &[Track], preferred: Option<&str>, live: bool) -> T
         .map_or(TrackSelection::Off, |t| TrackSelection::Id(t.id))
 }
 
-/// Network buffer presets (demuxer cache and network timeout). Larger buffers ride out
-/// short network drops in films and series at the cost of memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BufferPreset {
-    /// Label in the settings.
-    pub label: &'static str,
-    /// Forward demuxer cache (MiB).
-    pub forward_mib: u32,
-    /// Backward demuxer cache (MiB).
-    pub back_mib: u32,
-    /// Network timeout (s).
-    pub timeout_secs: u64,
-}
-
-impl BufferPreset {
-    /// Small / Standard / Large.
-    pub const ALL: [BufferPreset; 3] = [
-        BufferPreset {
-            label: "Small",
-            forward_mib: 32,
-            back_mib: 8,
-            timeout_secs: 10,
-        },
-        BufferPreset {
-            label: "Standard",
-            forward_mib: 64,
-            back_mib: 16,
-            timeout_secs: 15,
-        },
-        BufferPreset {
-            label: "Large",
-            forward_mib: 256,
-            back_mib: 64,
-            timeout_secs: 30,
-        },
-    ];
-
-    /// The preset at `index` (clamped).
-    pub fn at(index: u8) -> BufferPreset {
-        Self::ALL[usize::from(index).min(Self::ALL.len() - 1)]
-    }
-}
-
-/// Options fixed when the player starts (Settings → Playback, applied at the next launch).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlayerTuning {
-    /// Hardware decoding (`hwdec=auto-safe`), else software.
-    pub hw_decoding: bool,
-    /// Network buffer.
-    pub buffer: BufferPreset,
-}
-
-impl Default for PlayerTuning {
-    fn default() -> Self {
-        Self {
-            hw_decoding: true,
-            buffer: BufferPreset::at(1),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,12 +258,5 @@ mod tests {
             pick_subtitle(&[vie], Some("VIE"), false),
             TrackSelection::Id(4)
         );
-    }
-
-    #[test]
-    fn buffer_presets_clamp() {
-        assert_eq!(BufferPreset::at(0).label, "Small");
-        assert_eq!(BufferPreset::at(1), PlayerTuning::default().buffer);
-        assert_eq!(BufferPreset::at(99).label, "Large");
     }
 }

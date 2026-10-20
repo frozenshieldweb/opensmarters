@@ -7,9 +7,14 @@
 //!   everything). The previous stream is always stopped before the next one is loaded,
 //!   and zapping is debounced ([`ZAP_DEBOUNCE`]): pressing channel-up five times opens one
 //!   stream, not five.
-//! - **Live reconnect** with backoff ([`RETRY_DELAYS`]: 2, 5, 10, 30, 30 s, then give up)
-//!   on `EndFile(Error)`, on `EndFile(Eof)` (the server closed the stream) and on stalls
-//!   (no progress for [`STALL_AFTER`]). The status shows "Reconnecting… (n)".
+//! - **Live reconnect** with backoff ([`RETRY_DELAYS`]: 1, 3, 8, 15, 30, 30 s, then give
+//!   up) on `EndFile(Error)`, on `EndFile(Eof)` (the server closed the stream) and on
+//!   stalls: no progress for [`STALL_AFTER`] (plus the start buffer) while not paused.
+//!   libcurl, which reads `http(s)` in this mpv build, has no read timeout, so a provider
+//!   that stops sending is only noticed this way. Films and episodes reload at the last
+//!   position after [`VOD_STALL_AFTER`]; a stream that never opens fails or retries after
+//!   [`OPEN_TIMEOUT`]. During a zap or a reconnect the last picture stays on screen
+//!   ([`VideoView::set_hold_last_frame`]) under a "Buffering…"/"Reconnecting…" badge.
 //! - **Connection limit:** when a stream fails on an Xtream account, the account info is
 //!   fetched (an API call, not a stream); if `active_cons >= max_connections` the UI shows
 //!   [`PlaybackController::notice`] ("Connection limit reached (3/3) …") instead of a
@@ -18,8 +23,19 @@
 //!   live channels). For VOD, the preferred subtitle language (Settings → Playback) or a
 //!   language the user picked in the track sheet is used; the preferred **audio** language
 //!   is selected when a stream has it (see [`tracks`]).
-//! - **Hardware decoding and the network buffer** come from Settings → Playback
-//!   ([`PlayerTuning`]) and apply when the player starts.
+//! - **Buffering per stream** ([`tuning`]): every load carries a
+//!   [`opensmarters_player::StreamTuning`] from Settings › Playback ([`PlayerTuning`]):
+//!   a short start buffer for live, a large disk-backed cache for films. With "Buffering:
+//!   Auto", a live channel that stalled (a stall reconnect, or [`REBUFFERS_BEFORE_BOOST`]
+//!   rebuffers) starts with more buffering next time (1 s → 3 s → 6 s), remembered per
+//!   profile and channel ([`tuning::ChannelBoosts`]). [`PlaybackController::set_tuning`]
+//!   applies hardware decoding and buffer changes at once.
+//! - **Pause and rewind live TV** ([`timeshift`]): live streams keep a seekable cache (on
+//!   disk when there is a data folder) sized by "Rewind live TV". `toggle_pause`,
+//!   [`PlaybackController::live_seek`] and [`PlaybackController::go_live`] move inside it;
+//!   [`PlaybackController::live_view`] feeds the OSD. Zapping and reconnecting start at
+//!   live; a reconnect while behind says the rewind buffer was lost.
+//! - **One-shot messages** for toasts ([`PlaybackController::take_messages`]).
 //! - **VOD end of file = finished**, not an error: the resume point is marked finished.
 //!   A finished episode offers the next one ([`next`]: `up_next`, `play_up_next`).
 //! - **Progress** of movies/episodes/catch-up is saved every [`SAVE_EVERY`] and when
@@ -42,29 +58,33 @@ pub mod multi;
 pub mod next;
 pub mod request;
 pub mod sleep;
+pub mod timeshift;
 pub mod tracks;
+pub mod tuning;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use opensmarters_core::{DEFAULT_USER_AGENT, Redactor};
 use opensmarters_player::{
-    EndReason, Hwdec, LoadOptions, LogLevel, Player, PlayerConfig, PlayerEvent, PlayerState,
+    EndReason, LoadOptions, LogLevel, Player, PlayerConfig, PlayerEvent, PlayerState, StreamTuning,
     TrackKind, TrackSelection, UserAgent, VideoFit, VideoView,
 };
-use opensmarters_store::{ItemSnapshot, PlaybackSnapshot};
+use opensmarters_store::{ItemSnapshot, PlaybackSnapshot, ProfileId};
 
 pub use request::{
     MediaKind, PlaybackItem, PlaybackRequest, StreamHeaders, ZapContext, stream_headers,
 };
-pub use tracks::{BufferPreset, PlayerTuning};
+pub use timeshift::LiveView;
+pub use tuning::{Buffering, PlayerTuning, REWIND_CHOICES, sanitize_rewind};
 
-use crate::services::Session;
 use crate::services::connections::{Lease, Purpose};
+use crate::services::{Services, Session};
 
-/// Reconnect delays (seconds) for successive attempts; after the last one we give up.
-pub const RETRY_DELAYS: [u64; 5] = [2, 5, 10, 30, 30];
+/// Reconnect delays (seconds) for successive attempts; after the last one we give up. The
+/// first is quick: most drops are momentary.
+pub const RETRY_DELAYS: [u64; 6] = [1, 3, 8, 15, 30, 30];
 /// Maximum reconnect attempts before giving up.
 pub const MAX_RETRIES: u32 = RETRY_DELAYS.len() as u32;
 /// Zapping waits this long for further channel changes before opening a stream.
@@ -73,8 +93,18 @@ pub const ZAP_DEBOUNCE: Duration = Duration::from_millis(450);
 pub const LIMIT_CHECK_EVERY: Duration = Duration::from_secs(10);
 /// Progress save interval.
 pub const SAVE_EVERY: Duration = Duration::from_secs(10);
-/// A live stream with no progress for this long is reloaded.
-pub const STALL_AFTER: Duration = Duration::from_secs(20);
+/// A live stream with no progress for this long (plus its start buffer) while not
+/// paused is reloaded.
+pub const STALL_AFTER: Duration = Duration::from_secs(8);
+/// A film or episode with no progress for this long while not paused is reloaded at the
+/// last position.
+pub const VOD_STALL_AFTER: Duration = Duration::from_secs(30);
+/// A stream that hasn't opened after this long is treated as failed (live: retried).
+pub const OPEN_TIMEOUT: Duration = Duration::from_secs(20);
+/// Rebuffers after the start that give a live channel extra buffering next time.
+pub const REBUFFERS_BEFORE_BOOST: u32 = 3;
+/// One-shot messages older than this are dropped unseen.
+const MESSAGE_TTL: Duration = Duration::from_secs(6);
 
 /// What the player is doing (for overlays and status text).
 #[derive(Debug, Clone, PartialEq)]
@@ -124,6 +154,53 @@ struct Active {
     /// The provider connection this stream uses (`None` for local files, or before the
     /// first load).
     lease: Option<Lease>,
+    /// When the current load was issued (open timeout).
+    opened_at: Instant,
+    /// Keep the last picture while the next stream opens (live zap, reconnect).
+    hold_frame: bool,
+    /// Reconnects of this item.
+    reconnects: u32,
+    /// The channel's extra buffering level used for the current load.
+    level: u8,
+    /// The buffering of the current load.
+    stream: StreamTuning,
+    /// Extra buffering was already raised for this item.
+    boosted: bool,
+    /// Playback advanced since the load (the start-up buffer is over).
+    progressed: bool,
+    /// Rebuffers since playback started, and whether it is rebuffering now.
+    rebuffers: u32,
+    was_rebuffering: bool,
+    /// Live: the viewer's position relative to live.
+    timeshift: timeshift::Timeshift,
+    /// Live: paused past the rewind window; say so on resume.
+    past_window: bool,
+}
+
+/// Counters and settings for the stream details overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct StreamHealth {
+    /// Reconnects of what is playing.
+    pub reconnects: u32,
+    /// Reconnects since the app started.
+    pub reconnects_total: u32,
+    /// The start buffer of the current stream.
+    pub start_buffer: Duration,
+    /// This channel starts with extra buffering because it stalled before.
+    pub extra_buffering: bool,
+}
+
+/// What a live seek did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveSeek {
+    /// Moved.
+    Moved,
+    /// Already at live (nothing newer).
+    AtLive,
+    /// Already at the oldest point held.
+    AtOldest,
+    /// Nothing to seek in (rewind off, nothing buffered yet, not live).
+    Unavailable,
 }
 
 /// The user's subtitle preference for VOD in this run.
@@ -153,6 +230,11 @@ pub struct PlaybackController {
     audio_pref: Option<String>,
     tuning: PlayerTuning,
     purpose: Purpose,
+    /// Live channels with extra buffering (loaded from the store at the first play).
+    boosts: Arc<Mutex<tuning::ChannelBoosts>>,
+    boosts_requested: bool,
+    reconnects_total: u32,
+    messages: Vec<(String, Instant)>,
 }
 
 impl std::fmt::Debug for PlaybackController {
@@ -167,7 +249,8 @@ impl std::fmt::Debug for PlaybackController {
 impl PlaybackController {
     /// Creates the player. Without libmpv (or the glow renderer) the controller still
     /// works but reports [`PlaybackStatus::Unavailable`]. `tuning` (hardware decoding,
-    /// buffer) is fixed for the player's lifetime.
+    /// buffering, rewind) can be changed later with [`Self::set_tuning`]. Caches go to
+    /// disk when [`tuning::init_disk_cache`] prepared a folder.
     pub fn new(
         get_proc_address: Option<opensmarters_player::GetProcAddress>,
         ctx: &egui::Context,
@@ -187,16 +270,14 @@ impl PlaybackController {
                 let config = PlayerConfig::default()
                     .log_level(mpv_log)
                     .initial_volume(volume.min(100))
-                    .hwdec(if tuning.hw_decoding {
-                        Hwdec::AutoSafe
-                    } else {
-                        Hwdec::Disabled
-                    })
-                    .cache_mib(tuning.buffer.forward_mib, tuning.buffer.back_mib)
-                    .network_timeout(Duration::from_secs(tuning.buffer.timeout_secs));
+                    .hwdec(tuning.hwdec());
                 let config = match UserAgent::new(DEFAULT_USER_AGENT) {
                     Ok(ua) => config.user_agent(ua),
                     Err(_) => config,
+                };
+                let config = match tuning::disk_cache_dir() {
+                    Some(dir) => config.cache_dir(dir),
+                    None => config,
                 };
                 match Player::new(config) {
                     Ok(player) => {
@@ -233,6 +314,10 @@ impl PlaybackController {
             audio_pref: None,
             tuning,
             purpose: Purpose::Watch,
+            boosts: Arc::default(),
+            boosts_requested: false,
+            reconnects_total: 0,
+            messages: Vec::new(),
         }
     }
 
@@ -242,9 +327,163 @@ impl PlaybackController {
         self.purpose = purpose;
     }
 
-    /// The hardware decoding / buffer options the player started with.
+    /// The hardware decoding / buffering / rewind settings in use.
     pub fn tuning(&self) -> PlayerTuning {
         self.tuning
+    }
+
+    /// Applies Settings › Playback at once: hardware decoding switches while playing, and
+    /// the playing stream gets the new buffering (cache sizes and the buffer awaited after
+    /// a stall). The start buffer and a disk-backed rewind window apply from the next
+    /// channel or film.
+    pub fn set_tuning(&mut self, tuning: PlayerTuning) {
+        let old = std::mem::replace(&mut self.tuning, tuning);
+        let Some(e) = &self.engine else { return };
+        if old.hw_decoding != tuning.hw_decoding {
+            let _ = e.player.set_hwdec(tuning.hwdec());
+        }
+        if old.buffering != tuning.buffering || old.rewind_minutes != tuning.rewind_minutes {
+            let disk = e.player.config().has_cache_dir();
+            if let Some(a) = &mut self.active {
+                a.stream = tuning::stream_tuning(a.req.kind, &tuning, a.level, disk);
+                let _ = e.player.set_tuning(&a.stream);
+            }
+        }
+    }
+
+    /// Whether caches go to disk (the player has a cache folder).
+    pub fn has_disk_cache(&self) -> bool {
+        self.engine
+            .as_ref()
+            .is_some_and(|e| e.player.config().has_cache_dir())
+    }
+
+    /// Counters for the stream details overlay.
+    pub fn health(&self) -> StreamHealth {
+        let Some(a) = &self.active else {
+            return StreamHealth {
+                reconnects_total: self.reconnects_total,
+                ..StreamHealth::default()
+            };
+        };
+        StreamHealth {
+            reconnects: a.reconnects,
+            reconnects_total: self.reconnects_total,
+            start_buffer: a.stream.start_buffer,
+            extra_buffering: a.level > 0,
+        }
+    }
+
+    /// Live channels of `profile` that start with extra buffering.
+    pub fn boosted_channels(&self, profile: ProfileId) -> usize {
+        self.boosts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .count_for(profile)
+    }
+
+    /// Forgets the extra buffering of `profile`'s channels (Settings › Playback).
+    pub fn reset_channel_buffering(&mut self, services: &Services, profile: ProfileId) {
+        self.boosts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear_profile(profile);
+        let prefix = format!("{profile}:");
+        services.blocking("reset extra buffering", move |s| {
+            let mut m = s
+                .settings()
+                .get(&crate::services::prefs::CHANNEL_BUFFERING)?;
+            m.retain(|k, _| !k.starts_with(&prefix));
+            s.settings()
+                .set(&crate::services::prefs::CHANNEL_BUFFERING, &m)
+        });
+    }
+
+    /// Messages for a toast, each returned once (stale ones are dropped).
+    pub fn take_messages(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.messages)
+            .into_iter()
+            .filter(|(_, at)| at.elapsed() < MESSAGE_TTL)
+            .map(|(m, _)| m)
+            .collect()
+    }
+
+    fn message(&mut self, text: impl Into<String>) {
+        self.messages.push((text.into(), Instant::now()));
+        if self.messages.len() > 4 {
+            self.messages.remove(0);
+        }
+        self.ctx.request_repaint();
+    }
+
+    /// Loads the channels with extra buffering once (background), merging into memory.
+    fn load_boosts(&mut self, session: &Session) {
+        if self.boosts_requested {
+            return;
+        }
+        self.boosts_requested = true;
+        let services = session.services();
+        let store = Arc::clone(&services.store);
+        let boosts = Arc::clone(&self.boosts);
+        services.rt().spawn_blocking(move || {
+            match store
+                .settings()
+                .get(&crate::services::prefs::CHANNEL_BUFFERING)
+            {
+                Ok(map) => boosts
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .merge(map),
+                Err(e) => tracing::info!(error = %e, "couldn't read extra buffering"),
+            }
+        });
+    }
+
+    /// The live channel stalled: start it with more buffering from now on (Auto only).
+    fn boost_current(&mut self) {
+        if self.tuning.buffering != Buffering::Auto {
+            return;
+        }
+        let Some(a) = &mut self.active else { return };
+        let PlaybackItem::Live { key, .. } = &a.req.item else {
+            return;
+        };
+        if a.boosted || a.level >= tuning::MAX_EXTRA_LEVEL {
+            return;
+        }
+        a.boosted = true;
+        let profile = a.session.profile_id();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let level = self
+            .boosts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .bump(profile, key, now);
+        if level == 0 {
+            return;
+        }
+        tracing::info!(level, "channel stalled; more buffering from now on");
+        a.level = level;
+        if let Some(e) = &self.engine {
+            let disk = e.player.config().has_cache_dir();
+            a.stream = tuning::stream_tuning(a.req.kind, &self.tuning, level, disk);
+            // The buffer awaited after the next stall grows at once.
+            let _ = e.player.set_tuning(&a.stream);
+        }
+        if let Some(k) = tuning::boost_key(profile, key) {
+            a.session
+                .services()
+                .blocking("remember extra buffering", move |s| {
+                    let mut m = s
+                        .settings()
+                        .get(&crate::services::prefs::CHANNEL_BUFFERING)?;
+                    tuning::bump(&mut m, &k, now);
+                    s.settings()
+                        .set(&crate::services::prefs::CHANNEL_BUFFERING, &m)
+                });
+        }
     }
 
     /// Sets the preferred audio and subtitle languages (Settings → Playback; codes as
@@ -376,6 +615,13 @@ impl PlaybackController {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         tracing::debug!(kind = ?req.kind, "play");
+        self.load_boosts(&session);
+        // Live to live (zapping): keep the last picture until the next one arrives.
+        let hold_frame = req.kind.is_live()
+            && self
+                .active
+                .as_ref()
+                .is_some_and(|old| old.req.kind.is_live() && old.failed.is_none());
         // Zapping keeps the connection lease of the same session (the old stream was just
         // stopped); a local file needs none.
         let lease = self
@@ -383,20 +629,32 @@ impl PlaybackController {
             .take()
             .filter(|old| Arc::ptr_eq(&old.session, &session) && !req.url.is_local_file())
             .and_then(|old| old.lease);
+        let now = Instant::now();
         self.active = Some(Active {
             req,
             session,
             retries: 0,
             retry_at: None,
-            last_save: Instant::now(),
+            last_save: now,
             last_pos: None,
-            last_advance: Instant::now(),
+            last_advance: now,
             finished: false,
             failed: None,
             loaded_once: false,
             load_at,
             subs_applied: false,
             lease,
+            opened_at: now,
+            hold_frame,
+            reconnects: 0,
+            level: 0,
+            stream: StreamTuning::default(),
+            boosted: false,
+            progressed: false,
+            rebuffers: 0,
+            was_rebuffering: false,
+            timeshift: timeshift::Timeshift::default(),
+            past_window: false,
         });
         self.sync_episode_queue();
         if let Some(at) = load_at {
@@ -408,6 +666,15 @@ impl PlaybackController {
     }
 
     fn load_current(&mut self, from_resume: bool) {
+        // A reconnect while behind live loses the rewind buffer: say so.
+        let lost_rewind = !from_resume
+            && self
+                .active
+                .as_ref()
+                .is_some_and(|a| a.req.kind.is_live() && a.timeshift.behind() > 5.0);
+        if lost_rewind {
+            self.message("Back to live: the connection dropped, so the rewind buffer was lost.");
+        }
         let (Some(engine), Some(a)) = (&self.engine, &mut self.active) else {
             return;
         };
@@ -450,13 +717,35 @@ impl PlaybackController {
             referrer: a.req.headers.referrer.clone(),
             start,
         };
-        tracing::info!(kind = ?a.req.kind, resume = ?start, "opening stream");
-        if let Err(e) = engine.player.load(&a.req.url, &opts) {
+        a.level = match &a.req.item {
+            PlaybackItem::Live { key, .. } => self
+                .boosts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .level(a.session.profile_id(), key),
+            _ => 0,
+        };
+        let disk = engine.player.config().has_cache_dir();
+        a.stream = tuning::stream_tuning(a.req.kind, &self.tuning, a.level, disk);
+        tracing::info!(
+            kind = ?a.req.kind,
+            resume = ?start,
+            start_buffer = ?a.stream.start_buffer,
+            disk = a.stream.disk_cache,
+            "opening stream"
+        );
+        if let Err(e) = engine.player.load_with(&a.req.url, &opts, &a.stream) {
             tracing::warn!(error = %e, "load refused");
             a.failed = Some(crate::error::AppError::from(e).user_message());
         }
         let _ = engine.player.play();
-        a.last_advance = Instant::now();
+        let now = Instant::now();
+        a.last_advance = now;
+        a.opened_at = now;
+        a.timeshift.reset();
+        a.past_window = false;
+        a.progressed = false;
+        a.was_rebuffering = false;
     }
 
     /// Stops playback (saving progress).
@@ -623,10 +912,14 @@ impl PlaybackController {
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             }
         }
-        // Progress tracking.
+        // Progress tracking. Stall detection counts only time that should have played:
+        // pausing (also to rewind live TV) and seeking are not stalls.
         if let Some(pos) = st.time_pos {
             if a.last_pos.is_none_or(|p| (p - pos).abs() > 0.2) {
                 a.last_advance = now;
+                if a.loaded_once && a.last_pos.is_some() {
+                    a.progressed = true;
+                }
                 if a.retry_at.is_none() && pos > 1.0 {
                     a.retries = 0;
                 }
@@ -635,8 +928,33 @@ impl PlaybackController {
         } else if st.paused || st.idle {
             a.last_advance = now;
         }
-        if st.paused {
+        if st.paused || st.seeking {
             a.last_advance = now;
+        }
+        // Rebuffers once playing (not the start-up buffer, not seeks).
+        let rebuffering = a.progressed && st.paused_for_cache && !st.seeking;
+        if rebuffering && !a.was_rebuffering {
+            a.rebuffers += 1;
+            tracing::debug!(count = a.rebuffers, "rebuffering");
+        }
+        a.was_rebuffering = rebuffering;
+        let mut boost = a.req.kind.is_live() && a.rebuffers >= REBUFFERS_BEFORE_BOOST;
+        // Live: count paused time as "behind live"; keep a long pause inside the window.
+        if a.req.kind.is_live() {
+            let lim = timeshift::Limits {
+                window: self.tuning.rewind_window().map(|w| w.as_secs_f64()),
+                forward_cap: a.stream.forward_bytes,
+                lead: live_lead(&a.stream),
+            };
+            if let Some(target) = a.timeshift.tick(now, &st, &lim)
+                && let Some(e) = &self.engine
+            {
+                tracing::debug!(target, "paused past the rewind window; moving forward");
+                let _ = e.player.seek_absolute(target);
+            }
+            if a.timeshift.take_past_window() {
+                a.past_window = true;
+            }
         }
 
         let mut finished_now = false;
@@ -681,20 +999,58 @@ impl PlaybackController {
         if a.finished || a.failed.is_some() {
             a.lease = None;
         }
-        // Live stall detection.
-        if a.req.kind.is_live()
-            && a.retry_at.is_none()
-            && a.failed.is_none()
-            && a.loaded_once
-            && now.duration_since(a.last_advance) > STALL_AFTER
-        {
-            tracing::info!("live stream stalled; reconnecting");
-            Self::schedule_retry(a, now);
+        // Stall detection (libcurl never times out a silent stream by itself).
+        let stalled_for = now.saturating_duration_since(a.last_advance);
+        let pending = self
+            .engine
+            .as_ref()
+            .is_some_and(|e| e.player.has_pending_load());
+        if a.retry_at.is_none() && a.failed.is_none() && !a.finished && a.load_at.is_none() {
+            let live = a.req.kind.is_live();
+            if a.loaded_once {
+                if live && stalled_for > STALL_AFTER + a.stream.start_buffer {
+                    tracing::info!(?stalled_for, "live stream stalled; reconnecting");
+                    boost = true;
+                    Self::schedule_retry(a, now);
+                } else if !live
+                    && a.req.kind != MediaKind::Recording
+                    && stalled_for > VOD_STALL_AFTER
+                {
+                    tracing::info!(
+                        ?stalled_for,
+                        "stream stalled; reloading at the last position"
+                    );
+                    Self::schedule_retry(a, now);
+                }
+            } else if !pending && now.saturating_duration_since(a.opened_at) > OPEN_TIMEOUT {
+                tracing::info!("stream didn't open in time");
+                if live {
+                    Self::schedule_retry(a, now);
+                } else {
+                    a.failed = Some(
+                        "This video didn't start. The provider may be busy; try again in a \
+                         moment."
+                            .to_owned(),
+                    );
+                    a.lease = None;
+                    if let Some(e) = &self.engine {
+                        let _ = e.player.stop();
+                    }
+                }
+            }
+        }
+        if boost {
+            self.boost_current();
         }
 
+        let Some(a) = &mut self.active else {
+            return;
+        };
         if let Some(at) = a.retry_at {
             if now >= at {
                 a.retry_at = None;
+                a.reconnects += 1;
+                self.reconnects_total += 1;
                 self.load_current(false);
                 if let Some(a) = &mut self.active {
                     a.retry_at = None;
@@ -732,6 +1088,8 @@ impl PlaybackController {
         a.retries += 1;
         a.retry_at = Some(now + delay);
         a.last_advance = now + delay;
+        // Keep the last picture under the "Reconnecting…" badge.
+        a.hold_frame = true;
         tracing::info!(attempt = a.retries, ?delay, "reconnecting");
     }
 
@@ -837,10 +1195,27 @@ impl PlaybackController {
         self.saves.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Paints the video into `rect` (black when nothing plays).
+    /// Whether the last picture is being held while the next stream opens (zap,
+    /// reconnect): screens dim it and show "Buffering…"/"Reconnecting…" over it.
+    pub fn holding_frame(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|a| a.hold_frame && a.failed.is_none())
+            && !self.state().has_video()
+    }
+
+    /// Paints the video into `rect` (black when nothing plays). During a live zap or a
+    /// reconnect the last picture stays until the next stream shows one.
     pub fn paint_video(&mut self, ui: &egui::Ui, rect: egui::Rect) {
+        let hold = self
+            .active
+            .as_ref()
+            .is_some_and(|a| a.hold_frame && a.failed.is_none());
         match &mut self.engine {
-            Some(e) => e.video.paint_at(ui, rect, &e.player),
+            Some(e) => {
+                e.video.set_hold_last_frame(hold);
+                e.video.paint_at(ui, rect, &e.player);
+            }
             None => {
                 ui.painter().rect_filled(rect, 0.0, egui::Color32::BLACK);
             }
@@ -863,11 +1238,91 @@ impl PlaybackController {
     // Controls
     // ---------------------------------------------------------------------------------
 
-    /// Play/pause.
-    pub fn toggle_pause(&self) {
-        if let Some(e) = &self.engine {
-            let _ = e.player.toggle_pause();
+    /// Play/pause. On live TV, pausing starts the rewind (the stream keeps being received
+    /// into the buffer); playing again after a pause longer than the window says it
+    /// resumes from the oldest point held.
+    pub fn toggle_pause(&mut self) {
+        let Some(e) = &self.engine else { return };
+        let resuming = e.player.state().paused;
+        let _ = e.player.toggle_pause();
+        let past = resuming
+            && self
+                .active
+                .as_mut()
+                .is_some_and(|a| std::mem::take(&mut a.past_window));
+        if past {
+            self.message(
+                "You paused for longer than the rewind window, so playback continues from the \
+                 oldest saved point.",
+            );
         }
+    }
+
+    /// The live rewind state for the OSD (live items with a buffered range only).
+    pub fn live_view(&self) -> Option<LiveView> {
+        let a = self.active.as_ref()?;
+        if !a.req.kind.is_live() || a.retry_at.is_some() || a.load_at.is_some() {
+            return None;
+        }
+        let window = self.tuning.rewind_window().map(|w| w.as_secs_f64());
+        a.timeshift.view(&self.state(), window)
+    }
+
+    /// Whether ←/→ move in time on live TV ("Rewind live TV" is on).
+    pub fn can_rewind_live(&self) -> bool {
+        self.tuning.rewind_minutes > 0
+    }
+
+    /// Seeks a live stream by `delta` seconds inside its buffer (the rewind window).
+    pub fn live_seek(&mut self, delta: f64) -> LiveSeek {
+        let (Some(e), Some(a)) = (&self.engine, &mut self.active) else {
+            return LiveSeek::Unavailable;
+        };
+        if !a.req.kind.is_live() || a.retry_at.is_some() || a.load_at.is_some() {
+            return LiveSeek::Unavailable;
+        }
+        let st = e.player.state();
+        let Some(pos) = st.time_pos else {
+            return LiveSeek::Unavailable;
+        };
+        let lead = live_lead(&a.stream);
+        match timeshift::Timeshift::seek_target(&st, delta, lead) {
+            Some(target) => {
+                let _ = e.player.seek_absolute(target);
+                a.timeshift.on_seek(pos, target);
+                LiveSeek::Moved
+            }
+            None if delta > 0.0 => {
+                if a.timeshift.is_live() {
+                    LiveSeek::AtLive
+                } else {
+                    // Nothing newer held (the data stopped): call it live.
+                    a.timeshift.set_live();
+                    LiveSeek::AtLive
+                }
+            }
+            None if st.cache.range_at(pos).is_some() => LiveSeek::AtOldest,
+            None => LiveSeek::Unavailable,
+        }
+    }
+
+    /// Back to live: seeks forward by the delay (and plays). Returns false when already
+    /// live.
+    pub fn go_live(&mut self) -> bool {
+        let (Some(e), Some(a)) = (&self.engine, &mut self.active) else {
+            return false;
+        };
+        if !a.req.kind.is_live() || a.timeshift.is_live() {
+            return false;
+        }
+        let st = e.player.state();
+        if let Some(target) = a.timeshift.live_target(&st, live_lead(&a.stream)) {
+            let _ = e.player.seek_absolute(target);
+        }
+        a.timeshift.set_live();
+        a.past_window = false;
+        let _ = e.player.play();
+        true
     }
 
     /// Relative seek (VOD).
@@ -1001,9 +1456,16 @@ impl PlaybackController {
 
     /// Frees GL resources (call from `on_exit` with the GL context).
     pub fn destroy(&mut self, gl: &eframe::glow::Context) {
+        self.messages.clear();
         self.save_progress(true);
         if let Some(e) = &mut self.engine {
             e.video.destroy(gl);
         }
     }
+}
+
+/// Distance kept from the newest data when moving forward on live TV: the stream's start
+/// buffer, at least 1 s (so playback doesn't rebuffer at once).
+fn live_lead(t: &StreamTuning) -> f64 {
+    t.start_buffer.as_secs_f64().max(1.0)
 }

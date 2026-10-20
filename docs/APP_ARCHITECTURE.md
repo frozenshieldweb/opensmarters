@@ -367,7 +367,7 @@ animation in its final state.
 | `--ephemeral` | in-memory database + in-memory keychain: never touches real data |
 | `--data-dir <dir>` | isolated database, image cache and `logs/opensmarters.log` |
 | `--route <route>` | open a route (after sign-in, or at once for `profiles`/`onboarding`; with profiles on the machine `onboarding`/`welcome` open the picker's PIN-gated "Add profile", and `detail:` of an item in a locked category asks for the PIN) |
-| `--keys "<script>"` | comma-separated: key names (`Up Down Left Right Enter Space Esc Back Tab Shift+Tab PageUp PageDown 0–9 M F …`), `wait:<s>`, `text:<chars>`, `shot:<png>`, `quit`; one key per frame with a 0.18 s gap |
+| `--keys "<script>"` | comma-separated: key names (`Up Down Left Right Enter Space Esc Back Tab Shift+Tab PageUp PageDown 0–9 M F …`), `wait:<s>`, `text:<chars>`, `shot:<png>`, `gap:<s>` (delay after the following keys, default 0.18 s: `gap:0.05,Enter,shot:fade.png` catches a transition mid-way), `quit`; one key per frame |
 | `--screenshot-after <s> --screenshot-out <png>` | screenshot then exit (feature `harness`, like the flags below except `--tv`) |
 | `--window-size WxH` | inner size in **physical pixels** |
 | `--ppp <f>` | force pixels-per-point (use `1` for 1:1 screenshots on a scaled display) |

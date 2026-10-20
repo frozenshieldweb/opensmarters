@@ -308,7 +308,7 @@ impl GuideScreen {
                     p.stop.timestamp(),
                     bounds,
                 );
-                self.cursor = Some(cursor_for(p, self.view_start));
+                self.cursor = Some(cursor_for(p, self.view_start, cx.now));
                 self.focus_cell(cx, f.row, &ch.key, Some(p.start.timestamp()));
             }
             _ => {
@@ -1128,7 +1128,7 @@ impl GuideScreen {
             if self.focus.as_ref() != Some(&f) {
                 // Focus arrived by pointer or geometric navigation: follow it.
                 if let Some(p) = &p {
-                    self.cursor = Some(cursor_for(p, self.view_start));
+                    self.cursor = Some(cursor_for(p, self.view_start, now));
                 }
             }
             self.focus = Some(f);
@@ -1356,7 +1356,7 @@ impl GuideScreen {
                 ui.ctx(),
                 cx.services,
                 &title,
-                Some("Its channels stay unlocked until you close opensmarters."),
+                Some("Its channels lock again after 30 minutes without use."),
             ) {
                 PinPromptResult::Verified(_) => {
                     if let CategorySelection::Category(id) = &g.selection {

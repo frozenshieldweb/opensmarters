@@ -48,6 +48,9 @@ Workspace gates at the end of Phase 6: `cargo fmt`, clippy (`-D warnings`, with 
 - **TMDB:** only the setting and key exist; there is no enrichment on the detail page yet.
 - **Compact layout:** below 960 pt the collapsed rail stays; there is no top bar.
 - **Parental control:** an item whose category can't be resolved counts as locked while a PIN is set (fail closed). Continue watching checks only the primary category returned by `get_vod_info`.
+- **Final QA polish left open (S3):**
+  - Catch-up: after "Try another way" succeeds, focus lands on the channel list instead of the "Use it from now on" button.
+  - Typing a locked channel's number says "Channel not found", while opening it by route says "Channel locked".
 - **Phase 7** (details: `docs/PHASE7.md`, `docs/APP_ARCHITECTURE.md` §7, §7.1–7.4, §14):
   - **Not yet tested with the real provider:** recordings/downloads (each uses a connection), multiscreen (several connections at once; the panel counts stale connections after bursts), clips from the rewind buffer, libcurl range retries.
   - **libcurl has no read timeout** (it fetches every `http(s)` stream and HLS segment in this mpv build, `docs/LIBMPV.md` → Network): the progress tracker is the only stall detector. Turning libcurl off for live TS (`curl-enabled=no` per load) would give FFmpeg's transport reconnects that keep the rewind buffer; it changes the TLS stack and redirect handling, so it needs a security review first.

@@ -67,7 +67,7 @@
 //!
 //! See [`Quirks`]: `mixed-types`, `html-content-type`, `backdrop-string`,
 //! `episodes-array`, `category-all-literal` (default on), `slow`, `huge`, `stream-host`,
-//! `malformed-item`, `timeshift-503`, `timeshift-smarters-only`.
+//! `malformed-item`, `timeshift-503`, `timeshift-smarters-only`, `stall`.
 //!
 //! ## M3U
 //!

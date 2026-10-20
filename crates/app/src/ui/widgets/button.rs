@@ -348,7 +348,7 @@ impl IconButton {
         self
     }
 
-    /// Champagne filled circle (the OSD play/pause).
+    /// `accent`-filled circle (the OSD play/pause); focus adds the ring only.
     #[must_use]
     pub fn primary(mut self) -> Self {
         self.primary = true;
@@ -403,12 +403,11 @@ impl IconButton {
             paint::focus_glow(&painter, rect, radius::FULL, f.anim);
         }
         let fill = if self.primary {
+            // Always accent-filled; focus adds only the ring.
             if pressed {
                 color::ACCENT_PRESSED
-            } else if f.focused {
-                color::ACCENT_HOVER
             } else {
-                color::CREAM
+                color::ACCENT
             }
         } else if pressed {
             color::GHOST_PRESSED

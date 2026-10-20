@@ -85,6 +85,35 @@ pub enum PlaybackItem {
 }
 
 impl PlaybackItem {
+    /// True if both are the same channel, film, episode or catch-up programme (whatever
+    /// the resume position or zap list).
+    pub fn same_item(&self, other: &PlaybackItem) -> bool {
+        match (self, other) {
+            (PlaybackItem::Live { key: a, .. }, PlaybackItem::Live { key: b, .. }) => a == b,
+            (
+                PlaybackItem::Movie { stream_id: a, .. },
+                PlaybackItem::Movie { stream_id: b, .. },
+            ) => a == b,
+            (
+                PlaybackItem::Episode { episode_id: a, .. },
+                PlaybackItem::Episode { episode_id: b, .. },
+            ) => a == b,
+            (
+                PlaybackItem::Catchup {
+                    stream_id: a,
+                    start: sa,
+                    ..
+                },
+                PlaybackItem::Catchup {
+                    stream_id: b,
+                    start: sb,
+                    ..
+                },
+            ) => a == b && sa == sb,
+            _ => false,
+        }
+    }
+
     /// The store item id for resume points (`None` for live). Catch-up uses
     /// `"<stream_id>@<start>"`.
     pub fn progress_id(&self) -> Option<String> {
@@ -117,15 +146,45 @@ pub struct ZapContext {
     pub index: usize,
 }
 
-impl ZapContext {
-    /// The channel `delta` steps away (wrapping).
-    pub fn step(&self, delta: isize) -> Option<(usize, &LiveChannel)> {
-        let n = self.channels.len();
-        if n == 0 {
-            return None;
+/// Zapping stopped at an end of the list (no wrap-around from the first channel to the
+/// last of thousands).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZapEdge {
+    /// Already on the first channel of the list.
+    First,
+    /// Already on the last channel of the list.
+    Last,
+}
+
+impl ZapEdge {
+    /// "First channel" / "Last channel".
+    pub fn label(self) -> &'static str {
+        match self {
+            ZapEdge::First => "First channel",
+            ZapEdge::Last => "Last channel",
         }
-        let i = (self.index as isize + delta).rem_euclid(n as isize) as usize;
-        self.channels.get(i).map(|c| (i, c))
+    }
+}
+
+impl ZapContext {
+    /// The channel `delta` steps away (`+1` = next in the list). Stops at the ends: going
+    /// past the first or last channel returns which end was hit.
+    pub fn step(&self, delta: isize) -> Result<(usize, &LiveChannel), ZapEdge> {
+        let n = self.channels.len() as isize;
+        let target = self.index as isize + delta;
+        if target < 0 || n == 0 {
+            return Err(ZapEdge::First);
+        }
+        if target >= n {
+            return Err(ZapEdge::Last);
+        }
+        let i = target as usize;
+        self.channels.get(i).map(|c| (i, c)).ok_or(ZapEdge::Last)
+    }
+
+    /// The playing channel.
+    pub fn current(&self) -> Option<&LiveChannel> {
+        self.channels.get(self.index)
     }
 
     /// The channel with `number`.
@@ -245,6 +304,85 @@ mod tests {
             Some("file:///etc/passwd"),
         );
         assert!(h.referrer.is_none());
+    }
+
+    fn channel(n: u64) -> LiveChannel {
+        LiveChannel {
+            key: n.to_string(),
+            number: Some(n),
+            name: format!("Channel {n}"),
+            logo: None,
+            epg_id: None,
+            categories: Vec::new(),
+            archive: false,
+            archive_days: None,
+            added: None,
+            is_adult: false,
+            source: crate::services::catalog::ChannelSource::Xtream { stream_id: n },
+        }
+    }
+
+    #[test]
+    fn zapping_stops_at_the_ends() {
+        let channels = Arc::new((1..=5).map(channel).collect::<Vec<_>>());
+        let zap = |index| ZapContext {
+            channels: Arc::clone(&channels),
+            index,
+        };
+        assert_eq!(zap(0).step(1).map(|(i, c)| (i, c.number)), Ok((1, Some(2))));
+        assert_eq!(zap(0).step(-1).map(|(i, _)| i), Err(ZapEdge::First));
+        assert_eq!(zap(4).step(1).map(|(i, _)| i), Err(ZapEdge::Last));
+        assert_eq!(zap(4).step(-1).map(|(i, _)| i), Ok(3));
+        assert_eq!(zap(2).step(-5).map(|(i, _)| i), Err(ZapEdge::First));
+        assert_eq!(zap(2).current().and_then(|c| c.number), Some(3));
+        let empty = ZapContext {
+            channels: Arc::new(Vec::new()),
+            index: 0,
+        };
+        assert!(empty.step(1).is_err());
+        assert_eq!(ZapEdge::Last.label(), "Last channel");
+    }
+
+    #[test]
+    fn same_item_ignores_resume_and_zap_details() {
+        let a = PlaybackItem::Catchup {
+            stream_id: 5,
+            start: 100,
+            duration_minutes: 30,
+        };
+        let b = PlaybackItem::Catchup {
+            stream_id: 5,
+            start: 100,
+            duration_minutes: 45,
+        };
+        let c = PlaybackItem::Catchup {
+            stream_id: 5,
+            start: 200,
+            duration_minutes: 30,
+        };
+        assert!(a.same_item(&b));
+        assert!(!a.same_item(&c));
+        let m = |id, ext: Option<&str>| PlaybackItem::Movie {
+            stream_id: id,
+            container_extension: ext.map(str::to_owned),
+        };
+        assert!(m(1, Some("mkv")).same_item(&m(1, None)));
+        assert!(!m(1, None).same_item(&m(2, None)));
+        let live = |k: &str| PlaybackItem::Live {
+            key: k.into(),
+            number: None,
+        };
+        assert!(live("7").same_item(&live("7")));
+        assert!(!live("7").same_item(&m(7, None)));
+        let ep = |id| PlaybackItem::Episode {
+            episode_id: id,
+            series_id: 1,
+            season: None,
+            episode: None,
+            container_extension: None,
+        };
+        assert!(ep(3).same_item(&ep(3)));
+        assert!(!ep(3).same_item(&ep(4)));
     }
 
     #[test]

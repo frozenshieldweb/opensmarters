@@ -122,9 +122,27 @@ async fn serve_live(st: &PanelState, u: &str, p: &str, file: &str, req: Request)
     }
     if ext == "m3u8" {
         playlist_response(st, user, ch.clip)
+    } else if st.quirks.stall {
+        serve_stalled(st.media.live_ts(ch.clip)).await
     } else {
         serve_file(st.media.live_ts(ch.clip), TS, req).await
     }
+}
+
+/// The `stall` quirk: the first 40 % of the clip (cut on a TS packet boundary), then an
+/// open connection that never sends anything again.
+async fn serve_stalled(path: PathBuf) -> Response {
+    use futures_util::StreamExt as _;
+    let read = tokio::task::spawn_blocking(move || std::fs::read(path)).await;
+    let Ok(Ok(bytes)) = read else {
+        return not_found("clip");
+    };
+    const TS_PACKET: usize = 188;
+    let cut = (bytes.len() * 2 / 5) / TS_PACKET * TS_PACKET;
+    let head = axum::body::Bytes::from(bytes).slice(..cut);
+    let body = futures_util::stream::once(async move { Ok::<_, std::io::Error>(head) })
+        .chain(futures_util::stream::pending());
+    ([(header::CONTENT_TYPE, TS)], Body::from_stream(body)).into_response()
 }
 
 /// `GET /live/{u}/{p}/{id}.{ts|m3u8}`.

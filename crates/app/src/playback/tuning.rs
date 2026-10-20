@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use opensmarters_player::{Hwdec, StreamTuning};
+use opensmarters_player::{Hwdec, PlayerConfig, StreamTuning};
 use opensmarters_store::ProfileId;
 
 use super::MediaKind;
@@ -202,6 +202,17 @@ impl PlayerTuning {
     /// The nominal live rewind window, if on.
     pub fn rewind_window(&self) -> Option<Duration> {
         (self.rewind_minutes > 0).then(|| Duration::from_secs(u64::from(self.rewind_minutes) * 60))
+    }
+}
+
+/// The player-wide part of the settings: hardware decoding, and the disk cache folder
+/// when [`init_disk_cache`] prepared one. Everything else is per load
+/// ([`stream_tuning`]).
+pub fn configure(config: PlayerConfig, t: &PlayerTuning) -> PlayerConfig {
+    let config = config.hwdec(t.hwdec());
+    match disk_cache_dir() {
+        Some(dir) => config.cache_dir(dir),
+        None => config,
     }
 }
 

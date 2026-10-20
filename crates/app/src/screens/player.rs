@@ -4,18 +4,47 @@
 //!
 //! ## Keys
 //!
+//! Time moves left/right, channels move up/down. On live TV, ←/→ move inside the rewind
+//! buffer when "Rewind live TV" is on (Settings › Playback); with it off they change
+//! channel as before. Changing channel always starts at live.
+//!
 //! | Key | OSD hidden | OSD visible |
 //! |---|---|---|
-//! | Space | play/pause | play/pause |
+//! | Space | play/pause (live: pausing starts rewinding) | play/pause |
 //! | Enter | VOD: play/pause · live: show OSD | activate the focused control |
-//! | ← / → | VOD: seek −/+10 s (Shift: 60 s) · live: channel −/+ | move focus (on the scrubber: seek) |
+//! | ← / → | VOD: seek −/+10 s (Shift: 60 s) · live: back/forward 10 s (Shift: 60 s), or channel −/+ with rewind off | move focus (on the scrubber or the live bar: seek) |
 //! | ↑ / ↓ | live: channel +/− · VOD: show OSD | move focus |
 //! | PageUp / PageDown | channel +/− | channel +/− |
+//! | L | live: go live | same |
+//! | D | show/hide stream details | same |
 //! | 0–9 | channel number entry (zaps after 1.5 s or Enter) | same |
 //! | M / F / I | mute / window fullscreen / show-hide OSD | same |
 //! | A / S | next audio track / next subtitle (off → tracks → off) | same |
 //! | + / − | volume ±5 | same |
-//! | Esc, Backspace | leave the player | hide the OSD (closes the track sheet first) |
+//! | Esc, Backspace | leave the player (closes stream details first) | hide the OSD (closes the track sheet first) |
+//!
+//! ## Live TV ([`timeshift`])
+//!
+//! The live OSD shows `LIVE`, or how far behind live the viewer is ("−02:13", after a
+//! pause or a rewind) with a "Go live" button. With rewind on, the bar spans the rewind
+//! window and ends at live (buffered part, playback position; focusable like the VOD
+//! scrubber) and ±10 s buttons sit around play/pause. During a live zap or a reconnect the
+//! last picture stays, dimmed. Stream details: [`health`].
+//!
+//! ## Extending the OSD (Phase 7 hooks)
+//!
+//! - **Buttons** for other features (Record / Save clip, Sleep, Multiscreen) go in the
+//!   marked "Feature actions" block of `PlayerScreen::osd`: one [`actions::osd_icon`]
+//!   call each (laid out right to left after the built-in buttons; true when activated).
+//!   Put the logic in the feature's own module.
+//! - **Keys** go in the marked "Feature keys" block of `on_input`, one `consume(Key::…)`
+//!   line each. Keys already taken: the table above plus Esc, Backspace and Tab.
+//! - Controller messages ([`crate::playback::PlaybackController::take_messages`]) become
+//!   toasts here.
+
+pub(crate) mod actions;
+mod health;
+pub(crate) mod timeshift;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -35,7 +64,6 @@ use crate::task::Loader;
 use crate::ui::assets::{self, Asset};
 use crate::ui::icons::{self, Style};
 use crate::ui::theme::{color, elevation, font, radius};
-use crate::ui::widgets::callout::Badge;
 use crate::ui::widgets::up_next::{self, UpNextAction, UpNextPrompt};
 use crate::ui::widgets::{Button, IconButton, clock};
 use crate::ui::{motion, paint, text};
@@ -62,6 +90,8 @@ pub struct PlayerScreen {
     number_entry: Option<(String, Instant)>,
     seek_preview: Option<f64>,
     flash: Option<(String, Instant)>,
+    /// The stream details panel (D).
+    details: bool,
 }
 
 impl PlayerScreen {
@@ -76,6 +106,7 @@ impl PlayerScreen {
             number_entry: None,
             seek_preview: None,
             flash: None,
+            details: false,
         }
     }
 
@@ -211,6 +242,10 @@ impl Screen for PlayerScreen {
             focus::request(&cx.egui, Id::unique("player.tracks"));
             return true;
         }
+        if self.details {
+            self.details = false;
+            return true;
+        }
         // Esc first stops the next-episode countdown.
         if cx.playback.up_next().is_some() && up_next::cancel(&cx.egui, up_next_id()) {
             return true;
@@ -279,6 +314,17 @@ impl Screen for PlayerScreen {
         if consume(Key::PageDown) {
             self.zap(cx, -1);
         }
+        if consume(Key::D) {
+            self.details = !self.details;
+        }
+        if live && consume(Key::L) {
+            self.go_live(cx);
+            self.poke();
+        }
+        // ---- Feature keys (Phase 7 hooks: Record/Clip, Sleep, Multiscreen) ----------
+        // One `if consume(Key::…) { … }` line each; the logic lives in the feature's
+        // module. Keys in the table at the top of this file are taken.
+        // ------------------------------------------------------------------------------
         // Digits: channel number entry (live).
         if live {
             for (k, c) in [
@@ -313,6 +359,9 @@ impl Screen for PlayerScreen {
             }
         }
 
+        if live && osd && focus::is_focused(ctx, timeshift::bar_id()) {
+            self.live_bar_keys(cx, ctx);
+        }
         if !osd && !self.sheet {
             // Direct transport with the OSD hidden.
             if consume(Key::Enter) {
@@ -326,6 +375,12 @@ impl Screen for PlayerScreen {
             }
             let (left, right) = (consume(Key::ArrowLeft), consume(Key::ArrowRight));
             let (sleft, sright) = (shift(Key::ArrowLeft), shift(Key::ArrowRight));
+            // Live with rewind on: ←/→ move in time instead of changing channel.
+            let (left, right) = if live && self.live_arrows(cx, ctx, [left, right, sleft, sright]) {
+                (false, false)
+            } else {
+                (left, right)
+            };
             if live {
                 if left {
                     self.zap(cx, -1);
@@ -421,6 +476,13 @@ impl Screen for PlayerScreen {
             );
         if show_video {
             cx.playback.paint_video(ui, screen);
+            // A held picture (live zap, reconnect) is dimmed under the status.
+            if cx.playback.holding_frame() {
+                painter.rect_filled(screen, 0.0, Color32::from_black_alpha(110));
+            }
+        }
+        for msg in cx.playback.take_messages() {
+            cx.toasts.info(msg);
         }
         // Click toggles the OSD; double-click toggles window fullscreen.
         let bg = ui.interact(screen, Id::unique("player.bg"), Sense::click());
@@ -785,6 +847,9 @@ impl PlayerScreen {
                     cx.playback.seek_absolute(t);
                 }
             }
+            if live {
+                self.live_bar(ui, cx, &p, bar);
+            }
 
             // Transport (left).
             let mut x = screen.left() + mx;
@@ -805,6 +870,7 @@ impl PlayerScreen {
                     }
                     x += 48.0 + 16.0;
                 }
+                x = self.live_back_button(ui, cx, x, cy);
             } else {
                 let r = Rect::from_center_size(pos2(x + 24.0, cy), vec2(48.0, 48.0));
                 if IconButton::new(icons::ARROW_COUNTER_CLOCKWISE)
@@ -843,6 +909,8 @@ impl PlayerScreen {
                 {
                     cx.playback.seek_relative(10.0);
                 }
+            } else {
+                self.live_forward_controls(ui, cx, x, cy);
             }
 
             // Right cluster: tracks, aspect, volume, fullscreen.
@@ -894,6 +962,15 @@ impl PlayerScreen {
                 }
                 rx -= 48.0 + 16.0;
             }
+            if actions::osd_icon(ui, &mut rx, cy, icons::INFO, "player.details", self.details) {
+                self.details = !self.details;
+            }
+            // ---- Feature actions (Phase 7 hooks: Record/Clip, Sleep, Multiscreen) ----
+            // One line each, laid out right to left after the buttons above, e.g.
+            //   if actions::osd_icon(ui, &mut rx, cy, icons::RECORD, "player.record", on) {
+            //       crate::dvr::ui::toggle_record(cx);
+            //   }
+            // ----------------------------------------------------------------------------
         });
         if self.sheet {
             self.track_sheet(cx, ui);
@@ -903,7 +980,8 @@ impl PlayerScreen {
     fn live_info(&self, cx: &AppCtx<'_>, p: &egui::Painter, req: &PlaybackRequest, bar: Rect) {
         // Line 1 (above the bar): LIVE · number + channel · now title; right: next.
         let y = bar.top() - 26.0;
-        let badge = Badge::live(p, pos2(bar.left(), y), Align2::LEFT_CENTER);
+        let behind = cx.playback.live_view().map(|v| v.behind);
+        let badge = timeshift::live_badge(p, pos2(bar.left(), y), Align2::LEFT_CENTER, behind);
         let number = match &req.item {
             crate::playback::PlaybackItem::Live {
                 number: Some(n), ..
@@ -960,8 +1038,11 @@ impl PlayerScreen {
                 progress = n.progress(cx.now);
             }
         }
-        let pb = Rect::from_center_size(bar.center(), vec2(bar.width(), 4.0));
-        paint::progress_bar(p, pb, progress, color::ACCENT, color::PROGRESS_TRACK);
+        // With rewind on, the bar shows the rewind window instead of the programme.
+        if !timeshift::paint_bar(cx, p, bar) {
+            let pb = Rect::from_center_size(bar.center(), vec2(bar.width(), 4.0));
+            paint::progress_bar(p, pb, progress, color::ACCENT, color::PROGRESS_TRACK);
+        }
     }
 
     fn track_sheet(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {
@@ -1129,6 +1210,10 @@ impl PlayerScreen {
             egui::Order::Foreground,
             Id::unique("player.overlays"),
         ));
+        if self.details && cx.playback.request().is_some() {
+            health::panel(cx, &painter);
+            ui.ctx().request_repaint_after(Duration::from_millis(500));
+        }
         if let Some((buf, _)) = &self.number_entry {
             let g = painter.layout_no_wrap(buf.clone(), font::numeric_xl(), color::TEXT);
             let w = (g.size().x + 48.0).max(140.0);

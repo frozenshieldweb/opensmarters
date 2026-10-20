@@ -12,10 +12,15 @@
 //! provider would then drop the connection. Instead, the paused position moves forward
 //! ([`NUDGE`] at a time) so the stream keeps flowing and the oldest part is dropped;
 //! playing again resumes at the oldest point still held, and the controller says so.
+//!
+//! The controller API (`live_view`, `live_seek`, `go_live`, `can_rewind_live`) is at the
+//! end of this file; the per-frame part runs in [`super::stream`].
 
 use std::time::Instant;
 
-use opensmarters_player::PlayerState;
+use opensmarters_player::{PlayerState, StreamTuning};
+
+use super::PlaybackController;
 
 /// Closer than this to live counts as live.
 pub const AT_LIVE: f64 = 1.5;
@@ -75,6 +80,12 @@ impl LiveView {
         let start = self.live - span;
         let f = |t: f64| (((t - start) / span) as f32).clamp(0.0, 1.0);
         (f(self.oldest), f(self.pos))
+    }
+
+    /// The position at fraction `frac` (0..=1) of the bar (a click on it).
+    pub fn time_at(&self, frac: f64) -> f64 {
+        let span = self.window.max(self.live - self.oldest).max(1.0);
+        self.live - span + span * frac.clamp(0.0, 1.0)
     }
 }
 
@@ -188,6 +199,90 @@ impl Timeshift {
             live: pos + self.behind,
             window: window.unwrap_or(0.0),
         })
+    }
+}
+
+/// Distance kept from the newest data when moving forward on live TV: the stream's start
+/// buffer, at least 1 s (so playback doesn't rebuffer at once).
+pub fn live_lead(t: &StreamTuning) -> f64 {
+    t.start_buffer.as_secs_f64().max(1.0)
+}
+
+/// What a live seek did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveSeek {
+    /// Moved.
+    Moved,
+    /// Already at live (nothing newer).
+    AtLive,
+    /// Already at the oldest point held.
+    AtOldest,
+    /// Nothing to seek in (nothing buffered yet, reconnecting, not live).
+    Unavailable,
+}
+
+impl PlaybackController {
+    /// The live rewind state for the OSD (live items with a buffered range only).
+    pub fn live_view(&self) -> Option<LiveView> {
+        let a = self.active.as_ref()?;
+        if !a.req.kind.is_live() || a.retry_at.is_some() || a.load_at.is_some() {
+            return None;
+        }
+        let window = self.tuning.rewind_window().map(|w| w.as_secs_f64());
+        a.stream.timeshift.view(&self.state(), window)
+    }
+
+    /// Whether ←/→ move in time on live TV ("Rewind live TV" is on).
+    pub fn can_rewind_live(&self) -> bool {
+        self.tuning.rewind_minutes > 0
+    }
+
+    /// Seeks a live stream by `delta` seconds inside its buffer (the rewind window).
+    pub fn live_seek(&mut self, delta: f64) -> LiveSeek {
+        let (Some(e), Some(a)) = (&self.engine, &mut self.active) else {
+            return LiveSeek::Unavailable;
+        };
+        if !a.req.kind.is_live() || a.retry_at.is_some() || a.load_at.is_some() {
+            return LiveSeek::Unavailable;
+        }
+        let st = e.player.state();
+        let Some(pos) = st.time_pos else {
+            return LiveSeek::Unavailable;
+        };
+        let ts = &mut a.stream.timeshift;
+        match Timeshift::seek_target(&st, delta, live_lead(&a.stream.tuning)) {
+            Some(target) => {
+                let _ = e.player.seek_absolute(target);
+                ts.on_seek(pos, target);
+                LiveSeek::Moved
+            }
+            None if delta > 0.0 => {
+                // Nothing newer is held: this is live.
+                ts.set_live();
+                LiveSeek::AtLive
+            }
+            None if st.cache.range_at(pos).is_some() => LiveSeek::AtOldest,
+            None => LiveSeek::Unavailable,
+        }
+    }
+
+    /// Back to live: seeks forward by the delay and plays. Returns false when already
+    /// live.
+    pub fn go_live(&mut self) -> bool {
+        let (Some(e), Some(a)) = (&self.engine, &mut self.active) else {
+            return false;
+        };
+        let ts = &mut a.stream.timeshift;
+        if !a.req.kind.is_live() || ts.is_live() {
+            return false;
+        }
+        let st = e.player.state();
+        if let Some(target) = ts.live_target(&st, live_lead(&a.stream.tuning)) {
+            let _ = e.player.seek_absolute(target);
+        }
+        ts.set_live();
+        let _ = e.player.play();
+        true
     }
 }
 

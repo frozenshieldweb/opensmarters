@@ -24,6 +24,7 @@ known residual risks, and a checklist to re-verify all of it.
 | Parental PIN | SQLite, Argon2id PHC hash only | Keeps locked categories from a child; people reuse PINs |
 | Stream / API URLs | Memory only (`PlayableUrl`, `url::Url`) | Every Xtream stream URL embeds username and password |
 | Viewing history, favourites | SQLite (plain) | Private, not secret |
+| Recordings, downloads, clips | The recordings folder (default `Videos\opensmarters`), job list in SQLite (ids, titles, file names; never URLs) | Private, not secret; the folder is a place the app writes provider bytes to |
 | The PC itself | — | A media player must not become a code-execution vector |
 
 Usernames and server URLs are stored in SQLite (not secret on their own, but never logged
@@ -100,9 +101,11 @@ decoders parse provider-controlled bytes in C. Everything before it is memory-sa
 | Images | `image` crate (png, jpeg; pure Rust) | 10 MiB download, 8192 px per side, 256 MiB decode allocation, 6 concurrent, downscaled to ≤ 1920 px | `crates/app/src/services/images.rs` |
 | mpv node trees | `NodeOut::from_raw` | depth 16, 4096 items | `crates/player/src/node.rs` |
 | Backup import | serde + store validation | 64 MiB, 1000 profiles, 100 k favourites/profile, all-or-nothing transaction | `crates/store/src/export.rs` |
+| Media downloads / recordings | `download::Downloader` (streaming) | connect 10 s, read-idle 30 s, no overall deadline (live); ≤ 5 redirects, http(s) only, never https → http; identity encoding; `206` checked against `Content-Range`; no size cap but a free-space guard | `crates/core/src/download.rs` |
+| HLS playlists (recording HLS-only channels) | `hls::parse` | 4 MiB, 16 KiB/line, 20 000 segments (newest kept), 256 variants, 8 KiB/URI; web URIs only; encrypted / byte-range streams refused | `crates/core/src/hls.rs` |
 
 Robustness: `proptest` suites run in `cargo test` (`crates/core/tests/robustness.rs`) and
-three `cargo-fuzz` targets exist (`fuzz/fuzz_targets/{m3u,xmltv,xtream_json}.rs`).
+four `cargo-fuzz` targets exist (`fuzz/fuzz_targets/{m3u,xmltv,xtream_json,hls}.rs`).
 
 ### 4.3 Playback (libmpv) hardening
 
@@ -238,6 +241,47 @@ page is created.
   pinned and checked before extraction; nothing is extracted on mismatch.
 - The fake panel is dev-only and compiled into the app only with `--features demo`.
 
+### 4.10 Recordings and downloads (writing provider bytes to disk)
+
+Phase 7 lets the app save what a provider sends: films and episodes for offline viewing,
+live recordings, and clips from the player's buffer (`crates/app/src/dvr/`). The provider
+controls the bytes, the titles that become file names, the HTTP answers and the playlists.
+
+- **Where files go:** only the recordings folder (a user setting, default
+  `Videos\opensmarters`; `--ephemeral` uses a temporary folder). Every path is
+  `folder/<bare name>` (`dvr::files::path_in`); nothing else is created, renamed or deleted.
+- **Names:** built only by `dvr::file_name` / `dvr::files::download_name`: provider text
+  reduced to letters, digits, spaces and `- _ ( ) ' , &`, capped at 100 characters,
+  reserved device names prefixed, a fixed extension from a short list. Checked again by
+  the store (`recordings::validate_file_name`) and, for files mpv writes, by
+  `MediaOutput::new` (no separators, `..`, `:`, `%`, control characters; `.ts/.mkv/.mp4`).
+- **Never overwrite:** a new `.part` is created with `create_new`; names are made unique
+  against the database, final files and `.part` files; mpv only writes a `MediaOutput`
+  (a file that doesn't exist yet). Deletion removes only regular files (not folders or
+  links) named by a valid name.
+- **Content check before keeping anything:** the first 4 KiB must be a known container
+  (`opensmarters_player::sniff_container`: TS, MKV/WebM, MP4/MOV, AVI, FLV, MPEG-PS, ASF).
+  An HTML page, a playlist or anything else deletes the part file and fails with "The
+  provider sent something that isn't a video". HLS segments are checked one by one (TS
+  sync bytes / ISO-BMFF boxes); bad segments are skipped. Saved files play only through
+  `PlayableUrl::from_owned_media` (inside the folder, sniffed again), so a "film" that is
+  really a playlist can't make mpv open other files or URLs.
+- **No URLs on disk:** rows hold provider ids; stream URLs (with credentials) are rebuilt
+  from the profile when a job starts and never stored or logged unredacted.
+- **Network:** connect and read-idle timeouts, redirects only to `http`/`https` (at most
+  5, never from `https` down to `http`), `Range` resumes validated against `Content-Range`
+  (a mismatch restarts the file; a server that ignores the range sends it again from 0).
+  No response size cap (a film is gigabytes), but jobs stop when free space drops below
+  the "keep free" setting (2 GB by default).
+- **HLS:** playlists are hostile input (capped, fuzzed, web URIs only, resolved against
+  the playlist's own address); encrypted streams are refused rather than half-supported.
+- **Connections:** every job holds a lease of the connection budget, so recording never
+  pushes the account over `max_connections`; clips use the player's buffer (no extra
+  connection).
+- **Residual:** saved files are later parsed by FFmpeg when played (the same risk as
+  streaming them); a provider can fill the disk up to the guard; segment URLs may point
+  to other hosts or use plain `http` from an `https` playlist (as when mpv plays HLS).
+
 ### 4.9 Windows specifics
 
 - **libmpv location**: absolute paths only — `PlayerConfig::libmpv_path`, the executable's
@@ -356,6 +400,11 @@ grep -rn "forbid(unsafe_code)" crates --include=*.rs                # core, stor
 cd fuzz && cargo +nightly fuzz run m3u -- -max_total_time=300
 cargo +nightly fuzz run xmltv -- -max_total_time=300
 cargo +nightly fuzz run xtream_json -- -max_total_time=300
+cargo +nightly fuzz run hls -- -max_total_time=300
+
+# Recordings and downloads: Range resume, redirects, timeouts, HTML/playlist bodies refused
+cargo test -p opensmarters-core --test download
+cargo test -p opensmarters --all-features --test dvr
 ```
 
 **End-to-end log check** (synthetic credentials only; the fake panel's `special` user has

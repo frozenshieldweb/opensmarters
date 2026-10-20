@@ -45,3 +45,12 @@ This tracks the phases in [BUILD_PROMPT.md](BUILD_PROMPT.md#7-how-to-work).
 - App (3a) follow-ups: Home backdrop crossfade on focus; M3U EPG uses the first `url-tvg` only; compact breakpoint (< 960 pt) keeps the collapsed rail instead of a top bar.
 - 4C follow-ups: Movies/Series PIN prompts must use `session.pin_length()` (or `PinPrompt`); Search should record queries via `services::search_history`; TMDB is only a setting + key so far (no detail-page enrichment); hardware decoding and the buffer apply at the next launch (the player crate has no runtime setter); third-party licence *texts* for release packages are still to be generated (Phase 5).
 - Real-provider findings already handled in the app: one stream at a time (stop before load, debounced zapping), live reconnect 2/5/10/30/30 s, connection-limit message from `account_info()` after a stream failure, subtitles off by default, live OSD without scrubber, catalogue titles (never mpv's media title), catch-up failure message, Home never fetches the VOD/series "All" lists, decorative symbols mapped (★ ➤) and CJK/Arabic/superscripts via the OS font fallback.
+- Phase 7B (recording & downloads) follow-ups:
+  - "Record through the player" (no connection free, the user watches that channel) stops when they change channel and doesn't hand over to a connection that frees later; the rest of the programme isn't recorded.
+  - Recording an HLS stream keeps audio only when it is muxed into the video variant; separate audio renditions, byte-range segments and encrypted streams are refused with a message.
+  - The clip length shown is an estimate (what played since the stream (re)started); mpv's back buffer may hold less, and `dump-cache` then saves less. The real length shows once the clip is played.
+  - Downloads resume from the `.part` length and check `Content-Range`, but not an `ETag`/`Last-Modified` (a provider replacing the file between two runs with one of the same size would mix them).
+  - The Scheduled tab lists recordings scheduled from the Guide (stream C adds the Guide's Record menu); in this branch it was checked with tests, not in the app.
+  - Free space uses `fs4` (added to the app crate; MIT/Apache-2.0, no new transitive crates).
+  - `--ephemeral` runs save into `%TEMP%\opensmarters-ephemeral\recordings`, which nothing cleans up.
+  - `cargo +nightly fuzz build` doesn't link on this Windows/MSVC toolchain (`__stop___sancov_pcs`) for any target, so the new `hls` target was type-checked (`cargo +nightly check`) but not run.

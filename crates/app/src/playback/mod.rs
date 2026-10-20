@@ -7,32 +7,47 @@
 //!   everything). The previous stream is always stopped before the next one is loaded,
 //!   and zapping is debounced ([`ZAP_DEBOUNCE`]): pressing channel-up five times opens one
 //!   stream, not five.
-//! - **Live reconnect** with backoff ([`RETRY_DELAYS`]: 2, 5, 10, 30, 30 s, then give up)
-//!   on `EndFile(Error)`, on `EndFile(Eof)` (the server closed the stream) and on stalls
-//!   (no progress for [`STALL_AFTER`]). The status shows "Reconnecting… (n)".
+//! - **Stream health** ([`tracker`], pure and unit-tested): a live stream whose position
+//!   stops advancing for [`tracker::STALL_AFTER`] (while not paused) is stopped and
+//!   reconnected ("Stream stalled — reconnecting…"); `EndFile(Error)` and a live
+//!   `EndFile(Eof)` (the server closed the stream) reconnect too. One reconnect is pending
+//!   at a time, with backoff ([`tracker::RETRY_DELAYS`]: 2, 5, 10, 30, 30 s, then give up);
+//!   the counter resets after 30 s of continuous progress, and a live stream that ends
+//!   cleanly after real playback reconnects at the first delay. The status shows
+//!   "Reconnecting… (n)".
+//! - **Load generations:** mpv events are tied to the load that caused them
+//!   ([`tracker::LoadGuard`]); late events of the previous stream are ignored.
 //! - **Connection limit:** when a stream fails on an Xtream account, the account info is
 //!   fetched (an API call, not a stream); if `active_cons >= max_connections` the UI shows
 //!   [`PlaybackController::notice`] ("Connection limit reached (3/3) …") instead of a
 //!   generic error.
-//! - **Subtitles are off by default** (mpv would auto-select embedded closed captions on
-//!   live channels). For VOD, the preferred subtitle language (Settings → Playback) or a
-//!   language the user picked in the track sheet is used; the preferred **audio** language
-//!   is selected when a stream has it (see [`tracks`]).
+//! - **Tracks:** every load starts from mpv's automatic audio choice and subtitles off
+//!   (a choice never leaks from one stream into the next). Then the language the user
+//!   picked in this run (track sheet, A/S keys), else Settings → Playback, is selected
+//!   when the stream has it; live subtitles stay off (see [`tracks`]).
 //! - **Hardware decoding and the network buffer** come from Settings → Playback
 //!   ([`PlayerTuning`]) and apply when the player starts.
-//! - **VOD end of file = finished**, not an error: the resume point is marked finished.
-//!   A finished episode offers the next one ([`next`]: `up_next`, `play_up_next`).
-//! - **Progress** of movies/episodes/catch-up is saved every [`SAVE_EVERY`] and when
-//!   playback stops or switches.
+//! - **VOD end of file** is *finished* only near the end ([`tracker::vod_end`]); an
+//!   earlier end is a dropped connection and resumes from the last position (bounded
+//!   backoff), so the resume point survives. A finished episode offers the next one
+//!   ([`next`]: `up_next`, `play_up_next`).
+//! - **Progress** of movies/episodes/catch-up is saved every [`SAVE_EVERY`], when playback
+//!   stops or switches, and synchronously on exit ([`PlaybackController::destroy`]).
+//! - **Zap banner:** every live channel change (and a refused zap at the ends of the list)
+//!   raises [`PlaybackController::banner`] for [`BANNER_FOR`]; screens draw it.
+//! - **The last frame stays up** (under the screens' scrim and spinner) while the next
+//!   live channel or a reconnect opens, instead of going black.
 //! - **Recent channels** are recorded when a live channel starts.
 //! - **mpv log lines are redacted** with the app-wide redactor before they are logged.
 //! - **Aspect/zoom** (`VideoFit`) persists across streams and restarts.
 //!
-//! Shutdown: [`PlaybackController::destroy`] from `eframe::App::on_exit` (frees the render
-//! context while GL is current), then the player is dropped.
+//! Shutdown: [`PlaybackController::destroy`] from `eframe::App::on_exit` (saves progress,
+//! frees the render context while GL is current), then the player is dropped.
 
+pub mod keys;
 pub mod next;
 pub mod request;
+pub mod tracker;
 pub mod tracks;
 
 use std::sync::Arc;
@@ -41,30 +56,35 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use opensmarters_core::{DEFAULT_USER_AGENT, Redactor};
 use opensmarters_player::{
-    EndReason, Hwdec, LoadOptions, LogLevel, Player, PlayerConfig, PlayerEvent, PlayerState,
+    EndReason, Hwdec, LoadOptions, LogLevel, Op, Player, PlayerConfig, PlayerEvent, PlayerState,
     TrackKind, TrackSelection, UserAgent, VideoFit, VideoView,
 };
 use opensmarters_store::{ItemSnapshot, PlaybackSnapshot};
 
 pub use request::{
-    MediaKind, PlaybackItem, PlaybackRequest, StreamHeaders, ZapContext, stream_headers,
+    MediaKind, PlaybackItem, PlaybackRequest, StreamHeaders, ZapContext, ZapEdge, stream_headers,
 };
+pub use tracker::RETRY_DELAYS;
 pub use tracks::{BufferPreset, PlayerTuning};
 
 use crate::services::Session;
+use crate::services::catalog::LiveChannel;
+use tracker::{Cause, LoadGuard, ProgressTracker, Reconnector, Schedule, VodEnd};
 
-/// Reconnect delays (seconds) for successive attempts; after the last one we give up.
-pub const RETRY_DELAYS: [u64; 5] = [2, 5, 10, 30, 30];
-/// Maximum reconnect attempts before giving up.
-pub const MAX_RETRIES: u32 = RETRY_DELAYS.len() as u32;
+/// Maximum reconnect attempts for a live channel before giving up.
+pub const MAX_RETRIES: u32 = tracker::LIVE_MAX_RETRIES;
 /// Zapping waits this long for further channel changes before opening a stream.
 pub const ZAP_DEBOUNCE: Duration = Duration::from_millis(450);
 /// Minimum time between two account checks after stream failures.
 pub const LIMIT_CHECK_EVERY: Duration = Duration::from_secs(10);
 /// Progress save interval.
 pub const SAVE_EVERY: Duration = Duration::from_secs(10);
-/// A live stream with no progress for this long is reloaded.
-pub const STALL_AFTER: Duration = Duration::from_secs(20);
+/// A live stream with no progress for this long is reconnected.
+pub const STALL_AFTER: Duration = tracker::STALL_AFTER;
+/// How long the zap banner stays up (plus its fade-out).
+pub const BANNER_FOR: Duration = Duration::from_secs(3);
+/// Fade in/out of the zap banner.
+pub const BANNER_FADE: Duration = Duration::from_millis(200);
 
 /// What the player is doing (for overlays and status text).
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +112,36 @@ pub enum PlaybackStatus {
     Unavailable(String),
 }
 
+/// The zap banner's state ([`PlaybackController::banner`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Banner {
+    /// When it was raised.
+    pub since: Instant,
+    /// Set when a zap was refused at an end of the list.
+    pub edge: Option<ZapEdge>,
+}
+
+impl Banner {
+    /// Opacity 0..=1 at `now` (200 ms fade in and out around [`BANNER_FOR`]).
+    pub fn alpha(&self, now: Instant) -> f32 {
+        let age = now.saturating_duration_since(self.since).as_secs_f32();
+        let fade = BANNER_FADE.as_secs_f32();
+        let total = BANNER_FOR.as_secs_f32() + fade;
+        ((age / fade).min(1.0) * ((total - age) / fade).min(1.0)).clamp(0.0, 1.0)
+    }
+}
+
+/// What a zap did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZapOutcome {
+    /// Switching to this channel (name), after the debounce.
+    Zapped(String),
+    /// Already at this end of the list; nothing changed.
+    Edge(ZapEdge),
+    /// No zap list, or the channel can't be played.
+    Unavailable,
+}
+
 struct Engine {
     player: Player,
     video: VideoView,
@@ -100,17 +150,49 @@ struct Engine {
 struct Active {
     req: PlaybackRequest,
     session: Arc<Session>,
-    retries: u32,
-    retry_at: Option<Instant>,
+    reconnect: Reconnector,
+    tracker: ProgressTracker,
     last_save: Instant,
     last_pos: Option<f64>,
-    last_advance: Instant,
+    duration: Option<f64>,
     finished: bool,
     failed: Option<String>,
+    /// Some load of this item reached `FileLoaded`.
     loaded_once: bool,
+    /// The current load reached `FileLoaded`.
+    file_loaded: bool,
+    /// The current load reached `PlaybackRestart` (frames are coming).
+    started: bool,
     /// Deferred start (debounced zapping).
     load_at: Option<Instant>,
     subs_applied: bool,
+}
+
+impl Active {
+    fn new(req: PlaybackRequest, session: Arc<Session>, load_at: Option<Instant>) -> Self {
+        let now = Instant::now();
+        let max = if req.kind.is_live() {
+            tracker::LIVE_MAX_RETRIES
+        } else {
+            tracker::VOD_MAX_RETRIES
+        };
+        Self {
+            req,
+            session,
+            reconnect: Reconnector::new(max),
+            tracker: ProgressTracker::new(now),
+            last_save: now,
+            last_pos: None,
+            duration: None,
+            finished: false,
+            failed: None,
+            loaded_once: false,
+            file_loaded: false,
+            started: false,
+            load_at,
+            subs_applied: false,
+        }
+    }
 }
 
 /// The user's subtitle preference for VOD in this run.
@@ -137,8 +219,17 @@ pub struct PlaybackController {
     sub_pref: SubPref,
     /// The playing episode's series, for "Next episode" (see [`next`]).
     queue: Arc<std::sync::Mutex<Option<next::EpisodeQueue>>>,
+    /// Settings → Playback audio language.
     audio_pref: Option<String>,
+    /// The audio language picked in this run (track sheet, A key); wins over the setting.
+    audio_choice: Option<String>,
+    /// The settings last applied by [`set_track_prefs`](Self::set_track_prefs).
+    track_settings: Option<(Option<String>, Option<String>)>,
     tuning: PlayerTuning,
+    guard: LoadGuard,
+    banner: Option<Banner>,
+    /// Counts finished items (keys the next-episode countdown).
+    finishes: u64,
 }
 
 impl std::fmt::Debug for PlaybackController {
@@ -191,10 +282,10 @@ impl PlaybackController {
                         tracing::info!(mpv = player.mpv_version(), "player ready");
                         let fit_index = usize::from(fit_index).min(VideoFit::PRESETS.len() - 1);
                         let _ = player.set_video_fit(VideoFit::PRESETS[fit_index].1);
-                        Some(Engine {
-                            player,
-                            video: VideoView::new(gpa),
-                        })
+                        let video = VideoView::new(gpa);
+                        // Keep the last picture up while the next channel opens.
+                        video.set_hold_last_frame(true);
+                        Some(Engine { player, video })
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "libmpv unavailable");
@@ -217,7 +308,12 @@ impl PlaybackController {
             sub_pref: SubPref::Off,
             queue: Arc::default(),
             audio_pref: None,
+            audio_choice: None,
+            track_settings: None,
             tuning,
+            guard: LoadGuard::default(),
+            banner: None,
+            finishes: 0,
         }
     }
 
@@ -228,10 +324,19 @@ impl PlaybackController {
 
     /// Sets the preferred audio and subtitle languages (Settings → Playback; codes as
     /// stored in the preferences, `None` = stream default / off). Applies to the next
-    /// stream; a track-sheet choice still overrides the subtitle language for the run.
+    /// stream. Called whenever preferences are saved: only a *changed* setting replaces
+    /// the languages picked in the track sheet during this run.
     pub fn set_track_prefs(&mut self, audio: Option<String>, subtitles: Option<String>) {
-        self.audio_pref = audio;
-        self.sub_pref = subtitles.map_or(SubPref::Off, SubPref::Lang);
+        let new = (audio, subtitles);
+        let old = self.track_settings.replace(new.clone());
+        let (audio, subtitles) = new;
+        if old.as_ref().is_none_or(|(a, _)| *a != audio) {
+            self.audio_pref = audio;
+            self.audio_choice = None;
+        }
+        if old.as_ref().is_none_or(|(_, s)| *s != subtitles) {
+            self.sub_pref = subtitles.map_or(SubPref::Off, SubPref::Lang);
+        }
     }
 
     /// True if libmpv loaded.
@@ -276,6 +381,16 @@ impl PlaybackController {
         }
     }
 
+    /// The playing live channel, from the zap list (`None` without one).
+    pub fn live_channel(&self) -> Option<&LiveChannel> {
+        let key = self.live_key()?;
+        self.request()?
+            .zap
+            .as_ref()?
+            .current()
+            .filter(|c| c.key == key)
+    }
+
     /// A snapshot of mpv's state (default when unavailable).
     pub fn state(&self) -> PlayerState {
         self.engine
@@ -302,18 +417,22 @@ impl PlaybackController {
         if a.finished {
             return PlaybackStatus::Finished;
         }
-        if a.retry_at.is_some() {
-            return PlaybackStatus::Reconnecting { attempt: a.retries };
+        if a.reconnect.pending().is_some() {
+            return PlaybackStatus::Reconnecting {
+                attempt: a.reconnect.attempts(),
+            };
         }
-        if a.load_at.is_some() {
+        if a.load_at.is_some() || engine.player.has_pending_load() {
             return PlaybackStatus::Opening;
         }
         let st = engine.player.state();
-        if st.loading || (!st.file_loaded && !a.loaded_once) || engine.player.has_pending_load() {
-            PlaybackStatus::Opening
-        } else if st.paused_for_cache
-            || (st.file_loaded && !st.has_video() && st.time_pos.is_none())
-        {
+        if !a.started {
+            if a.file_loaded && st.paused_for_cache {
+                PlaybackStatus::Buffering
+            } else {
+                PlaybackStatus::Opening
+            }
+        } else if st.paused_for_cache {
             PlaybackStatus::Buffering
         } else if st.paused {
             PlaybackStatus::Paused
@@ -322,12 +441,57 @@ impl PlaybackController {
         }
     }
 
+    /// The text for a pending reconnect: "Stream stalled — reconnecting…" after a stall,
+    /// else "Reconnecting… (n)".
+    pub fn reconnect_message(&self) -> Option<String> {
+        let a = self.active.as_ref()?;
+        a.reconnect.pending()?;
+        Some(match a.reconnect.cause() {
+            Some(Cause::Stalled) => "Stream stalled \u{2014} reconnecting\u{2026}".to_owned(),
+            _ => format!("Reconnecting\u{2026} ({})", a.reconnect.attempts()),
+        })
+    }
+
+    /// True while the screen should show "opening" over the held last frame: a zap or
+    /// reconnect is in progress.
+    pub fn is_switching(&self) -> bool {
+        matches!(
+            self.status(),
+            PlaybackStatus::Opening
+                | PlaybackStatus::Buffering
+                | PlaybackStatus::Reconnecting { .. }
+        )
+    }
+
     /// A message to show next to the status, e.g. "Connection limit reached (3/3) — …".
     pub fn notice(&self) -> Option<String> {
         self.notice
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// The zap banner, while it is up (any live channel change, or a refused zap at an
+    /// end of the list). Draw it with `widgets::zap_banner`.
+    pub fn banner(&self) -> Option<Banner> {
+        self.banner
+            .filter(|b| b.since.elapsed() < BANNER_FOR + BANNER_FADE)
+            .filter(|_| self.live_key().is_some())
+    }
+
+    /// Shows the zap banner for the playing channel again (Info key).
+    pub fn show_banner(&mut self) {
+        if self.live_key().is_some() {
+            self.banner = Some(Banner {
+                since: Instant::now(),
+                edge: None,
+            });
+        }
+    }
+
+    /// Hides the zap banner (the full OSD took over).
+    pub fn hide_banner(&mut self) {
+        self.banner = None;
     }
 
     /// Plays `req` now (saving the progress of what was playing and stopping its stream
@@ -342,33 +506,50 @@ impl PlaybackController {
         self.start(session, req, Some(Instant::now() + delay));
     }
 
+    /// Stops the player's current stream on purpose (its late events are ignored).
+    fn stop_stream(&mut self) {
+        if let Some(e) = &self.engine {
+            if e.player.has_pending_load() {
+                self.guard.withdrawn();
+            }
+            let _ = e.player.stop();
+        }
+        self.guard.abandon();
+    }
+
     fn start(&mut self, session: Arc<Session>, req: PlaybackRequest, load_at: Option<Instant>) {
         self.save_progress(true);
+        let prev = self
+            .active
+            .as_ref()
+            .map(|a| (a.req.kind, a.req.item.clone()));
         // Free the provider connection before opening another one.
-        if self.active.is_some()
-            && let Some(e) = &self.engine
-        {
-            let _ = e.player.stop();
+        if prev.is_some() {
+            self.stop_stream();
+        }
+        // Live → live keeps the old picture (under a scrim) until the new one arrives;
+        // anything else starts from black.
+        let zapping = req.kind.is_live() && prev.as_ref().is_some_and(|(k, _)| k.is_live());
+        if !zapping && let Some(e) = &self.engine {
+            e.video.forget_frame();
+        }
+        let same = prev
+            .as_ref()
+            .is_some_and(|(_, item)| item.same_item(&req.item));
+        if req.kind.is_live() && !same {
+            self.banner = Some(Banner {
+                since: Instant::now(),
+                edge: None,
+            });
+        } else if !req.kind.is_live() {
+            self.banner = None;
         }
         *self
             .notice
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         tracing::debug!(kind = ?req.kind, "play");
-        self.active = Some(Active {
-            req,
-            session,
-            retries: 0,
-            retry_at: None,
-            last_save: Instant::now(),
-            last_pos: None,
-            last_advance: Instant::now(),
-            finished: false,
-            failed: None,
-            loaded_once: false,
-            load_at,
-            subs_applied: false,
-        });
+        self.active = Some(Active::new(req, session, load_at));
         self.sync_episode_queue();
         if let Some(at) = load_at {
             self.ctx
@@ -403,27 +584,50 @@ impl PlaybackController {
                     s.recent_live().touch(profile, &key, &snapshot)
                 });
         }
+        // Start every stream from mpv's own audio choice and no subtitles: a track id
+        // picked for the previous stream means nothing in this one. The language policy
+        // runs once the new tracks are known.
+        let _ = engine.player.select_audio(TrackSelection::Auto);
+        let _ = engine.player.select_subtitle(TrackSelection::Off);
         let opts = LoadOptions {
             user_agent: a.req.headers.user_agent.clone(),
             referrer: a.req.headers.referrer.clone(),
             start,
         };
         tracing::info!(kind = ?a.req.kind, resume = ?start, "opening stream");
-        if let Err(e) = engine.player.load(&a.req.url, &opts) {
-            tracing::warn!(error = %e, "load refused");
-            a.failed = Some(crate::error::AppError::from(e).user_message());
+        let was_held = engine.player.has_pending_load();
+        match engine.player.load(&a.req.url, &opts) {
+            Ok(()) => {
+                // A held load (no video view yet) replacing another held one adds no
+                // StartFile.
+                if !(was_held && engine.player.has_pending_load()) {
+                    self.guard.issued();
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "load refused");
+                a.failed = Some(crate::error::AppError::from(e).user_message());
+            }
         }
         let _ = engine.player.play();
-        a.last_advance = Instant::now();
+        let now = Instant::now();
+        a.tracker.reset(now);
+        a.file_loaded = false;
+        a.started = false;
+        a.subs_applied = false;
     }
 
     /// Stops playback (saving progress).
     pub fn stop(&mut self) {
         self.save_progress(true);
+        if self.active.is_some() {
+            self.stop_stream();
+        }
         if let Some(e) = &self.engine {
-            let _ = e.player.stop();
+            e.video.forget_frame();
         }
         self.active = None;
+        self.banner = None;
     }
 
     /// Restarts the current item from the beginning (Replay).
@@ -431,8 +635,7 @@ impl PlaybackController {
         if let Some(a) = &mut self.active {
             a.finished = false;
             a.failed = None;
-            a.retries = 0;
-            a.retry_at = None;
+            a.reconnect.reset();
             a.last_pos = Some(0.0);
             a.req.resume_from = None;
         }
@@ -454,7 +657,22 @@ impl PlaybackController {
         self.select_subtitle(sel);
     }
 
-    fn apply_subtitle_policy(&mut self) {
+    /// Selects an audio track chosen by the user and remembers its language for the next
+    /// streams of this run (the track id itself is never carried over).
+    pub fn choose_audio(&mut self, sel: TrackSelection) {
+        if let TrackSelection::Id(id) = sel
+            && let Some(lang) = self
+                .state()
+                .audio_tracks()
+                .find(|t| t.id == id)
+                .and_then(|t| t.lang.clone())
+        {
+            self.audio_choice = Some(lang);
+        }
+        self.select_audio(sel);
+    }
+
+    fn apply_track_policy(&mut self) {
         let (Some(engine), Some(a)) = (&self.engine, &mut self.active) else {
             return;
         };
@@ -472,9 +690,14 @@ impl PlaybackController {
         };
         let subs = tracks::pick_subtitle(&st.tracks, pref, a.req.kind.is_live());
         let _ = engine.player.select_subtitle(subs);
-        if let Some(id) = tracks::pick_audio(&st.tracks, self.audio_pref.as_deref()) {
+        let audio = self.audio_choice.as_deref().or(self.audio_pref.as_deref());
+        if let Some(id) = tracks::pick_audio(&st.tracks, audio) {
             tracing::debug!(id, "selecting the preferred audio language");
             let _ = engine.player.select_audio(TrackSelection::Id(id));
+        }
+        // A radio channel has no picture: don't keep the previous channel's on screen.
+        if !st.tracks.iter().any(|t| t.kind == TrackKind::Video) {
+            engine.video.forget_frame();
         }
     }
 
@@ -518,8 +741,7 @@ impl PlaybackController {
     pub fn retry(&mut self) {
         if let Some(a) = &mut self.active {
             a.failed = None;
-            a.retries = 0;
-            a.retry_at = None;
+            a.reconnect.reset();
         }
         self.load_current(false);
     }
@@ -530,6 +752,7 @@ impl PlaybackController {
             return;
         };
         let mut ended: Option<EndReason> = None;
+        let mut loaded = false;
         let mut restarted = false;
         for ev in engine.player.poll_events() {
             match ev {
@@ -544,15 +767,39 @@ impl PlaybackController {
                         _ => tracing::debug!(target: "mpv", "{prefix}: {text}"),
                     }
                 }
-                PlayerEvent::EndFile(reason) => ended = Some(reason),
-                PlayerEvent::PlaybackRestart | PlayerEvent::FileLoaded => restarted = true,
+                PlayerEvent::StartFile => self.guard.started(),
+                PlayerEvent::QueueOverflow => {
+                    tracing::debug!("mpv event queue overflowed");
+                    self.guard.resync();
+                }
+                PlayerEvent::CommandFailed {
+                    op: Op::Load,
+                    error,
+                } => {
+                    tracing::info!(%error, "mpv refused the stream");
+                    self.guard.withdrawn();
+                    if self.guard.is_current() {
+                        ended = Some(EndReason::Error(error));
+                    }
+                }
                 PlayerEvent::CommandFailed { op, error } => {
                     tracing::debug!(?op, %error, "mpv command failed");
                 }
+                PlayerEvent::EndFile(_)
+                | PlayerEvent::FileLoaded
+                | PlayerEvent::PlaybackRestart
+                    if !self.guard.is_current() =>
+                {
+                    tracing::debug!(?ev, "ignoring an event of the previous stream");
+                }
+                PlayerEvent::EndFile(reason) => ended = Some(reason),
+                PlayerEvent::FileLoaded => loaded = true,
+                PlayerEvent::PlaybackRestart => restarted = true,
                 _ => {}
             }
         }
         let st = engine.player.state();
+        let held_load = engine.player.has_pending_load();
         let now = Instant::now();
         // Debounced start.
         if let Some(at) = self.active.as_ref().and_then(|a| a.load_at) {
@@ -561,19 +808,20 @@ impl PlaybackController {
                     a.load_at = None;
                 }
                 self.load_current(true);
-            } else {
-                self.ctx.request_repaint_after(at - now);
                 return;
             }
-        }
-        if restarted {
-            self.apply_subtitle_policy();
+            self.ctx.request_repaint_after(at - now);
+            return;
         }
         let Some(a) = &mut self.active else {
             return;
         };
-        if restarted {
+        if loaded || restarted {
+            a.file_loaded = true;
             a.loaded_once = true;
+        }
+        if restarted {
+            a.started = true;
             if st.time_pos.is_some_and(|p| p > 0.5) || a.req.kind.is_live() {
                 *self
                     .notice
@@ -581,50 +829,88 @@ impl PlaybackController {
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             }
         }
-        // Progress tracking.
-        if let Some(pos) = st.time_pos {
-            if a.last_pos.is_none_or(|p| (p - pos).abs() > 0.2) {
-                a.last_advance = now;
-                if a.retry_at.is_none() && pos > 1.0 {
-                    a.retries = 0;
+        if loaded || restarted {
+            self.apply_track_policy();
+        }
+        let Some(a) = &mut self.active else {
+            return;
+        };
+
+        // Progress tracking (only the current load's position counts).
+        let healthy_now = a.reconnect.pending().is_none() && a.failed.is_none() && !a.finished;
+        if healthy_now {
+            if a.file_loaded {
+                a.tracker.observe(st.time_pos, st.paused || held_load, now);
+                if let Some(pos) = st.time_pos {
+                    a.last_pos = Some(pos);
                 }
+                if let Some(d) = st.duration.filter(|d| *d > 0.0) {
+                    a.duration = Some(d);
+                }
+                a.reconnect.note_progress(a.tracker.progressing_for(now));
+            } else if held_load || st.paused {
+                a.tracker.observe(None, true, now);
             }
-            a.last_pos = Some(pos);
-        } else if st.paused || st.idle {
-            a.last_advance = now;
         }
-        if st.paused {
-            a.last_advance = now;
-        }
+        let played = a.tracker.progressing_for(now);
 
         let mut finished_now = false;
-        let failed_now = matches!(ended, Some(EndReason::Error(_)));
+        let mut failed_now = false;
+        let live = a.req.kind.is_live();
         match ended {
-            Some(EndReason::Eof) if !a.req.kind.is_live() => {
-                a.finished = true;
-                finished_now = true;
+            None | Some(EndReason::Stop | EndReason::Quit | EndReason::Redirect) => {}
+            Some(EndReason::Eof) if live => {
+                tracing::info!(played_secs = played.as_secs(), "the live stream ended");
+                Self::schedule(a, Cause::Ended, played, now);
             }
-            Some(EndReason::Eof | EndReason::Error(_)) if a.req.kind.is_live() => {
-                Self::schedule_retry(a, now);
-            }
-            Some(EndReason::Error(e)) => {
-                if a.loaded_once && a.retries < 2 {
-                    Self::schedule_retry(a, now);
-                } else {
-                    tracing::info!(error = %e, "playback failed");
-                    a.failed = Some(if a.req.kind == MediaKind::Catchup {
-                        "Catch-up isn't available for this programme right now. Your provider \
-                         may not keep an archive for it, or it may be busy."
-                            .to_owned()
-                    } else {
-                        "This video couldn't be played. The provider may be busy or the file \
-                         may be unavailable."
-                            .to_owned()
-                    });
+            Some(EndReason::Eof) => {
+                match tracker::vod_end(a.last_pos, a.duration.or(a.req.duration_hint)) {
+                    VodEnd::Finished => {
+                        a.finished = true;
+                        finished_now = true;
+                    }
+                    VodEnd::Dropped { at } => {
+                        tracing::info!(at, "the stream ended before the end; resuming");
+                        Self::schedule(a, Cause::Ended, played, now);
+                    }
+                    VodEnd::Failed => {
+                        a.failed = Some(Self::vod_failure(a.req.kind));
+                        failed_now = true;
+                    }
                 }
             }
-            _ => {}
+            Some(EndReason::Error(e)) => {
+                failed_now = true;
+                if live || a.loaded_once {
+                    tracing::info!(error = %e, "stream error");
+                    Self::schedule(a, Cause::Failed, played, now);
+                } else {
+                    tracing::info!(error = %e, "playback failed");
+                    a.failed = Some(Self::vod_failure(a.req.kind));
+                }
+            }
+            Some(EndReason::Unknown(code)) => {
+                tracing::debug!(code, "stream ended for an unknown reason");
+            }
         }
+
+        // Live stall detection.
+        let mut stop_stalled = false;
+        if live
+            && a.reconnect.pending().is_none()
+            && a.failed.is_none()
+            && !held_load
+            && a.tracker.is_stalled(now)
+        {
+            tracing::info!(
+                idle_secs = a.tracker.idle_for(now).as_secs(),
+                "live stream stalled; reconnecting"
+            );
+            Self::schedule(a, Cause::Stalled, Duration::ZERO, now);
+            stop_stalled = true;
+        }
+        let due = a.reconnect.take_due(now);
+        let retry_at = a.reconnect.pending();
 
         if finished_now {
             self.mark_finished();
@@ -632,37 +918,22 @@ impl PlaybackController {
         if failed_now {
             self.check_connection_limit();
         }
-        let Some(a) = &mut self.active else {
-            return;
-        };
-        // Live stall detection.
-        if a.req.kind.is_live()
-            && a.retry_at.is_none()
-            && a.failed.is_none()
-            && a.loaded_once
-            && now.duration_since(a.last_advance) > STALL_AFTER
-        {
-            tracing::info!("live stream stalled; reconnecting");
-            Self::schedule_retry(a, now);
+        if stop_stalled {
+            // Free the provider connection now; the frame stays up under the overlay.
+            self.stop_stream();
+        }
+        if due {
+            self.load_current(false);
+        } else if let Some(at) = retry_at {
+            self.ctx
+                .request_repaint_after(at.saturating_duration_since(now));
         }
 
-        if let Some(at) = a.retry_at {
-            if now >= at {
-                a.retry_at = None;
-                self.load_current(false);
-                if let Some(a) = &mut self.active {
-                    a.retry_at = None;
-                }
-            } else {
-                self.ctx.request_repaint_after(at - now);
-            }
-        }
-
-        let due = self
+        let save_due = self
             .active
             .as_ref()
             .is_some_and(|a| a.last_save.elapsed() >= SAVE_EVERY);
-        if due {
+        if save_due {
             self.save_progress(false);
         }
         if self.active.is_some() {
@@ -670,23 +941,42 @@ impl PlaybackController {
         }
     }
 
-    fn schedule_retry(a: &mut Active, now: Instant) {
-        if a.retries >= MAX_RETRIES {
-            a.failed = Some(if a.req.kind.is_live() {
-                "The channel stopped and didn't come back. Try again, or pick another channel."
-                    .to_owned()
-            } else {
-                "The connection dropped and didn't come back.".to_owned()
-            });
-            a.retry_at = None;
-            return;
+    fn vod_failure(kind: MediaKind) -> String {
+        if kind == MediaKind::Catchup {
+            "Catch-up isn't available for this programme right now. Your provider may not \
+             keep an archive for it, or it may be busy."
+                .to_owned()
+        } else {
+            "This video couldn't be played. The provider may be busy or the file may be \
+             unavailable."
+                .to_owned()
         }
-        let delay =
-            Duration::from_secs(RETRY_DELAYS.get(a.retries as usize).copied().unwrap_or(30));
-        a.retries += 1;
-        a.retry_at = Some(now + delay);
-        a.last_advance = now + delay;
-        tracing::info!(attempt = a.retries, ?delay, "reconnecting");
+    }
+
+    fn schedule(a: &mut Active, cause: Cause, played: Duration, now: Instant) {
+        match a.reconnect.schedule(cause, played, now) {
+            Schedule::Retry { attempt, at } => {
+                tracing::info!(
+                    attempt,
+                    ?cause,
+                    delay_secs = at.saturating_duration_since(now).as_secs(),
+                    "reconnecting"
+                );
+            }
+            Schedule::AlreadyPending => {
+                tracing::debug!(?cause, "a reconnect is already pending");
+            }
+            Schedule::GiveUp => {
+                tracing::info!(?cause, "giving up after repeated failures");
+                a.failed = Some(if a.req.kind.is_live() {
+                    "The channel stopped and didn't come back. Try again, or pick another \
+                     channel."
+                        .to_owned()
+                } else {
+                    "The connection dropped and didn't come back.".to_owned()
+                });
+            }
+        }
     }
 
     fn snapshot(a: &Active) -> PlaybackSnapshot {
@@ -719,30 +1009,37 @@ impl PlaybackController {
         }
     }
 
+    /// What to record for the current item: `(kind, id, position, duration)`.
+    fn progress_record(
+        &self,
+    ) -> Option<(opensmarters_store::PlaybackKind, String, f64, Option<f64>)> {
+        let a = self.active.as_ref()?;
+        if a.finished {
+            return None;
+        }
+        let pos = a.last_pos.filter(|p| *p >= 1.0)?;
+        let duration = a
+            .duration
+            .or_else(|| self.engine.as_ref().and_then(|e| e.player.state().duration))
+            .or(a.req.duration_hint);
+        Some((
+            a.req.kind.playback_kind()?,
+            a.req.item.progress_id()?,
+            pos,
+            duration,
+        ))
+    }
+
     /// Saves the resume point now (VOD/episodes/catch-up). `final_save` is used on stop.
     fn save_progress(&mut self, final_save: bool) {
+        let record = self.progress_record();
         let Some(a) = &mut self.active else {
             return;
         };
         a.last_save = Instant::now();
-        if a.finished {
-            return;
-        }
-        let (Some(kind), Some(id), Some(pos)) = (
-            a.req.kind.playback_kind(),
-            a.req.item.progress_id(),
-            a.last_pos,
-        ) else {
+        let Some((kind, id, pos, duration)) = record else {
             return;
         };
-        if pos < 1.0 {
-            return;
-        }
-        let duration = self
-            .engine
-            .as_ref()
-            .and_then(|e| e.player.state().duration)
-            .or(a.req.duration_hint);
         let snapshot = Self::snapshot(a);
         let profile = a.session.profile_id();
         if final_save {
@@ -759,17 +1056,38 @@ impl PlaybackController {
         });
     }
 
+    /// Saves the resume point on this thread (exit: the background pool may be gone
+    /// before a queued write runs).
+    fn save_progress_now(&mut self) {
+        let Some((kind, id, pos, duration)) = self.progress_record() else {
+            return;
+        };
+        let Some(a) = &self.active else { return };
+        let snapshot = Self::snapshot(a);
+        match a.session.store().playback().record_progress(
+            a.session.profile_id(),
+            kind,
+            &id,
+            pos,
+            duration,
+            &snapshot,
+        ) {
+            Ok(_) => tracing::debug!(pos, "progress saved at exit"),
+            Err(e) => tracing::warn!(error = %e, "couldn't save the progress at exit"),
+        }
+    }
+
     fn mark_finished(&mut self) {
+        self.finishes += 1;
         let Some(a) = &self.active else {
             return;
         };
         let (Some(kind), Some(id)) = (a.req.kind.playback_kind(), a.req.item.progress_id()) else {
             return;
         };
-        let duration = self
-            .engine
-            .as_ref()
-            .and_then(|e| e.player.state().duration)
+        let duration = a
+            .duration
+            .or_else(|| self.engine.as_ref().and_then(|e| e.player.state().duration))
             .or(a.req.duration_hint);
         let pos = duration.or(a.last_pos).unwrap_or(0.0);
         let snapshot = Self::snapshot(a);
@@ -785,13 +1103,20 @@ impl PlaybackController {
         });
     }
 
+    /// Counts finished items in this run (keys the next-episode countdown, so finishing
+    /// the same episode twice starts a fresh countdown).
+    pub fn finish_count(&self) -> u64 {
+        self.finishes
+    }
+
     /// Counts completed progress writes. Screens showing watch progress (Home's Continue
     /// watching, detail pages) reload when it changes.
     pub fn progress_epoch(&self) -> u64 {
         self.saves.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Paints the video into `rect` (black when nothing plays).
+    /// Paints the video into `rect` (black when nothing plays; the last frame while the
+    /// next live channel or a reconnect opens).
     pub fn paint_video(&mut self, ui: &egui::Ui, rect: egui::Rect) {
         match &mut self.engine {
             Some(e) => e.video.paint_at(ui, rect, &e.player),
@@ -852,7 +1177,7 @@ impl PlaybackController {
         }
     }
 
-    /// Selects an audio track.
+    /// Selects an audio track (not remembered; see [`choose_audio`](Self::choose_audio)).
     pub fn select_audio(&self, sel: TrackSelection) {
         if let Some(e) = &self.engine {
             let _ = e.player.select_audio(sel);
@@ -866,8 +1191,8 @@ impl PlaybackController {
         }
     }
 
-    /// Cycles to the next audio track (A key).
-    pub fn cycle_audio(&self) {
+    /// Cycles to the next audio track (A key); its language is remembered.
+    pub fn cycle_audio(&mut self) {
         let st = self.state();
         let tracks: Vec<i64> = st.audio_tracks().map(|t| t.id).collect();
         if tracks.is_empty() {
@@ -877,7 +1202,7 @@ impl PlaybackController {
         let i = cur
             .and_then(|c| tracks.iter().position(|t| *t == c))
             .map_or(0, |i| (i + 1) % tracks.len());
-        self.select_audio(TrackSelection::Id(tracks[i]));
+        self.choose_audio(TrackSelection::Id(tracks[i]));
     }
 
     /// Cycles subtitles: off → each track → off (S key). Remembered like a track-sheet
@@ -913,49 +1238,74 @@ impl PlaybackController {
         self.set_fit_index(self.fit_index + 1)
     }
 
-    /// Zaps `delta` channels within the live list. Returns the new channel's name.
-    pub fn zap(&mut self, delta: isize) -> Option<String> {
-        let a = self.active.as_ref()?;
-        let zap = a.req.zap.clone()?;
-        let (index, channel) = zap.step(delta)?;
-        self.zap_to(zap.clone(), index, &channel.clone())
-    }
-
-    /// Zaps to the channel with `number` in the live list.
-    pub fn zap_to_number(&mut self, number: u64) -> Option<String> {
-        let a = self.active.as_ref()?;
-        let zap = a.req.zap.clone()?;
-        let (index, channel) = zap.find_number(number)?;
-        self.zap_to(zap.clone(), index, &channel.clone())
-    }
-
-    fn zap_to(
-        &mut self,
-        zap: ZapContext,
-        index: usize,
-        channel: &crate::services::catalog::LiveChannel,
-    ) -> Option<String> {
-        let session = Arc::clone(&self.active.as_ref()?.session);
-        let ctx = ZapContext {
-            channels: zap.channels,
-            index,
+    /// Zaps `delta` channels within the live list (`+1` = next). Stops at the ends of the
+    /// list (the banner then says "First channel" / "Last channel").
+    pub fn zap(&mut self, delta: isize) -> ZapOutcome {
+        let Some(zap) = self.active.as_ref().and_then(|a| a.req.zap.clone()) else {
+            return ZapOutcome::Unavailable;
         };
-        match session.live_request(channel, Some(ctx)) {
-            Ok(req) => {
-                let name = req.title.clone();
-                self.play_after(session, req, ZAP_DEBOUNCE);
-                Some(name)
+        match zap.step(delta) {
+            Ok((index, channel)) => {
+                let channel = channel.clone();
+                self.zap_to(Arc::clone(&zap.channels), index, &channel)
             }
-            Err(e) => {
-                tracing::info!(error = %e, "zap target not playable");
-                None
+            Err(edge) => {
+                self.banner = Some(Banner {
+                    since: Instant::now(),
+                    edge: Some(edge),
+                });
+                ZapOutcome::Edge(edge)
             }
         }
     }
 
-    /// Frees GL resources (call from `on_exit` with the GL context).
+    /// Zaps to the channel with `number` in the live list (`None` if it isn't there).
+    pub fn zap_to_number(&mut self, number: u64) -> Option<String> {
+        let a = self.active.as_ref()?;
+        let zap = a.req.zap.clone()?;
+        let (index, channel) = zap.find_number(number)?;
+        match self.zap_to(Arc::clone(&zap.channels), index, &channel.clone()) {
+            ZapOutcome::Zapped(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Zaps to `channels[index]`, which becomes the zap list (e.g. "All" after a channel
+    /// number that isn't in the current category).
+    pub fn zap_to_index(&mut self, channels: Arc<Vec<LiveChannel>>, index: usize) -> ZapOutcome {
+        let Some(channel) = channels.get(index).cloned() else {
+            return ZapOutcome::Unavailable;
+        };
+        self.zap_to(channels, index, &channel)
+    }
+
+    fn zap_to(
+        &mut self,
+        channels: Arc<Vec<LiveChannel>>,
+        index: usize,
+        channel: &LiveChannel,
+    ) -> ZapOutcome {
+        let Some(session) = self.active.as_ref().map(|a| Arc::clone(&a.session)) else {
+            return ZapOutcome::Unavailable;
+        };
+        let ctx = ZapContext { channels, index };
+        match session.live_request(channel, Some(ctx)) {
+            Ok(req) => {
+                let name = req.title.clone();
+                self.play_after(session, req, ZAP_DEBOUNCE);
+                ZapOutcome::Zapped(name)
+            }
+            Err(e) => {
+                tracing::info!(error = %e, "zap target not playable");
+                ZapOutcome::Unavailable
+            }
+        }
+    }
+
+    /// Saves progress synchronously and frees GL resources (call from `on_exit` with the
+    /// GL context).
     pub fn destroy(&mut self, gl: &eframe::glow::Context) {
-        self.save_progress(true);
+        self.save_progress_now();
         if let Some(e) = &mut self.engine {
             e.video.destroy(gl);
         }

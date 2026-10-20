@@ -121,6 +121,28 @@ fn actions_for(r: &Recording) -> Vec<Action> {
     }
 }
 
+/// Running and waiting jobs first, in queue order (oldest first); then paused, failed
+/// and finished ones, newest first.
+fn queue_order(mut v: Vec<Recording>) -> Vec<Recording> {
+    let rank = |s: RecordingState| match s {
+        RecordingState::Active => 0,
+        RecordingState::Queued => 1,
+        RecordingState::Paused => 2,
+        RecordingState::Failed => 3,
+        _ => 4,
+    };
+    v.sort_by(|a, b| {
+        rank(a.state).cmp(&rank(b.state)).then_with(|| {
+            if rank(a.state) <= 1 {
+                (a.created_at, a.id).cmp(&(b.created_at, b.id))
+            } else {
+                (b.created_at, b.id).cmp(&(a.created_at, a.id))
+            }
+        })
+    });
+    v
+}
+
 fn tab_rows(
     tab: RecordingsTab,
     jobs: &[Recording],
@@ -128,24 +150,30 @@ fn tab_rows(
     now: DateTime<Utc>,
 ) -> Vec<Row> {
     match tab {
-        RecordingsTab::Downloads => jobs
-            .iter()
-            .filter(|r| r.kind.is_download() && r.state != RecordingState::Cancelled)
-            .cloned()
-            .map(Row::Job)
-            .collect(),
-        RecordingsTab::Recordings => jobs
-            .iter()
-            .filter(|r| {
-                !r.kind.is_download()
-                    && !matches!(
-                        r.state,
-                        RecordingState::Scheduled | RecordingState::Cancelled
-                    )
-            })
-            .cloned()
-            .map(Row::Job)
-            .collect(),
+        RecordingsTab::Downloads => queue_order(
+            jobs.iter()
+                .filter(|r| r.kind.is_download() && r.state != RecordingState::Cancelled)
+                .cloned()
+                .collect(),
+        )
+        .into_iter()
+        .map(Row::Job)
+        .collect(),
+        RecordingsTab::Recordings => queue_order(
+            jobs.iter()
+                .filter(|r| {
+                    !r.kind.is_download()
+                        && !matches!(
+                            r.state,
+                            RecordingState::Scheduled | RecordingState::Cancelled
+                        )
+                })
+                .cloned()
+                .collect(),
+        )
+        .into_iter()
+        .map(Row::Job)
+        .collect(),
         RecordingsTab::Scheduled => {
             let mut v: Vec<(i64, Row)> = jobs
                 .iter()
@@ -168,6 +196,23 @@ fn tab_rows(
             v.into_iter().map(|(_, r)| r).collect()
         }
     }
+}
+
+/// The folder's last two parts (`…\Videos\opensmarters`): the full path is in Settings.
+fn short_path(p: &std::path::Path) -> String {
+    let parts: Vec<String> = p
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if parts.len() <= 3 {
+        return p.display().to_string();
+    }
+    let sep = std::path::MAIN_SEPARATOR;
+    format!(
+        "…{sep}{}{sep}{}",
+        parts[parts.len() - 2],
+        parts[parts.len() - 1]
+    )
 }
 
 /// The Recordings screen.
@@ -530,8 +575,8 @@ impl Screen for RecordingsScreen {
         let right = content.left() + m + width;
         let open_rect = Rect::from_min_size(pos2(right - os.x, content.top() + 98.0), os);
         let space = match (self.space.value().copied().flatten(), &dir) {
-            (Some(free), Some(d)) => format!("{} free · {}", human_bytes(free), d.display()),
-            (None, Some(d)) => d.display().to_string(),
+            (Some(free), Some(d)) => format!("{} free · {}", human_bytes(free), short_path(d)),
+            (None, Some(d)) => short_path(d),
             _ => "No recordings folder".to_owned(),
         };
         text::line(
@@ -595,7 +640,7 @@ impl Screen for RecordingsScreen {
         let top = tabs.bottom() + 20.0;
         let rows_rect = Rect::from_min_max(
             pos2(content.left() + m - 8.0, top),
-            pos2(content.left() + m + width + 8.0, content.bottom() - 16.0),
+            pos2(content.left() + m + width + 8.0, content.bottom() - 44.0),
         );
         let rows = tab_rows(self.tab, &jobs, &reminders, now);
         if !cx.dvr.is_loaded() {
@@ -686,8 +731,8 @@ impl Screen for RecordingsScreen {
             "Enter plays a saved file · Delete removes it"
         };
         painter.text(
-            pos2(right, tabs.bottom() - 4.0),
-            Align2::RIGHT_BOTTOM,
+            pos2(right, content.bottom() - 22.0),
+            Align2::RIGHT_CENTER,
             hint,
             font::caption(),
             color::TEXT_3,
@@ -781,8 +826,25 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(keys(RecordingsTab::Downloads), [1, 2]);
-        assert_eq!(keys(RecordingsTab::Recordings), [4, 5]);
+        assert_eq!(
+            keys(RecordingsTab::Recordings),
+            [5, 4],
+            "newest finished first"
+        );
         assert_eq!(keys(RecordingsTab::Scheduled), [3]);
+    }
+
+    #[test]
+    fn queues_read_in_order() {
+        // Newest first from the store: 4 (queued), 3 (done), 2 (queued), 1 (active).
+        let jobs = vec![
+            job(4, RecordingKind::Movie, RecordingState::Queued),
+            job(3, RecordingKind::Movie, RecordingState::Done),
+            job(2, RecordingKind::Movie, RecordingState::Queued),
+            job(1, RecordingKind::Movie, RecordingState::Active),
+        ];
+        let ids: Vec<i64> = queue_order(jobs).iter().map(|r| r.id.0).collect();
+        assert_eq!(ids, [1, 2, 4, 3]);
     }
 
     #[test]

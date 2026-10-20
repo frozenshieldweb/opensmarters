@@ -2,7 +2,7 @@
 //! Provider-independent catalogue models used by the screens: live channels (Xtream or
 //! M3U) and EPG programmes. Provider strings are capped here, once.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use opensmarters_core::catalog::{CatalogItem, CategorySelection};
@@ -198,10 +198,25 @@ fn looks_like_http(u: &str) -> bool {
 }
 
 /// The stable favourites id of an M3U entry: never the URL (it may carry credentials).
+/// Entries with the same `tvg-id`, title and group share this base key; the catalogue
+/// numbers the repeats ([`m3u_key_nth`]).
 pub fn m3u_key(e: &M3uEntry) -> String {
     let id = e.tvg_id.as_deref().unwrap_or_default();
     let group = e.group_title.as_deref().unwrap_or_default();
     format!("m3u:{:016x}", stable_hash(&[id, &e.title, group]))
+}
+
+/// The key of the `occurrence`-th (1-based) entry with the same base key: the first keeps
+/// [`m3u_key`] (ids of unique entries never change), repeats get `#2`, `#3`, … in
+/// playlist order, so favourites, recents and zapping tell duplicates (backup streams)
+/// apart.
+pub fn m3u_key_nth(e: &M3uEntry, occurrence: usize) -> String {
+    let base = m3u_key(e);
+    if occurrence <= 1 {
+        base
+    } else {
+        format!("{base}#{occurrence}")
+    }
 }
 
 impl CatalogItem for LiveChannel {
@@ -233,6 +248,7 @@ pub struct LiveCatalog {
     pub categories: Vec<Category>,
     counts: HashMap<CategoryId, usize>,
     by_key: HashMap<String, usize>,
+    by_category: HashMap<CategoryId, usize>,
 }
 
 impl LiveCatalog {
@@ -246,14 +262,17 @@ impl LiveCatalog {
                 *counts.entry(cat.clone()).or_default() += 1;
             }
         }
-        for c in &mut categories {
+        let mut by_category = HashMap::with_capacity(categories.len());
+        for (i, c) in categories.iter_mut().enumerate() {
             c.name = cap(&c.name, MAX_LINE_CHARS).trim().to_owned();
+            by_category.entry(c.id.clone()).or_insert(i);
         }
         Self {
             channels,
             categories,
             counts,
             by_key,
+            by_category,
         }
     }
 
@@ -263,19 +282,31 @@ impl LiveCatalog {
         Self::new(channels, categories.to_vec())
     }
 
-    /// From a parsed M3U playlist (live entries only).
+    /// From a parsed M3U playlist (live entries only). Duplicate entries (same `tvg-id`,
+    /// title and group) get distinct keys ([`m3u_key_nth`]).
     pub fn from_playlist(p: &Playlist) -> Self {
+        let mut seen_keys: HashMap<String, usize> = HashMap::new();
         let channels: Vec<LiveChannel> = p
             .entries
             .iter()
             .filter(|e| e.kind == EntryKind::Live)
             .enumerate()
-            .map(|(i, e)| LiveChannel::from_m3u(e, i))
+            .map(|(i, e)| {
+                let mut ch = LiveChannel::from_m3u(e, i);
+                let n = seen_keys.entry(ch.key.clone()).or_default();
+                *n += 1;
+                if *n > 1 {
+                    ch.key = m3u_key_nth(e, *n);
+                }
+                ch
+            })
             .collect();
+        // Groups in first-seen order (a set, not a scan of the list per channel).
+        let mut seen: HashSet<&CategoryId> = HashSet::new();
         let mut categories: Vec<Category> = Vec::new();
         for ch in &channels {
             for cat in &ch.categories {
-                if !categories.iter().any(|c| &c.id == cat) {
+                if seen.insert(cat) {
                     categories.push(Category {
                         id: cat.clone(),
                         name: cat.as_str().to_owned(),
@@ -307,12 +338,22 @@ impl LiveCatalog {
         self.counts.get(category).copied().unwrap_or(0)
     }
 
-    /// Category display name.
+    /// Category display name (indexed: called per channel when lists are filtered).
     pub fn category_name(&self, id: &CategoryId) -> Option<&str> {
-        self.categories
-            .iter()
-            .find(|c| &c.id == id)
-            .map(|c| c.name.as_str())
+        match self
+            .by_category
+            .get(id)
+            .and_then(|&i| self.categories.get(i))
+            .filter(|c| &c.id == id)
+        {
+            Some(c) => Some(c.name.as_str()),
+            // `categories` is public: fall back if someone edited it.
+            None => self
+                .categories
+                .iter()
+                .find(|c| &c.id == id)
+                .map(|c| c.name.as_str()),
+        }
     }
 
     /// Indices of the channels matching a selection.
@@ -411,6 +452,51 @@ mod tests {
         assert_eq!(cat.count(&CategoryId::from("News")), 1);
         assert_eq!(format!("{:?}", a.source), "M3u(<redacted>)");
         assert_eq!(a.monogram(), "AL");
+    }
+
+    #[test]
+    fn duplicate_m3u_entries_get_distinct_keys_and_unique_ones_keep_theirs() {
+        let p = parse_str(
+            "#EXTM3U\n\
+             #EXTINF:-1 tvg-id=\"a.1\" group-title=\"News\",Alpha\nhttp://h/1.ts\n\
+             #EXTINF:-1 tvg-id=\"b.1\" group-title=\"News\",Beta\nhttp://h/2.ts\n\
+             #EXTINF:-1 tvg-id=\"a.1\" group-title=\"News\",Alpha\nhttp://backup/1.ts\n\
+             #EXTINF:-1 tvg-id=\"a.1\" group-title=\"News\",Alpha\nhttp://backup2/1.ts\n",
+            &M3uLimits::default(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let cat = LiveCatalog::from_playlist(&p);
+        let keys: Vec<&str> = cat.channels.iter().map(|c| c.key.as_str()).collect();
+        let base = m3u_key(&p.entries[0]);
+        assert_eq!(keys[0], base, "the first keeps the historical key");
+        assert_eq!(keys[1], m3u_key(&p.entries[1]));
+        assert_eq!(keys[2], format!("{base}#2"));
+        assert_eq!(keys[3], format!("{base}#3"));
+        let unique: HashSet<&str> = keys.iter().copied().collect();
+        assert_eq!(unique.len(), 4);
+        // Every key resolves to its own entry (zapping / favourites).
+        for (i, k) in keys.iter().enumerate() {
+            assert_eq!(cat.index_of(k), Some(i));
+        }
+        assert_eq!(cat.categories.len(), 1);
+        assert_eq!(cat.count(&CategoryId::from("News")), 4);
+    }
+
+    #[test]
+    fn many_m3u_groups_build_quickly() {
+        let mut s = String::from("#EXTM3U\n");
+        for i in 0..20_000 {
+            s.push_str(&format!(
+                "#EXTINF:-1 group-title=\"G{}\",C{i}\nhttp://h/{i}.ts\n",
+                i % 5_000
+            ));
+        }
+        let p = parse_str(&s, &M3uLimits::default()).unwrap_or_else(|e| panic!("{e}"));
+        let t = std::time::Instant::now();
+        let cat = LiveCatalog::from_playlist(&p);
+        assert_eq!(cat.categories.len(), 5_000);
+        assert_eq!(cat.categories[0].name, "G0");
+        assert!(t.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]

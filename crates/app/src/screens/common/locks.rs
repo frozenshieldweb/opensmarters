@@ -15,6 +15,7 @@ use opensmarters_core::{Category, CategoryId};
 use opensmarters_store::ContentKind;
 
 use crate::services::Session;
+use crate::services::session::ItemLock;
 
 /// Category names by id.
 #[derive(Debug, Clone, Default)]
@@ -66,18 +67,28 @@ pub fn any_locked<'a>(
 
 /// True when the item (in categories `ids`) is locked for this session.
 ///
-/// TODO(integration): switch to `Session::is_item_locked(kind, ids)` once it lands
-/// (batch B); this local version checks the same thing with the names it is given.
+/// Delegates to [`Session::categories_lock`], the rule the request builders enforce
+/// (`live_request`, `movie_request`, … refuse the same items with `AppError::Locked`).
+/// Only when the session can't decide yet (a keyword lock depends on a category name it
+/// has not loaded) are the `names` given here used, so a list never hides an item the
+/// PIN prompt could not unlock.
 pub fn is_item_locked(
     session: &Session,
     kind: ContentKind,
     ids: &[&CategoryId],
     names: &CategoryNames,
 ) -> bool {
-    session.parental_enabled()
-        && any_locked(ids.iter().copied(), |id| {
+    if !session.parental_enabled() {
+        return false;
+    }
+    let owned: Vec<CategoryId> = ids.iter().map(|id| (*id).clone()).collect();
+    match session.categories_lock(kind, &owned) {
+        ItemLock::Unlocked => false,
+        ItemLock::Locked { .. } => true,
+        ItemLock::Unknown => any_locked(ids.iter().copied(), |id| {
             session.is_category_locked(kind, id, names.name(id))
-        })
+        }),
+    }
 }
 
 /// The categories among `ids` that are locked for this session (to unlock them for the
@@ -92,7 +103,16 @@ pub fn locked_among(
         return Vec::new();
     }
     ids.iter()
-        .filter(|id| session.is_category_locked(kind, id, names.name(id)))
+        .filter(|id| {
+            // The caller's names, else the ones the session loaded.
+            let known = names.name(id);
+            let name = if known.is_empty() {
+                session.category_name(kind, id).unwrap_or_default()
+            } else {
+                known.to_owned()
+            };
+            session.is_category_locked(kind, id, &name)
+        })
         .map(|id| (*id).clone())
         .collect()
 }

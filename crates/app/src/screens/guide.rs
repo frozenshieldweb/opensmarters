@@ -221,7 +221,7 @@ impl GuideScreen {
             self.pin = Some(PinPrompt {
                 selection: sel,
                 name: name.to_owned(),
-                pad: PinPad::new(Id::unique("guide.pin"), 4),
+                pad: PinPad::new(Id::unique("guide.pin"), session.pin_length()),
                 verify: Loader::new(),
             });
             return;

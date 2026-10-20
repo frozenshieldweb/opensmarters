@@ -19,7 +19,7 @@ use crate::focus::{self, FocusOpts};
 use crate::nav::{Route, Section};
 use crate::playback::ZapContext;
 use crate::services::catalog::{LiveCatalog, LiveChannel, split_tag};
-use crate::services::{ImageSize, Session};
+use crate::services::{ImageSize, Session, vod};
 use crate::task::Loader;
 use crate::ui::assets::Illustration;
 use crate::ui::icons;
@@ -563,7 +563,14 @@ impl Screen for FavouritesScreen {
                     };
                     let _ = art;
                     let tw = (row_rect.right() - tx - 16.0).max(80.0);
-                    let (tag, name) = split_tag(&fav.snapshot.name);
+                    // Films/series: tag chip + title, the year goes to the second line.
+                    let (tag, name, year) = if kind == ContentKind::Live {
+                        let (tag, name) = split_tag(&fav.snapshot.name);
+                        (tag, name, None)
+                    } else {
+                        let t = vod::display_title(&fav.snapshot.name);
+                        (t.tag, t.title, t.year)
+                    };
                     let mut nx = tx;
                     if let Some(tag) = tag {
                         let r = crate::ui::widgets::chip::tag(
@@ -599,7 +606,10 @@ impl Screen for FavouritesScreen {
                             None => String::new(),
                         }
                     } else {
-                        format!("Saved {}", fav.added_at_label())
+                        vod::meta_line([
+                            year.map(|y| y.to_string()).unwrap_or_default(),
+                            format!("Saved {}", fav.added_at_label()),
+                        ])
                     };
                     text::line(
                         &painter,

@@ -10,7 +10,7 @@
 //!   "All" list, or the categories opened before). The 35 000-film "All" list is only
 //!   fetched when the user asks ("Load all films to search").
 //! - **Keyboard first:** typing anywhere goes to the field; ↓ (or Enter) from the field
-//!   jumps to the first result. Recent searches (a non-secret setting) show as chips.
+//!   jumps to the first result. Recent searches (per profile, `services::search_history`; Settings › Storage clears them) show as chips.
 //! - Parental locks apply: items of locked categories are never listed.
 
 mod engine;
@@ -25,7 +25,6 @@ use eframe::egui::{
 use opensmarters_core::chrono::{Duration as ChronoDuration, Local, Utc};
 use opensmarters_core::{Category, CategoryId, Series, VodStream};
 use opensmarters_store::ContentKind;
-use opensmarters_store::settings::Setting;
 
 use super::{AppCtx, Screen, shell};
 use crate::error::AppError;
@@ -35,7 +34,7 @@ use crate::playback::ZapContext;
 use crate::services::catalog::{LiveChannel, Programme, split_tag};
 use crate::services::session::guide::xmltv_programme;
 use crate::services::session::{series_key, vod_streams_key};
-use crate::services::{ImageSize, Session};
+use crate::services::{ImageSize, Session, search_history, vod};
 use crate::task::Loader;
 use crate::ui::assets::Illustration;
 use crate::ui::icons::{self, Style};
@@ -48,9 +47,8 @@ use crate::ui::widgets::{
 use crate::ui::{paint, text};
 pub use engine::{Corpus, Hits, Kind, push_recent, rank, thousands};
 
-/// Recent searches (global, non-secret).
-pub const RECENT: Setting<Vec<String>> = Setting::new("search.recent", Vec::new);
-const RECENT_CAP: usize = 8;
+/// Recent-search chips shown (the per-profile history keeps more).
+const RECENT_CHIPS: usize = 8;
 const DEBOUNCE: Duration = Duration::from_millis(200);
 /// Cards per group in the "All" view.
 const RAIL_MAX: usize = 30;
@@ -329,11 +327,15 @@ impl SearchScreen {
         if q.is_empty() {
             return;
         }
+        let Some(session) = cx.session() else { return };
+        // Show it at once; the shared per-profile history is the source of truth
+        // (Settings › Storage clears it).
         let mut list = self.recent.value().cloned().unwrap_or_default();
-        push_recent(&mut list, &q, RECENT_CAP);
-        self.recent.set(list.clone());
+        push_recent(&mut list, &q, RECENT_CHIPS);
+        self.recent.set(list);
+        let profile = session.profile_id();
         cx.services.blocking("save recent searches", move |s| {
-            s.settings().set(&RECENT, &list)
+            search_history::record(s, profile, &q)
         });
     }
 
@@ -464,10 +466,14 @@ impl Screen for SearchScreen {
     fn on_enter(&mut self, cx: &mut AppCtx<'_>) {
         // Rebuild every time: the user may have opened categories or loaded guides.
         self.load_sources(cx);
-        if self.recent.is_idle() {
+        // Re-read every time: Settings › Storage may have cleared it.
+        if let Some(session) = cx.session() {
             let store = cx.services.store.clone();
+            let profile = session.profile_id();
             self.recent.start_blocking(cx.rt(), &cx.egui, move || {
-                Ok(store.settings().get(&RECENT).unwrap_or_default())
+                let mut list = search_history::load(&store, profile).unwrap_or_default();
+                list.truncate(RECENT_CHIPS);
+                Ok(list)
             });
         }
         if self.query.is_empty() {
@@ -790,9 +796,12 @@ impl SearchScreen {
         }
         if clear {
             self.recent.set(Vec::new());
-            cx.services.blocking("clear recent searches", |s| {
-                s.settings().set(&RECENT, &Vec::<String>::new())
-            });
+            if let Some(session) = cx.session() {
+                let profile = session.profile_id();
+                cx.services.blocking("clear recent searches", move |s| {
+                    search_history::clear(s, profile).map(|_| ())
+                });
+            }
             focus::request(&cx.egui, field_id());
         }
     }
@@ -905,33 +914,16 @@ impl SearchScreen {
                             .show(ui, |ui| {
                                 let mut a = None;
                                 for &i in list.iter().take(RAIL_MAX) {
-                                    let (id, name, poster) = match kind {
-                                        Kind::Movies => {
-                                            let Some(v) = src.movies.get(i as usize) else {
-                                                continue;
-                                            };
-                                            (
-                                                Id::unique(("search.movie", v.stream_id)),
-                                                v.name.as_str(),
-                                                v.stream_icon.as_deref(),
-                                            )
-                                        }
-                                        _ => {
-                                            let Some(s) = src.series.get(i as usize) else {
-                                                continue;
-                                            };
-                                            (
-                                                Id::unique(("search.series", s.series_id)),
-                                                s.name.as_str(),
-                                                s.poster(),
-                                            )
-                                        }
+                                    let id = item_id(src, kind, i as usize);
+                                    let Some((title, meta, poster)) =
+                                        poster_parts(src, kind, i as usize)
+                                    else {
+                                        continue;
                                     };
                                     first.get_or_insert(id);
                                     let img = images.get(poster, ImageSize::Poster);
-                                    let (tag, title) = split_tag(name);
                                     let f = PosterCard::new(id, &img, title, pw)
-                                        .meta(tag)
+                                        .meta(Some(meta.as_str()).filter(|m| !m.is_empty()))
                                         .meta_on_focus_only(cx.layout.tv)
                                         .show(ui);
                                     if f.activated {
@@ -1122,22 +1114,14 @@ impl SearchScreen {
                     |ui, i, r| {
                         let Some(&ix) = list.get(i) else { return };
                         let id = item_id(src, kind, ix as usize);
-                        let (name, poster) = if kind == Kind::Movies {
-                            let Some(v) = src.movies.get(ix as usize) else {
-                                return;
-                            };
-                            (v.name.as_str(), v.stream_icon.as_deref())
-                        } else {
-                            let Some(s) = src.series.get(ix as usize) else {
-                                return;
-                            };
-                            (s.name.as_str(), s.poster())
+                        let Some((title, meta, poster)) = poster_parts(src, kind, ix as usize)
+                        else {
+                            return;
                         };
                         let img = images.get(poster, ImageSize::Poster);
-                        let (tag, title) = split_tag(name);
                         let mut c = ui.new_child(egui::UiBuilder::new().max_rect(r));
                         if PosterCard::new(id, &img, title, r.width())
-                            .meta(tag)
+                            .meta(Some(meta.as_str()).filter(|m| !m.is_empty()))
                             .meta_on_focus_only(cx.layout.tv)
                             .show(&mut c)
                             .activated
@@ -1253,6 +1237,28 @@ fn load_hint(ui: &mut Ui, kind: Kind, loading: Option<Kind>, margin: f32) -> boo
     let br = Rect::from_min_size(pos2(tr.right() + 16.0, cy - sz.y / 2.0), sz);
     let mut c = ui.new_child(egui::UiBuilder::new().max_rect(br));
     b.show(&mut c).activated
+}
+
+/// Poster title (tag and year split off), meta line ("FR · 2004 · ★ 7.4") and poster URL
+/// of a film/series result.
+fn poster_parts(src: &Sources, kind: Kind, i: usize) -> Option<(&str, String, Option<&str>)> {
+    match kind {
+        Kind::Movies => src.movies.get(i).map(|v| {
+            (
+                vod::display_title(&v.name).title,
+                vod::movie_card_meta(v),
+                v.stream_icon.as_deref(),
+            )
+        }),
+        Kind::Series => src.series.get(i).map(|s| {
+            (
+                vod::display_title(&s.name).title,
+                vod::series_card_meta(s),
+                s.poster(),
+            )
+        }),
+        Kind::Channels | Kind::Programmes => None,
+    }
 }
 
 fn item_id(src: &Sources, kind: Kind, i: usize) -> Id {

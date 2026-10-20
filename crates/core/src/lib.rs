@@ -17,6 +17,8 @@
 //! | [`de`] | Lenient `serde` helpers for the loosely-typed Xtream JSON and the resilient list parser ([`de::parse_list`] → [`Listing`]) |
 //! | [`xtream`] | Async Xtream Codes client ([`xtream::Client`]) over `reqwest` + `rustls` |
 //! | [`net`] | HTTP configuration ([`HttpConfig`]: User-Agent, timeouts, response cap) and a capped downloader ([`net::HttpClient`]) for M3U/XMLTV |
+//! | [`download`] | Streaming media downloads ([`download::Downloader`]): read-idle timeouts, safe redirects, `Range` resume checked against `Content-Range` |
+//! | [`hls`] | Defensive HLS playlist parser for recording HLS-only channels (master/media playlists, web URIs only, unencrypted only) |
 //! | [`urls`] | Live / movie / episode / timeshift stream URL builders ([`urls::StreamUrls`]) |
 //! | [`m3u`] | Line-based M3U/M3U8 playlist parser and `get.php` → Xtream detection |
 //! | [`xmltv`] | Streaming XMLTV parser (plain or gzip) with zip-bomb defence |
@@ -110,8 +112,10 @@
 
 pub mod catalog;
 pub mod de;
+pub mod download;
 pub mod epg;
 mod error;
+pub mod hls;
 pub mod m3u;
 pub mod model;
 pub mod net;

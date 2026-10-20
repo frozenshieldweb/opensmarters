@@ -46,6 +46,19 @@ pub struct Quirks {
     /// connection open without sending another byte (a frozen stream that never closes,
     /// like a real panel after a zap). Exercises a client's stall detection.
     pub stall: bool,
+    /// `slow-media`: film and episode files (and live `.ts` without `live-endless`) are
+    /// sent at about 256 KiB/s, so downloads take a while (pause, resume, preemption).
+    /// `Range` requests still work.
+    pub slow_media: bool,
+    /// `live-endless`: a live `.ts` stream never ends: the channel's clip loops at about
+    /// its real bitrate, like a real channel (recordings, stall handling). No `Range`.
+    pub live_endless: bool,
+    /// `media-html`: film, episode and live `.ts` addresses answer `200 OK` with an HTML
+    /// error page instead of video (clients must not keep it).
+    pub media_html: bool,
+    /// `media-playlist`: film and episode addresses answer `200 OK` with a text playlist
+    /// pointing at local files (clients must not keep it or follow it).
+    pub media_playlist: bool,
 }
 
 impl Default for Quirks {
@@ -63,6 +76,10 @@ impl Default for Quirks {
             timeshift_503: false,
             timeshift_smarters_only: false,
             stall: false,
+            slow_media: false,
+            live_endless: false,
+            media_html: false,
+            media_playlist: false,
         }
     }
 }
@@ -82,6 +99,10 @@ impl Quirks {
         "timeshift-503",
         "timeshift-smarters-only",
         "stall",
+        "slow-media",
+        "live-endless",
+        "media-html",
+        "media-playlist",
     ];
 
     /// No quirks at all (note: also turns `category-all-literal` off).
@@ -106,6 +127,10 @@ impl Quirks {
             "timeshift-503" => &mut self.timeshift_503,
             "timeshift-smarters-only" => &mut self.timeshift_smarters_only,
             "stall" => &mut self.stall,
+            "slow-media" => &mut self.slow_media,
+            "live-endless" => &mut self.live_endless,
+            "media-html" => &mut self.media_html,
+            "media-playlist" => &mut self.media_playlist,
             _ => return None,
         })
     }
@@ -189,5 +214,9 @@ mod tests {
         assert!(q.mixed_types && q.slow && !q.category_all_literal);
         assert!(Quirks::parse_list(["bogus"]).is_err());
         assert_eq!(Quirks::default().to_string(), "category-all-literal");
+        let q: Quirks = "slow-media,live-endless,media-html,media-playlist"
+            .parse()
+            .unwrap_or_default();
+        assert!(q.slow_media && q.live_endless && q.media_html && q.media_playlist);
     }
 }

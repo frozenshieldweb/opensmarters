@@ -287,6 +287,8 @@ pub struct PlaybackController {
     purpose: Purpose,
     /// Channels with extra buffering, counters, messages ([`stream`]).
     tune: stream::Tuner,
+    /// p7b: dump-cache / stream-record results for `dvr::player` (see `take_dvr_events`).
+    dvr_events: Vec<PlayerEvent>,
 }
 
 impl std::fmt::Debug for PlaybackController {
@@ -368,7 +370,14 @@ impl PlaybackController {
             finishes: 0,
             purpose: Purpose::Watch,
             tune: stream::Tuner::default(),
+            dvr_events: Vec::new(),
         }
+    }
+
+    /// p7b: drains the player's dump-cache / stream-record results (clips and recording
+    /// through the player, `dvr::player`). Called once per frame by `dvr::on_frame`.
+    pub fn take_dvr_events(&mut self) -> Vec<PlayerEvent> {
+        std::mem::take(&mut self.dvr_events)
     }
 
     /// Which connection-budget purpose this controller's streams use (default
@@ -916,7 +925,17 @@ impl PlaybackController {
                 }
                 PlayerEvent::CommandFailed { op, error } => {
                     tracing::debug!(?op, %error, "mpv command failed");
+                    // p7b: forwarded to the DVR (clips, recording through the player).
+                    if matches!(
+                        op,
+                        opensmarters_player::Op::DumpCache | opensmarters_player::Op::Record
+                    ) {
+                        self.dvr_events
+                            .push(PlayerEvent::CommandFailed { op, error });
+                    }
                 }
+                // p7b: a clip (dump-cache) finished writing.
+                ev @ PlayerEvent::CommandDone { .. } => self.dvr_events.push(ev),
                 PlayerEvent::EndFile(_)
                 | PlayerEvent::FileLoaded
                 | PlayerEvent::PlaybackRestart

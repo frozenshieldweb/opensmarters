@@ -45,3 +45,10 @@ path = "fuzz_targets/xtream_json.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "hls"
+path = "fuzz_targets/hls.rs"
+test = false
+doc = false
+bench = false

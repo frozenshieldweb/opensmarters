@@ -109,6 +109,8 @@ pub const RUST: &[Component] = &[
     c("clap", "MIT OR Apache-2.0", "command line"),
     c("tracing, tracing-subscriber", "MIT", "logging"),
     c("thiserror, anyhow", "MIT OR Apache-2.0", "error handling"),
+    c("bytes", "MIT", "streaming downloads"),
+    c("fs4", "MIT OR Apache-2.0", "free disk space (recordings)"),
 ];
 
 #[cfg(test)]

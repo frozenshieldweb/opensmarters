@@ -1027,6 +1027,7 @@ impl LiveScreen {
         let mut fav_clicked: Option<usize> = None;
         let now = cx.now;
         let images = cx.services.images.clone();
+        let recording = cx.dvr.recording_keys(); // p7b: ● REC badges
         VirtualList::new(list_id(), ROW_H, visible.len())
             .gap(ROW_GAP)
             .scroll_to(self.scroll_to.take())
@@ -1073,6 +1074,7 @@ impl LiveScreen {
                     );
                     let slot = images.get(ch.logo.as_deref(), ImageSize::Logo);
                     ChannelLogo::paint(ui, &painter, logo, &ch.name, &slot);
+                    crate::dvr::ui::live_row_badge(&painter, logo, recording.contains(&ch.key)); // p7b
                     // Right side: time range, heart, catch-up.
                     let mut rx = rect.right() - 12.0;
                     let heart =

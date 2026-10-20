@@ -67,7 +67,10 @@
 //!
 //! See [`Quirks`]: `mixed-types`, `html-content-type`, `backdrop-string`,
 //! `episodes-array`, `category-all-literal` (default on), `slow`, `huge`, `stream-host`,
-//! `malformed-item`, `timeshift-503`, `timeshift-smarters-only`, `stall`.
+//! `malformed-item`, `timeshift-503`, `timeshift-smarters-only`, `stall` (a live `.ts`
+//! that freezes and never closes), and for recordings and downloads `slow-media`
+//! (≈ 256 KiB/s, `Range` still works), `live-endless` (live `.ts` loops forever at its real
+//! bitrate), `media-html` / `media-playlist` (a `200 OK` that isn't video).
 //!
 //! ## M3U
 //!

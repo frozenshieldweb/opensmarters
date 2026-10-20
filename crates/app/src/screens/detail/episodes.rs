@@ -41,6 +41,8 @@ pub(super) enum EpisodeAction {
         /// New state.
         watched: bool,
     },
+    /// p7b: a download control (episode, season, open, retry…).
+    Download(crate::dvr::ui::DownloadAction),
 }
 
 /// The season keys in tab order: regular seasons ascending, then specials (0).
@@ -68,6 +70,8 @@ pub(super) struct Episodes<'a> {
     pub images: &'a ImageService,
     pub margin: f32,
     pub thresholds: ResumeThresholds,
+    /// p7b: download state of the episodes (`dvr::ui::episode_downloads`).
+    pub downloads: &'a crate::dvr::ui::EpisodeDownloads,
 }
 
 /// Season tabs + the episode rows of `season`.
@@ -156,9 +160,21 @@ pub(super) fn show(
     ui.add_space(12.0);
 
     let mut action = None;
+    // p7b: "Download season", left of the episode count.
+    if let Some(a) = crate::dvr::ui::season_button(
+        ui,
+        e.downloads,
+        head,
+        x0 - 24.0 + row_w,
+        season_now,
+        eps.len(),
+    ) {
+        action = Some(EpisodeAction::Download(a));
+    }
     for (i, ep) in eps.iter().enumerate() {
         let (slot, _) = ui.allocate_exact_size(vec2(full, ROW_HEIGHT + ROW_GAP), Sense::hover());
         let rect = Rect::from_min_size(pos2(x0 - 12.0, slot.top()), vec2(row_w, ROW_HEIGHT));
+        let (rect, download_rect) = crate::dvr::ui::split_episode_row(e.downloads, rect); // p7b
         if !ui.is_rect_visible(rect.expand2(vec2(0.0, LOOK_AHEAD))) {
             continue;
         }
@@ -223,6 +239,10 @@ pub(super) fn show(
                 id: ep.id,
                 watched: !watched,
             });
+        }
+        // p7b: the episode's download control.
+        if let Some(a) = crate::dvr::ui::episode_button(ui, e.downloads, ep.id, download_rect) {
+            action = Some(EpisodeAction::Download(a));
         }
     }
     action

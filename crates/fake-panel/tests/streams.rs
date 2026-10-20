@@ -415,3 +415,78 @@ async fn missing_media_answers_503() {
     assert_eq!(get(&h.url("/live/demo/bad/1001.ts")).await.status(), 403);
     assert!(!dir.exists(), "Never mode must not create the directory");
 }
+
+#[tokio::test]
+async fn recording_quirks() {
+    let q: fake_panel::Quirks = "slow-media,live-endless".parse().unwrap();
+    let h = fake_panel::spawn(Config::default().with_quirks(q))
+        .await
+        .expect("spawn");
+    if !ready(&h) {
+        return;
+    }
+    let b = h.base_url().to_owned();
+    let mkv = h
+        .catalogue()
+        .movies
+        .iter()
+        .find(|m| m.container_extension == "mkv")
+        .unwrap()
+        .stream_id;
+    // slow-media: still ranged, but paced (~256 KiB/s).
+    let url = format!("{b}/movie/demo/demo/{mkv}.mkv");
+    let started = std::time::Instant::now();
+    let part = client()
+        .get(&url)
+        .header("Range", "bytes=1000-")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(part.status(), 206);
+    assert!(
+        part.headers()["content-range"]
+            .to_str()
+            .unwrap()
+            .starts_with("bytes 1000-")
+    );
+    let mut part = part;
+    let mut got = 0usize;
+    while got < 512 * 1024 {
+        match part.chunk().await.unwrap() {
+            Some(c) => got += c.len(),
+            None => break,
+        }
+    }
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(1500),
+        "512 KiB should take about 2 s"
+    );
+    // live-endless: keeps sending past the clip's end, starting with TS packets.
+    let mut live = get(&live_url(&h, 1001, "ts")).await;
+    assert_eq!(live.status(), 200);
+    assert!(
+        live.content_length().is_none(),
+        "an endless stream has no length"
+    );
+    let first = live.chunk().await.unwrap().unwrap();
+    assert_eq!(first[0], 0x47);
+    drop(live);
+
+    // media-html / media-playlist: 200 OK, but not video.
+    let q: fake_panel::Quirks = "media-html".parse().unwrap();
+    let h = fake_panel::spawn(Config::default().with_quirks(q))
+        .await
+        .expect("spawn");
+    let res = get(&format!("{}/movie/demo/demo/{mkv}.mkv", h.base_url())).await;
+    assert_eq!(res.status(), 200);
+    assert!(res.text().await.unwrap().contains("<html>"));
+    let res = get(&live_url(&h, 1001, "ts")).await;
+    assert!(res.text().await.unwrap().contains("<html>"));
+    let q: fake_panel::Quirks = "media-playlist".parse().unwrap();
+    let h = fake_panel::spawn(Config::default().with_quirks(q))
+        .await
+        .expect("spawn");
+    let res = get(&format!("{}/movie/demo/demo/{mkv}.mkv", h.base_url())).await;
+    assert_eq!(res.status(), 200);
+    assert!(res.text().await.unwrap().starts_with("#EXTM3U"));
+}

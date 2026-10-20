@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 base64 = "0.23"
+# The body chunks of streaming downloads (already in the tree through reqwest).
+bytes = "1"
 chrono = { version = "0.4.42", default-features = false, features = ["std", "clock", "serde"] }
 chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
 flate2 = "1.1"
@@ -26,7 +28,7 @@ url = "2.5"
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "io-util"] }
 wiremock = "0.6"
 
 [lints]

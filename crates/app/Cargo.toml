@@ -38,6 +38,8 @@ fake-panel = { path = "../fake-panel", optional = true }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 directories = "6"
+# Free space on the recordings disk (downloads and recordings stop before it fills up).
+fs4 = { version = "1.1", default-features = false, features = ["sync"] }
 eframe = { version = "0.37", default-features = false, features = [
     "glow",
     "default_fonts",

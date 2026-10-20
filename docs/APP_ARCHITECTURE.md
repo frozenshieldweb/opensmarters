@@ -39,6 +39,7 @@ cargo fmt; cargo clippy -p opensmarters --all-targets --all-features -- -D warni
 | `src/screens/player/` | Parts of the fullscreen player: `timeshift.rs` (LIVE / −mm:ss badge, rewind bar, ←/→ in time, Go live), `health.rs` (stream details panel), `actions.rs` (`osd_icon` for feature buttons) |
 | `src/playback/multi.rs`, `src/screens/multiscreen/` | Multiscreen: `MultiView` (`cx.multi`, the tile players, budget/stagger/sound rules) and the screen (layouts, channel picker); see [§7.4](#74-multiscreen) |
 | `src/sessions.rs` | `SessionManager` (`cx.sessions`): open/switch profiles |
+| `src/dvr/` | Recordings & downloads: engine, jobs, clips, hooks (`cx.dvr`, see §14) |
 | `src/task.rs` | `Loader<T>`: background work with staleness protection |
 | `src/logging.rs` | Redacted `tracing` (stderr + rotating log file) |
 | `src/cli.rs`, `src/harness.rs` | Command line and the dev/test harness (scripted keys, screenshots; harness flags only with the `harness` feature) |
@@ -659,3 +660,86 @@ reformatting existing code so parallel work merges cleanly.
 - Search finds programmes only in schedules already fetched (Guide rows, XMLTV); films and
   series in what is cached unless the user loads the full lists.
 - The connection-limit check cannot see the HTTP status mpv got; it asks the account API.
+
+## 14. Recordings & downloads (Phase 7, `src/dvr/`)
+
+Films and episodes downloaded for offline viewing, live channels recorded now or on a
+schedule, and clips saved from the player's buffer. The job list lives in the store
+(`store.recordings()`, never a URL); files live in the recordings folder.
+
+| Module | Role |
+|---|---|
+| `dvr/mod.rs` | Settings (`RECORDINGS_DIR`, `PAD_BEFORE`/`PAD_AFTER`, `DOWNLOADS_AT_ONCE`, `KEEP_FREE_GB`, `CLIP_MINUTES` → `DvrSettings`), `file_name`, `schedule_programme` (the Guide's "Record"), `record_until_stopped`, `queue_download`, and `cx.dvr` (`Dvr`): job snapshot, live progress, user actions (`queue`, `pause`, `resume`, `stop_recording`, `cancel`, `delete`) |
+| `dvr/engine.rs` | One engine per open profile: supervisor (tick 4 s, woken by the UI and by freed connections), job registry with controls, start-up recovery |
+| `dvr/download.rs`, `dvr/record.rs` | The jobs: film/episode download (Range resume), live recording (TS or HLS) |
+| `dvr/source.rs` | Stream sources rebuilt from the profile; `PlaybackRequest`s for saved files |
+| `dvr/files.rs`, `dvr/jobs.rs` | Safe names, `.part` writer, free-space guard, retry delays |
+| `dvr/player.rs` | UI-thread work with the shared player: clips (`dump-cache`), recording through the player (`stream-record`), resume points of played recordings |
+| `dvr/ui.rs` | Hooks for other screens (detail pages, player OSD, Live TV badge) and the DVR dialogs |
+| `screens/recordings.rs` | Recordings screen: tabs Downloads / Recordings / Scheduled (scheduled recordings + reminders) |
+| `screens/settings/recordings.rs` | Settings › Recordings & downloads |
+| `core::download`, `core::hls` | Streaming downloader (timeouts, safe redirects, checked Range) and the defensive HLS playlist parser |
+
+**Life cycle.** `dvr::on_session_opened` stops the previous profile's engine and starts
+this one's; `Dvr::shutdown` (app exit) marks running jobs paused with
+`engine::INTERRUPTED`. At start the engine re-queues those and `active` rows left by a
+crash: downloads resume from their `.part`, live recordings continue in the same file if
+their window is still open, otherwise what was recorded is kept. `dvr::on_frame` reloads
+the snapshot when `Dvr::epoch()` changes (a row changed state); running jobs publish
+progress in memory (`Dvr::progress`) and write it to the store at most every 2 s.
+
+**Connections.** Downloads take a `Download` lease with `try_acquire` (oldest first, 1–2 at
+once). Viewing may revoke it: the job stops at once, goes back to `queued` with
+`engine::PREEMPTED`, and continues when a slot frees. Live recordings take a `Recording`
+lease (never preempted); one that can't get a connection keeps trying until its end and
+is listed by `Engine::waiting()`: if the user watches that very channel, `dvr::player`
+records it through the player instead (same connection; changing channel stops it and
+the row says so). An offline profile keeps everything waiting (`engine::OFFLINE`).
+
+**Scheduling.** Rows keep the programme's start/end; the window is `start − PAD_BEFORE`
+… `end + PAD_AFTER`. A programme already on air starts at once ("Record" in the player
+schedules the current programme from the guide; without a guide it records "until you
+stop", capped at `MAX_RECORDING`, no padding). A window that passed while the app was
+closed is marked `engine::MISSED`.
+
+**Files.** Names come from `dvr::file_name` (recordings, with the date) or
+`files::download_name` (films and episodes), made unique against the database, final
+files and `.part` files. A job writes `<name>.part` (created new, never overwriting),
+checks the first bytes with `sniff_container` before keeping anything (an HTML page or
+a playlist is deleted: "The provider sent something that isn't a video"), and renames
+it at the end (downloads get the extension of what the file really is). Jobs stop when
+free space drops below `KEEP_FREE_GB` (downloads pause, recordings keep what they have).
+`--ephemeral` without `--data-dir` saves into a temporary folder, never the user's
+Videos folder.
+
+**Sources.** URLs are rebuilt when a job starts: `movie_request` / `episode_request`;
+live recordings use the Xtream client's own URL builder with the `.ts` container when
+the account allows it, else `live_request` (M3U entries). HLS is detected by the content
+(`#EXTM3U`): best variant with muxed audio, live edge (last three segments), ordered
+segments, fMP4 init sections; encrypted streams fail with a clear message.
+
+**Playing saved files.** `dvr::ui::play_saved` builds the request off the UI thread
+(`source::playback_request`, `PlayableUrl::from_owned_media`): films and episodes play
+as `Movie`/`Episode` (resume point shared with streaming), live recordings and clips as
+`Recording` (resume point `recordings.position_secs`, saved by `dvr::player`). Saved
+files play when the provider is unreachable.
+
+**Clips.** "Save clip" in the live OSD offers 1/5/15/30 min (the setting is focused
+first) and calls `Player::dump_cache(time_pos − N min, time_pos)` into a new
+`MediaOutput`. The buffer holds at most what played since the stream (re)started, so the
+clip is cut to that and the toast says how long it is. The `Clip` row (done) is added when
+`PlayerEvent::CommandDone` arrives (forwarded by `PlaybackController::take_dvr_events`).
+Needs `PlayerConfig::seekable_cache(true)` (enabled in `PlaybackController::new`).
+
+**Hooks in other screens** (one call each, logic in `dvr::ui`): film detail
+(`movie_download`, `movie_status`), series detail (`episode_downloads`,
+`split_episode_row`, `episode_button`, `season_button`, `episode_action`,
+`detail_dialogs`), player (`player_buttons` inside the OSD for live, `player_overlay`
+every frame: ● REC and the clip dialog), Live TV (`live_row_badge`). DVR dialogs close
+on Esc/Backspace in `dvr::on_frame`, before the screen sees the key.
+
+**Dev/test.** fake-panel quirks `slow-media` (≈ 256 KiB/s, Range still works),
+`live-endless` (live `.ts` loops forever at its real bitrate), `media-html` /
+`media-playlist` (a `200 OK` that isn't video), e.g.
+`OPENSMARTERS_DEMO_QUIRKS=slow-media,live-endless`. Engine tests: `tests/dvr.rs`.
+Routes: `recordings[:tab=downloads|recordings|scheduled]`, `settings:recordings`.

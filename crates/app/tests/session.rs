@@ -328,3 +328,106 @@ fn parental_locks_follow_keywords_pin_and_session_unlock() {
         "All is never locked"
     );
 }
+
+#[test]
+fn multiscreen_tiles_never_reach_locked_channels() {
+    use opensmarters_app::playback::multi::{
+        self, LockedCategories, MultiView, PlaceError, TileSettings,
+    };
+    use opensmarters_app::services::catalog::LiveChannel;
+
+    let env = env();
+    // With a PIN, "Adult Night" is locked (keyword).
+    env.services
+        .store
+        .parental()
+        .set_pin(&SecretString::from("1234".to_owned()))
+        .unwrap();
+    let id = xtream_profile(&env, "demo", "demo", UserAgent::Default);
+    let session = env
+        .rt
+        .block_on(Session::open(env.services.clone(), id))
+        .unwrap_or_else(|f| panic!("{}", f.error));
+    let catalog = env.rt.block_on(session.live_catalog()).unwrap();
+    let adult = catalog
+        .categories
+        .iter()
+        .find(|c| c.name.contains("Adult"))
+        .cloned()
+        .unwrap();
+    let in_adult = |c: &LiveChannel| c.categories.contains(&adult.id);
+    let adult_channels: Vec<LiveChannel> = catalog
+        .channels
+        .iter()
+        .filter(|c| in_adult(c))
+        .cloned()
+        .collect();
+    assert!(!adult_channels.is_empty());
+    let locks = LockedCategories::of(&session, &catalog);
+    let hide = |c: &LiveChannel| locks.hides(c);
+    assert!(adult_channels.iter().all(hide));
+    assert!(
+        !multi::playable(&catalog.channels, hide)
+            .iter()
+            .any(in_adult)
+    );
+
+    // A tile (no video in tests) placed from a list that still holds the locked channels,
+    // as a Live TV category carried over from the main player could.
+    let mut view = MultiView::default();
+    view.configure(TileSettings {
+        egui: egui::Context::default(),
+        redactor: Redactor::new(),
+        fit_index: 0,
+        volume: 50,
+        hw_decoding: false,
+        audio_language: None,
+    });
+    let unfiltered = Arc::new(catalog.channels.clone());
+    let at = |index: usize| ZapContext {
+        channels: Arc::clone(&unfiltered),
+        index,
+    };
+    let first_adult = unfiltered.iter().position(in_adult).unwrap();
+    let first_ok = unfiltered.iter().position(|c| !hide(c)).unwrap();
+    assert_eq!(
+        view.place(0, Arc::clone(&session), at(first_adult), &hide),
+        Err(PlaceError::Locked),
+        "a locked channel never goes into a tile"
+    );
+    assert_eq!(
+        view.place(0, Arc::clone(&session), at(first_ok), &hide),
+        Ok(0)
+    );
+    let tile_list = view.request(0).and_then(|r| r.zap.clone()).unwrap();
+    assert!(
+        !tile_list.channels.iter().any(in_adult),
+        "the tile's list lost the locked channels"
+    );
+
+    // PageUp/PageDown through the whole list, both ways: never a locked channel.
+    for delta in [1, -1] {
+        for _ in 0..catalog.channels.len() + 2 {
+            assert!(view.zap(0, delta, &hide).is_some());
+            let ch = view.channel(0).unwrap();
+            assert!(!in_adult(ch), "zapped to {}", ch.name);
+        }
+    }
+    // Number entry: a locked channel's number never plays in the tile.
+    for c in &adult_channels {
+        if let Some(n) = c.number {
+            let _ = view.zap_to_number(0, n, &hide);
+            assert!(!in_adult(view.channel(0).unwrap()), "number {n} played");
+            // Not even through a list that still holds it.
+            assert!(
+                multi::number_playable(&at(first_ok), n, &hide).is_none_or(|(_, ch)| !in_adult(ch))
+            );
+        }
+    }
+    view.clear();
+
+    // After the PIN (this session's unlock) the category is playable again.
+    session.unlock_category(ContentKind::Live, &adult.id);
+    let unlocked = LockedCategories::of(&session, &catalog);
+    assert!(adult_channels.iter().all(|c| !unlocked.hides(c)));
+}

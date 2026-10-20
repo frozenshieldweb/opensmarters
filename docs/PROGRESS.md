@@ -61,4 +61,12 @@ This tracks the phases in [BUILD_PROMPT.md](BUILD_PROMPT.md#7-how-to-work).
   frame loop while the window is **minimised** (needed for reminders to fire then) wasn't
   verified; a prompt that needs an answer can't be reached from a focused text field until
   the field loses the focus (by design: typing is never interrupted).
+- Multiscreen (7D) follow-ups:
+  - Tile *reconnects* are not staggered. The shared controller schedules its own retries (2, 5, 10, 30, 30 s), so tiles that drop at the same moment reconnect together. Only first opens and zaps go through `multi::next_start`. A start hook or retry jitter in `PlaybackController` would cover it.
+  - Opening multiscreen closes the main stream and opens the same channel again in tile 1 (0.8 s later). A real panel may count the closed connection as stale for 1–3 min, so with a limit of 3 the third tile can get a 403 until it expires. The tile then retries and says "Connection limit reached". Handing the main player's open stream to tile 1 would avoid it.
+  - Leaving multiscreen leaves Live TV's preview empty; it doesn't resume a tile's channel there.
+  - The picker can't unlock a locked category (no PIN prompt in it); it points to Live TV.
+  - Up to four idle tile engines (mpv cores and tile-sized offscreen framebuffers) stay alive until exit once used. They are freed in `on_exit` with the GL context current.
+  - Not exercised in the app yet: coming back to a covered multiscreen (nothing can cover it until reminders or the sleep timer navigate) and the "Stopped" tile state (`stop_all` from the sleep timer). Both are covered only by reading the code and the empty-view unit test.
+  - Demo media: some demo channels (e.g. 001) are short static clips, and every player, tiles included, goes to "Reconnecting" about 20 s after opening them (stall detection).
 - Real-provider findings already handled in the app: one stream at a time (stop before load, debounced zapping), live reconnect 2/5/10/30/30 s, connection-limit message from `account_info()` after a stream failure, subtitles off by default, live OSD without scrubber, catalogue titles (never mpv's media title), catch-up failure message, Home never fetches the VOD/series "All" lists, decorative symbols mapped (★ ➤) and CJK/Arabic/superscripts via the OS font fallback.

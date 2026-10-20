@@ -17,3 +17,6 @@ _reference/
 # Local app data / logs
 *.log
 .env
+
+# Agent worktrees
+.claude/

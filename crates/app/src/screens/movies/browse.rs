@@ -374,8 +374,11 @@ impl<K: BrowseKind> Browse<K> {
         self.apply_selection(cx, sel);
     }
 
+    /// The locked categories (session unlocks applied). Items in any of them stay out of
+    /// every listing, not only "All": a film of an open category can also sit in a
+    /// locked one (SR-15).
     fn locked_categories(&self, session: &Session) -> Vec<CategoryId> {
-        if !session.parental_enabled() || self.selection != Some(Selection::All) {
+        if !session.parental_enabled() {
             return Vec::new();
         }
         self.categories

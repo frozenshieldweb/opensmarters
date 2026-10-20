@@ -29,12 +29,14 @@ use opensmarters_core::{Category, CategoryId, Series, SeriesInfo, VodInfo, VodSt
 use opensmarters_store::{ContentKind, Favourite, PlaybackKind, PlaybackProgress, RecentChannel};
 
 use super::common::locks::{self, CategoryNames};
+use super::common::unlock::{UnlockFlow, UnlockResult};
 use super::{AppCtx, Screen};
 use crate::error::AppError;
 use crate::focus;
 use crate::nav::{Route, Section};
 use crate::playback::ZapContext;
 use crate::services::catalog::{LiveCatalog, LiveChannel};
+use crate::services::session::locks::ItemLock;
 use crate::services::session::{series_key, vod_streams_key};
 use crate::services::{ImageService, ImageSize, ImageSlot, Session, vod};
 use crate::task::Loader;
@@ -188,6 +190,40 @@ impl std::fmt::Debug for HeroState {
     }
 }
 
+/// True if the hero item may not be shown (parental control).
+fn hero_item_locked(session: &Session, item: &HeroItem) -> bool {
+    let (kind, id) = match item {
+        HeroItem::Resume(p) => return session.is_locked(p),
+        HeroItem::Movie(m) => (ContentKind::Movie, m.id),
+        HeroItem::Series(s) => (ContentKind::Series, s.id),
+        HeroItem::Welcome => return false,
+    };
+    !matches!(
+        session.item_lock(kind, &id.to_string(), None),
+        ItemLock::Unlocked
+    )
+}
+
+/// A play action to run again once the PIN unlocked it.
+#[derive(Debug, Clone)]
+enum Retry {
+    Progress(Box<PlaybackProgress>),
+    Movie(MovieRef, Option<String>),
+    Live(Arc<Vec<LiveChannel>>, usize),
+}
+
+/// The PIN flow of a refused play action and the action to retry.
+type Unlock = (UnlockFlow, Retry);
+
+/// A request builder's error: a parental lock starts the unlock flow (retried after the
+/// PIN), anything else is a toast.
+fn refused(cx: &mut AppCtx<'_>, e: AppError, retry: Retry, unlock: &mut Option<Unlock>) {
+    match e {
+        AppError::Locked(l) => *unlock = Some((UnlockFlow::new(cx, l), retry)),
+        e => cx.toasts.error(e.user_message()),
+    }
+}
+
 /// A rail's loading state for its slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Slot {
@@ -224,6 +260,8 @@ pub struct HomeScreen {
     /// When the data loads started (store rails get 150 ms to answer before their slot
     /// is reserved).
     loaded_at: Option<Instant>,
+    /// A play action refused by parental control: the PIN flow and what to retry.
+    unlock: Option<Unlock>,
 }
 
 impl Default for HomeScreen {
@@ -277,6 +315,7 @@ impl HomeScreen {
             created: Instant::now(),
             loaded_for: None,
             loaded_at: None,
+            unlock: None,
         }
     }
 
@@ -428,7 +467,7 @@ impl HomeScreen {
         }
     }
 
-    fn play_progress(cx: &mut AppCtx<'_>, p: &PlaybackProgress) {
+    fn play_progress(cx: &mut AppCtx<'_>, p: &PlaybackProgress, unlock: &mut Option<Unlock>) {
         let Some(session) = cx.session() else { return };
         // Catch-up resumes from the Catch-up screen (it knows the archive and the
         // timeshift-format fallback).
@@ -441,11 +480,16 @@ impl HomeScreen {
         }
         match session.resume_request(p) {
             Ok(req) => cx.play(req, true),
-            Err(e) => cx.toasts.error(e.user_message()),
+            Err(e) => refused(cx, e, Retry::Progress(Box::new(p.clone())), unlock),
         }
     }
 
-    fn play_movie(cx: &mut AppCtx<'_>, m: &MovieRef, extension: Option<&str>) {
+    fn play_movie(
+        cx: &mut AppCtx<'_>,
+        m: &MovieRef,
+        extension: Option<&str>,
+        unlock: &mut Option<Unlock>,
+    ) {
         let Some(session) = cx.session() else { return };
         // The player shows the catalogue title without the provider tag and "(1981)".
         let shown = vod::display_title(&m.name);
@@ -459,8 +503,45 @@ impl HomeScreen {
             None,
         ) {
             Ok(req) => cx.play(req, true),
-            Err(e) => cx.toasts.error(e.user_message()),
+            Err(e) => refused(
+                cx,
+                e,
+                Retry::Movie(m.clone(), extension.map(str::to_owned)),
+                unlock,
+            ),
         }
+    }
+
+    fn play_live(
+        cx: &mut AppCtx<'_>,
+        channels: &Arc<Vec<LiveChannel>>,
+        i: usize,
+        unlock: &mut Option<Unlock>,
+    ) {
+        let (Some(session), Some(ch)) = (cx.session(), channels.get(i)) else {
+            return;
+        };
+        match session.live_request(
+            ch,
+            Some(ZapContext {
+                channels: Arc::clone(channels),
+                index: i,
+            }),
+        ) {
+            Ok(req) => cx.play(req, true),
+            Err(e) => refused(cx, e, Retry::Live(Arc::clone(channels), i), unlock),
+        }
+    }
+
+    /// Runs a play action again after the PIN unlocked it.
+    fn retry(&mut self, cx: &mut AppCtx<'_>, retry: Retry) {
+        let mut unlock = None;
+        match retry {
+            Retry::Progress(p) => Self::play_progress(cx, &p, &mut unlock),
+            Retry::Movie(m, ext) => Self::play_movie(cx, &m, ext.as_deref(), &mut unlock),
+            Retry::Live(channels, i) => Self::play_live(cx, &channels, i, &mut unlock),
+        }
+        self.unlock = unlock;
     }
 
     fn live_now(&self, cx: &AppCtx<'_>) -> (Vec<LiveChannel>, &'static str) {
@@ -468,10 +549,11 @@ impl HomeScreen {
             return (Vec::new(), "");
         };
         let favs = session.favourite_ids(ContentKind::Live);
+        // Locked channels (any of their categories) stay off Home.
         let fav: Vec<LiveChannel> = cat
             .channels
             .iter()
-            .filter(|c| favs.contains(&c.key))
+            .filter(|c| favs.contains(&c.key) && !session.is_locked(*c))
             .take(RAIL_ITEMS)
             .cloned()
             .collect();
@@ -483,7 +565,9 @@ impl HomeScreen {
             .value()
             .map(|r| {
                 r.iter()
-                    .filter_map(|rc| cat.get(&rc.stream_id).cloned())
+                    .filter_map(|rc| cat.get(&rc.stream_id))
+                    .filter(|c| !session.is_locked(*c))
+                    .cloned()
                     .collect()
             })
             .unwrap_or_default();
@@ -520,17 +604,19 @@ impl HomeScreen {
         if !self.progress.has_finished() {
             return;
         }
+        // Never feature a locked title (any category; unknown counts as locked).
         let first = self
             .progress
             .value()
-            .and_then(|v| v.first().cloned())
+            .and_then(|v| v.iter().find(|p| !session.is_locked(*p)).cloned())
             .map(HeroItem::Resume);
         let featured = match first {
             Some(p) => Some((p, "Continue watching")),
             None if session.is_xtream() && !self.movies.has_finished() => None,
             None => Some(
                 self.recent_movies
-                    .first()
+                    .iter()
+                    .find(|m| !session.is_locked(*m))
                     .map_or((HeroItem::Welcome, ""), |m| {
                         (HeroItem::Movie(MovieRef::from_stream(m)), "Recently added")
                     }),
@@ -558,7 +644,18 @@ impl HomeScreen {
                 self.hero.target_kicker = kicker;
                 self.hero.target_since = cx.egui.input(|i| i.time);
             }
-            self.hero.featured = Some(featured);
+            self.hero.featured = Some(featured.clone());
+        }
+        // A followed title that got locked (the 30-minute re-lock) leaves the hero.
+        if self
+            .hero
+            .target
+            .as_ref()
+            .is_some_and(|t| hero_item_locked(&session, t))
+        {
+            self.hero.target = Some(featured);
+            self.hero.target_kicker = kicker;
+            self.hero.target_since = cx.egui.input(|i| i.time);
         }
     }
 
@@ -828,12 +925,18 @@ impl HomeScreen {
         let reveal = vec2(16.0, (layout.buttons_top - rect.top() + 8.0).max(16.0));
         focus::scope(&mut child, hero_scope, |ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
-            Self::hero_buttons(cx, ui, &h, reveal);
+            Self::hero_buttons(cx, ui, &h, reveal, &mut self.unlock);
         });
     }
 
     /// The hero's buttons (fixed ids so the focus stays put when the hero changes).
-    fn hero_buttons(cx: &mut AppCtx<'_>, ui: &mut Ui, h: &Hero, reveal: egui::Vec2) {
+    fn hero_buttons(
+        cx: &mut AppCtx<'_>,
+        ui: &mut Ui,
+        h: &Hero,
+        reveal: egui::Vec2,
+        unlock: &mut Option<Unlock>,
+    ) {
         let primary_id = Id::unique("home.hero.play");
         let secondary_id = Id::unique("home.hero.info");
         match &h.item {
@@ -848,7 +951,7 @@ impl HomeScreen {
                     .show(ui)
                     .activated
                 {
-                    Self::play_progress(cx, p);
+                    Self::play_progress(cx, p, unlock);
                 }
                 let detail = match p.kind {
                     PlaybackKind::Movie => p
@@ -886,7 +989,7 @@ impl HomeScreen {
                     .show(ui)
                     .activated
                 {
-                    Self::play_movie(cx, mv, h.extension.as_deref());
+                    Self::play_movie(cx, mv, h.extension.as_deref(), unlock);
                 }
                 if Button::secondary("More info")
                     .icon(icons::INFO)
@@ -1430,6 +1533,11 @@ impl Screen for HomeScreen {
         Some(Section::Home)
     }
 
+    fn on_back(&mut self, _cx: &mut AppCtx<'_>) -> bool {
+        // Esc cancels the PIN prompt of a locked title.
+        self.unlock.take().is_some()
+    }
+
     fn ui(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {
         let session = cx.session();
         if session.is_some() && self.loaded_for != session.as_ref().map(|s| s.profile_id()) {
@@ -1467,6 +1575,17 @@ impl Screen for HomeScreen {
                 .filter_map(|i| all.get(i).cloned())
                 .collect();
         }
+        if let Some((flow, retry)) = &mut self.unlock {
+            match flow.show(cx) {
+                UnlockResult::Unlocked => {
+                    let retry = retry.clone();
+                    self.unlock = None;
+                    self.retry(cx, retry);
+                }
+                UnlockResult::Cancelled => self.unlock = None,
+                UnlockResult::Pending => {}
+            }
+        }
         self.update_featured(cx);
         let ctx = cx.egui.clone();
         self.follow_focus(&ctx);
@@ -1498,7 +1617,18 @@ impl Screen for HomeScreen {
             painter.rect_filled(content, 0.0, color::BG);
         }
 
-        let progress = self.progress.value().cloned().unwrap_or_default();
+        // Locked items (any of their categories, or not checked yet) stay off Home; the
+        // filter runs every frame so unlocking (or the 30-minute re-lock) shows at once.
+        let mut progress = self.progress.value().cloned().unwrap_or_default();
+        let mut recent_movies = self.recent_movies.clone();
+        let mut recent_series = self.recent_series.clone();
+        let mut favs = self.favourites.value().cloned().unwrap_or_default();
+        if let Some(s) = &session {
+            s.retain_unlocked(&mut progress);
+            s.retain_unlocked(&mut recent_movies);
+            s.retain_unlocked(&mut recent_series);
+            s.retain_unlocked(&mut favs);
+        }
         let (live_now, live_kicker) = self.live_now(cx);
         let xtream = session.as_ref().is_none_or(|s| s.is_xtream());
         let hero_ready = self.hero.shown.is_some();
@@ -1550,7 +1680,6 @@ impl Screen for HomeScreen {
         } else {
             Slot::Empty
         };
-        let favs = self.favourites.value().cloned().unwrap_or_default();
         let fav_slot = if open && !self.store_grace(fav_done) {
             state(
                 !favs.is_empty(),
@@ -1625,7 +1754,7 @@ impl Screen for HomeScreen {
                     },
                 );
                 if let Some(Some(p)) = r {
-                    Self::play_progress(cx, &p);
+                    Self::play_progress(cx, &p, &mut self.unlock);
                 }
 
                 // Live now.
@@ -1677,26 +1806,14 @@ impl Screen for HomeScreen {
                             category: Some("favourites".into()),
                         });
                     }
-                    if let Some(i) = play
-                        && let Some(ch) = channels.get(i)
-                        && let Some(session) = cx.session()
-                    {
-                        match session.live_request(
-                            ch,
-                            Some(ZapContext {
-                                channels: Arc::clone(&channels),
-                                index: i,
-                            }),
-                        ) {
-                            Ok(req) => cx.play(req, true),
-                            Err(e) => cx.toasts.error(e.user_message()),
-                        }
+                    if let Some(i) = play {
+                        Self::play_live(cx, &channels, i, &mut self.unlock);
                     }
                 }
 
                 // Recently added movies.
                 let poster_w = cx.layout.poster_width;
-                let movies = self.recent_movies.clone();
+                let movies = recent_movies.clone();
                 let r = self.slot(
                     cx,
                     ui,
@@ -1753,7 +1870,7 @@ impl Screen for HomeScreen {
                 }
 
                 // Series.
-                let series = self.recent_series.clone();
+                let series = recent_series.clone();
                 let r = self.slot(
                     cx,
                     ui,

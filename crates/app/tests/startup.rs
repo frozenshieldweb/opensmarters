@@ -77,6 +77,11 @@ fn warm_cache(env: &Env, id: ProfileId) {
         .block_on(Session::open(env.services.clone(), id))
         .unwrap_or_else(|f| panic!("open failed: {}", f.error));
     env.rt.block_on(s.live_catalog()).unwrap();
+    // Store writes go through the FIFO writer: a no-op write lands after the cached login
+    // and catalogue.
+    env.rt
+        .block_on(env.services.write("flush", |_| Ok(())))
+        .unwrap();
 }
 
 #[test]

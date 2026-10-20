@@ -25,8 +25,8 @@ use opensmarters_core::{HttpConfig, LoginInfo, XtreamAccount};
 use opensmarters_store::{CacheScope, ContentKind, ProfileId, ProfileSource};
 
 use super::{
-    AccountSummary, EpgCache, LOGIN_TTL, OpenFailure, Session, Source, blocking, load_parental,
-    user_agent_string,
+    AccountSummary, InsecureReason, LOGIN_TTL, OpenFailure, Session, Source, blocking, guide,
+    load_parental, locks, user_agent_string,
 };
 use crate::error::AppError;
 use crate::services::Services;
@@ -83,11 +83,19 @@ impl Session {
         let redactor = services.redactor.clone();
         let http = HttpClient::new(&http_config, redactor.clone()).ok()?;
         let acc = XtreamAccount::new(server_url, username.clone()).ok()?;
-        let insecure = !acc.server().is_https();
+        let plain_account = !acc.server().is_https();
         let client = Arc::new(Client::with_redactor(acc, password, &http_config, redactor).ok()?);
         client.set_server_time_zone(info.time_zone());
         let account = Some(AccountSummary::from_login(&info));
         let urls = client.stream_urls(&info);
+        // Same rule as `Session::open` (SR-12): an https panel may hand out http streams.
+        let insecure = if plain_account {
+            Some(InsecureReason::PlainAccount)
+        } else if urls.base().scheme() != "https" {
+            Some(InsecureReason::PlainStreams)
+        } else {
+            None
+        };
 
         let favourites = blocking(&store, move |s| {
             let mut out = std::collections::HashMap::new();
@@ -102,8 +110,14 @@ impl Session {
         services.blocking("mark profile used", move |s| {
             s.profiles().mark_used(profile_id)
         });
+        let favourites = favourites
+            .into_iter()
+            .map(|(k, v)| (k, Arc::new(v)))
+            .collect();
         tracing::info!("profile opened from its cached login; checking the account");
-        Some(Arc::new(Session {
+        Some(Arc::new_cyclic(|me| Session {
+            // Identity and provider connection (as `Session::open` builds them).
+            me: me.clone(),
             profile,
             services,
             source: Source::Xtream {
@@ -113,15 +127,23 @@ impl Session {
             },
             user_agent,
             http,
-            offline: std::sync::atomic::AtomicBool::new(false),
             account,
             insecure,
+            // Lifecycle.
+            offline: std::sync::atomic::AtomicBool::new(false),
+            closed: std::sync::atomic::AtomicBool::new(false),
+            // Caches.
             memo: std::sync::Mutex::new(std::collections::HashMap::new()),
             key_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
-            favourites: std::sync::RwLock::new(favourites),
-            parental: std::sync::RwLock::new(parental),
-            epg: EpgCache::default(),
+            live: std::sync::Mutex::new(None),
+            ext: Arc::new(guide::ExtState::default()),
             xmltv: tokio::sync::OnceCell::new(),
+            // Favourites.
+            favourites: std::sync::RwLock::new(favourites),
+            favourites_generation: std::sync::atomic::AtomicU64::new(0),
+            // Parental control.
+            parental: std::sync::RwLock::new(parental),
+            lock_state: locks::LockState::default(),
         }))
     }
 
@@ -145,14 +167,14 @@ impl Session {
                     });
                 }
                 self.offline.store(false, Ordering::Relaxed);
+                // In order with the other store writes (FIFO writer); not awaited.
                 if let Ok(bytes) = serde_json::to_vec(&info) {
                     let profile = self.profile.id;
-                    let _ = blocking(self.store(), move |s| {
+                    drop(self.services.write("cache the login", move |s| {
                         s.cache()
                             .put(CacheScope::Profile(profile), LOGIN_KEY, &bytes, LOGIN_TTL)
                             .map(|_| ())
-                    })
-                    .await;
+                    }));
                 }
                 Ok(())
             }

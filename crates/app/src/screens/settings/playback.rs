@@ -4,22 +4,28 @@
 //! - **This profile** (saved with the profile, then it reconnects): live stream container
 //!   (only what the account's `allowed_output_formats` permits), catch-up time format,
 //!   User-Agent preset.
+//! - **Simultaneous streams** (this profile, applied at once): Auto (the account's
+//!   `max_connections`) or 1–4, stored in `MAX_STREAMS_OVERRIDE` and applied with
+//!   `session.connections().set_override(..)`.
 //! - **Every profile** (app preferences, applied at once): preferred audio language,
 //!   subtitles (off or a preferred language; live TV always starts with subtitles off),
-//!   hardware decoding and the network buffer (both applied when the player starts, i.e.
-//!   the next launch). See [`crate::playback::tracks`].
+//!   hardware decoding, buffering (Auto / Small / Standard / Large), the live rewind
+//!   window (Off / 15 / 30 / 60 min) and resetting the extra buffering of channels that
+//!   stalled. See [`crate::playback::tracks`] and [`crate::playback::tuning`].
 
 use eframe::egui::{self, Id, Ui};
 use opensmarters_store::{
     LiveContainer, ProfileId, ProfileSettings, ProfileUpdate, TimeshiftFormat, UserAgent,
 };
 
-use super::{SettingsPageUi, page_heading, section, value_label};
+use super::{SettingsPageUi, human_bytes, page_heading, section, value_label};
 use crate::error::AppError;
 use crate::focus;
 use crate::playback::tracks::{LANGUAGES, language_name};
-use crate::playback::{BufferPreset, PlayerTuning};
+use crate::playback::tuning::rewind_bytes;
+use crate::playback::{Buffering, PlayerTuning, REWIND_CHOICES, sanitize_rewind};
 use crate::screens::AppCtx;
+use crate::services::connections::MAX_STREAMS_OVERRIDE;
 use crate::task::Loader;
 use crate::ui::icons;
 use crate::ui::theme::color;
@@ -235,34 +241,140 @@ impl PlaybackPage {
                     changed = true;
                 }
             });
-        SettingRow::new("Network buffer")
-            .description("Larger rides out short drops in films and series, using more memory")
+        SettingRow::new("Buffering")
+            .description("Auto (recommended): quick channel changes, more for films")
             .show(ui, |ui| {
-                let mut sel = usize::from(cx.prefs.network_buffer.min(2));
-                let labels: Vec<&str> = BufferPreset::ALL.iter().map(|p| p.label).collect();
-                Segmented::new(Id::unique("settings.pb.buffer"), &labels, 330.0).show(ui, &mut sel);
-                let v = u8::try_from(sel).unwrap_or(1);
-                if v != cx.prefs.network_buffer {
-                    cx.prefs.network_buffer = v;
+                let mut sel = usize::from(Buffering::from_index(cx.prefs.buffering).index());
+                let labels: Vec<&str> = Buffering::ALL.iter().map(|b| b.label()).collect();
+                Segmented::new(
+                    Id::unique("settings.pb.buffering"),
+                    &labels,
+                    ui.available_width().min(380.0),
+                )
+                .show(ui, &mut sel);
+                let v = u8::try_from(sel).unwrap_or(0);
+                if v != cx.prefs.buffering {
+                    cx.prefs.buffering = v;
                     changed = true;
                 }
             });
-        let wanted = PlayerTuning {
-            hw_decoding: cx.prefs.hw_decoding,
-            buffer: BufferPreset::at(cx.prefs.network_buffer),
-        };
-        if cx.playback.is_available() && wanted != cx.playback.tuning() {
-            ui.add_space(8.0);
-            Callout::new(
-                CalloutKind::Info,
-                "Restart to apply:",
-                "hardware decoding and the buffer change the next time opensmarters starts.",
-            )
-            .width(ui.available_width())
-            .show(ui);
+        let disk = cx.playback.has_disk_cache();
+        SettingRow::new("Rewind live TV")
+            .description("Pause live channels and go back")
+            .show(ui, |ui| {
+                let labels = ["Off", "15 min", "30 min", "60 min"];
+                let mut sel = REWIND_CHOICES
+                    .iter()
+                    .position(|m| *m == sanitize_rewind(cx.prefs.live_rewind))
+                    .unwrap_or(2);
+                Segmented::new(
+                    Id::unique("settings.pb.rewind"),
+                    &labels,
+                    ui.available_width().min(380.0),
+                )
+                .show(ui, &mut sel);
+                let v = REWIND_CHOICES.get(sel).copied().unwrap_or(30);
+                if v != cx.prefs.live_rewind {
+                    cx.prefs.live_rewind = v;
+                    changed = true;
+                }
+            });
+        note(ui, &rewind_description(cx.prefs.live_rewind, disk));
+        if let Some(session) = cx.session() {
+            let profile = session.profile_id();
+            let boosted = cx.playback.boosted_channels(profile);
+            if boosted > 0 {
+                let label = if boosted == 1 {
+                    "1 channel starts with extra buffering".to_owned()
+                } else {
+                    format!("{boosted} channels start with extra buffering")
+                };
+                SettingRow::new(&label)
+                    .description("They stalled before (Buffering: Auto). Reset to start fresh")
+                    .show(ui, |ui| {
+                        if Button::secondary("Reset")
+                            .icon(icons::ARROW_COUNTER_CLOCKWISE)
+                            .id(Id::unique("settings.pb.boost-reset"))
+                            .show(ui)
+                            .activated
+                        {
+                            cx.playback
+                                .reset_channel_buffering(&cx.services.clone(), profile);
+                            cx.toasts.success("Extra buffering reset.");
+                            focus::request(&cx.egui, Id::unique("settings.pb.rewind").with(1));
+                        }
+                    });
+            }
         }
         if changed {
             cx.save_prefs();
+            // Hardware decoding and buffering apply to what is playing right away.
+            cx.playback.set_tuning(PlayerTuning::from_prefs(cx.prefs));
+        }
+    }
+
+    /// "Simultaneous streams" for this profile: stored in the app settings
+    /// ([`MAX_STREAMS_OVERRIDE`]) and applied to the connection budget at once.
+    fn streams_section(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {
+        let Some(session) = cx.session() else { return };
+        let budget = session.connections();
+        section(
+            ui,
+            "Simultaneous streams",
+            Some(
+                "The most streams opensmarters opens at once on this account, shared by \
+                 multiscreen, recordings and downloads. This profile; applies at once.",
+            ),
+        );
+        let account = budget.account_limit();
+        let auto = match account {
+            Some(n) => format!("Auto ({n})"),
+            None => "Auto".to_owned(),
+        };
+        let labels = [auto.as_str(), "1", "2", "3", "4"];
+        let current = budget.override_limit();
+        let mut sel = current.map_or(0, |n| usize::try_from(n.min(4)).unwrap_or(4));
+        SettingRow::new("Streams at once")
+            .description("Auto uses your provider's limit")
+            .show(ui, |ui| {
+                Segmented::new(
+                    Id::unique("settings.pb.streams"),
+                    &labels,
+                    ui.available_width().min(380.0),
+                )
+                .show(ui, &mut sel);
+            });
+        let wanted = u32::try_from(sel).ok().filter(|n| *n > 0);
+        if wanted != current {
+            budget.set_override(wanted);
+            let key = session.profile_id().to_string();
+            cx.services.blocking("save simultaneous streams", move |s| {
+                let mut m = s.settings().get(&MAX_STREAMS_OVERRIDE)?;
+                match wanted.and_then(|n| u8::try_from(n).ok()) {
+                    Some(n) => {
+                        m.insert(key, n);
+                    }
+                    None => {
+                        m.remove(&key);
+                    }
+                }
+                s.settings().set(&MAX_STREAMS_OVERRIDE, &m)
+            });
+        }
+        if let (Some(n), Some(acc)) = (wanted, account)
+            && n > acc
+        {
+            ui.add_space(8.0);
+            Callout::new(
+                CalloutKind::Info,
+                "More than your account allows:",
+                format!(
+                    "your provider allows {acc}; extra streams will be refused (and can lock \
+                     the account out for a minute)."
+                ),
+            )
+            .width(ui.available_width())
+            .show(ui);
         }
     }
 
@@ -346,6 +458,39 @@ impl PlaybackPage {
     }
 }
 
+/// The note under "Rewind live TV": the disk (or memory) it may use.
+fn rewind_description(minutes: u8, disk: bool) -> String {
+    let minutes = sanitize_rewind(minutes);
+    if minutes == 0 {
+        return "Off: Space still pauses live TV for a moment; ←/→ change channel.".to_owned();
+    }
+    if disk {
+        // Behind and ahead of the playback position (a long pause), at 8 Mbit/s.
+        let bytes = 2 * rewind_bytes(minutes, true);
+        format!(
+            "Up to {minutes} min. While you watch live TV it may use up to {} of disk; it is \
+             deleted when you stop.",
+            human_bytes(bytes)
+        )
+    } else {
+        format!(
+            "Without a data folder the rewind buffer stays in memory, so it holds less than \
+             {minutes} min."
+        )
+    }
+}
+
+/// A caption under a setting row.
+fn note(ui: &mut Ui, text: &str) {
+    ui.add_space(2.0);
+    ui.label(
+        egui::RichText::new(text)
+            .font(crate::ui::theme::font::caption())
+            .color(color::TEXT_3),
+    );
+    ui.add_space(6.0);
+}
+
 fn picker_button(p: Picker) -> Id {
     match p {
         Picker::Audio => Id::unique("settings.pb.audio"),
@@ -393,6 +538,8 @@ impl SettingsPageUi for PlaybackPage {
         }
         page_heading(ui, "Playback", None);
         self.profile_section(cx, ui);
+        ui.add_space(32.0);
+        self.streams_section(cx, ui);
         ui.add_space(32.0);
         self.app_section(cx, ui);
         let _ = value_label;

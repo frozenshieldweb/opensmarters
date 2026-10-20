@@ -18,8 +18,14 @@
 //!   live channels). For VOD, the preferred subtitle language (Settings → Playback) or a
 //!   language the user picked in the track sheet is used; the preferred **audio** language
 //!   is selected when a stream has it (see [`tracks`]).
-//! - **Hardware decoding and the network buffer** come from Settings → Playback
-//!   ([`PlayerTuning`]) and apply when the player starts.
+//! - **Buffering per stream** ([`tuning`], wired in [`stream`]): every load carries a
+//!   [`opensmarters_player::StreamTuning`] from Settings › Playback ([`PlayerTuning`]): a
+//!   short start buffer for live, a large disk-backed cache for films. With "Buffering:
+//!   Auto", a live channel that runs dry starts with more buffering next time.
+//!   [`PlaybackController::set_tuning`] applies hardware decoding and buffering at once.
+//! - **Pause and rewind live TV** ([`timeshift`]): live streams keep a seekable cache
+//!   sized by "Rewind live TV"; `live_seek`, `go_live` and `live_view` (for the OSD) move
+//!   inside it. During a live zap or reconnect the last picture stays on screen.
 //! - **VOD end of file = finished**, not an error: the resume point is marked finished.
 //!   A finished episode offers the next one ([`next`]: `up_next`, `play_up_next`).
 //! - **Progress** of movies/episodes/catch-up is saved every [`SAVE_EVERY`] and when
@@ -42,7 +48,10 @@ pub mod multi;
 pub mod next;
 pub mod request;
 pub mod sleep;
+pub mod stream;
+pub mod timeshift;
 pub mod tracks;
+pub mod tuning;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -50,15 +59,17 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use opensmarters_core::{DEFAULT_USER_AGENT, Redactor};
 use opensmarters_player::{
-    EndReason, Hwdec, LoadOptions, LogLevel, Player, PlayerConfig, PlayerEvent, PlayerState,
-    TrackKind, TrackSelection, UserAgent, VideoFit, VideoView,
+    EndReason, LoadOptions, LogLevel, Player, PlayerConfig, PlayerEvent, PlayerState, TrackKind,
+    TrackSelection, UserAgent, VideoFit, VideoView,
 };
 use opensmarters_store::{ItemSnapshot, PlaybackSnapshot};
 
 pub use request::{
     MediaKind, PlaybackItem, PlaybackRequest, StreamHeaders, ZapContext, stream_headers,
 };
-pub use tracks::{BufferPreset, PlayerTuning};
+pub use stream::StreamHealth;
+pub use timeshift::{LiveSeek, LiveView};
+pub use tuning::{Buffering, PlayerTuning, REWIND_CHOICES, sanitize_rewind};
 
 use crate::services::Session;
 use crate::services::connections::{Lease, Purpose};
@@ -124,6 +135,8 @@ struct Active {
     /// The provider connection this stream uses (`None` for local files, or before the
     /// first load).
     lease: Option<Lease>,
+    /// Buffering, rewind position and counters ([`stream`]).
+    stream: stream::StreamState,
 }
 
 /// The user's subtitle preference for VOD in this run.
@@ -153,6 +166,8 @@ pub struct PlaybackController {
     audio_pref: Option<String>,
     tuning: PlayerTuning,
     purpose: Purpose,
+    /// Channels with extra buffering, counters, messages ([`stream`]).
+    tune: stream::Tuner,
 }
 
 impl std::fmt::Debug for PlaybackController {
@@ -167,7 +182,8 @@ impl std::fmt::Debug for PlaybackController {
 impl PlaybackController {
     /// Creates the player. Without libmpv (or the glow renderer) the controller still
     /// works but reports [`PlaybackStatus::Unavailable`]. `tuning` (hardware decoding,
-    /// buffer) is fixed for the player's lifetime.
+    /// buffering, rewind) can change later ([`Self::set_tuning`]); caches go to disk when
+    /// [`tuning::init_disk_cache`] prepared a folder.
     pub fn new(
         get_proc_address: Option<opensmarters_player::GetProcAddress>,
         ctx: &egui::Context,
@@ -186,14 +202,8 @@ impl PlaybackController {
             Some(gpa) => {
                 let config = PlayerConfig::default()
                     .log_level(mpv_log)
-                    .initial_volume(volume.min(100))
-                    .hwdec(if tuning.hw_decoding {
-                        Hwdec::AutoSafe
-                    } else {
-                        Hwdec::Disabled
-                    })
-                    .cache_mib(tuning.buffer.forward_mib, tuning.buffer.back_mib)
-                    .network_timeout(Duration::from_secs(tuning.buffer.timeout_secs));
+                    .initial_volume(volume.min(100));
+                let config = tuning::configure(config, &tuning);
                 let config = match UserAgent::new(DEFAULT_USER_AGENT) {
                     Ok(ua) => config.user_agent(ua),
                     Err(_) => config,
@@ -233,6 +243,7 @@ impl PlaybackController {
             audio_pref: None,
             tuning,
             purpose: Purpose::Watch,
+            tune: stream::Tuner::default(),
         }
     }
 
@@ -376,6 +387,8 @@ impl PlaybackController {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         tracing::debug!(kind = ?req.kind, "play");
+        self.load_boosts(&session);
+        let stream = stream::StreamState::new(self.active.as_ref().map(|a| a.req.kind), req.kind);
         // Zapping keeps the connection lease of the same session (the old stream was just
         // stopped); a local file needs none.
         let lease = self
@@ -397,6 +410,7 @@ impl PlaybackController {
             load_at,
             subs_applied: false,
             lease,
+            stream,
         });
         self.sync_episode_queue();
         if let Some(at) = load_at {
@@ -408,6 +422,7 @@ impl PlaybackController {
     }
 
     fn load_current(&mut self, from_resume: bool) {
+        self.before_load(from_resume);
         let (Some(engine), Some(a)) = (&self.engine, &mut self.active) else {
             return;
         };
@@ -451,7 +466,9 @@ impl PlaybackController {
             start,
         };
         tracing::info!(kind = ?a.req.kind, resume = ?start, "opening stream");
-        if let Err(e) = engine.player.load(&a.req.url, &opts) {
+        let disk = engine.player.config().has_cache_dir();
+        let tuning = stream::prepare_load(&self.tune, &self.tuning, a, disk);
+        if let Err(e) = engine.player.load_with(&a.req.url, &opts, &tuning) {
             tracing::warn!(error = %e, "load refused");
             a.failed = Some(crate::error::AppError::from(e).user_message());
         }
@@ -704,6 +721,8 @@ impl PlaybackController {
             }
         }
 
+        self.update_stream(&st, now);
+
         let due = self
             .active
             .as_ref()
@@ -839,8 +858,12 @@ impl PlaybackController {
 
     /// Paints the video into `rect` (black when nothing plays).
     pub fn paint_video(&mut self, ui: &egui::Ui, rect: egui::Rect) {
+        let hold = self.hold_frame();
         match &mut self.engine {
-            Some(e) => e.video.paint_at(ui, rect, &e.player),
+            Some(e) => {
+                e.video.set_hold_last_frame(hold);
+                e.video.paint_at(ui, rect, &e.player);
+            }
             None => {
                 ui.painter().rect_filled(rect, 0.0, egui::Color32::BLACK);
             }

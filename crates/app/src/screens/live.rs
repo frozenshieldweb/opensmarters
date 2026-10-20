@@ -34,7 +34,6 @@ use crate::ui::assets::{self, Asset, Illustration};
 use crate::ui::icons::{self, Style};
 use crate::ui::layout::Breakpoint;
 use crate::ui::theme::{color, font, radius};
-use crate::ui::widgets::callout::Badge;
 use crate::ui::widgets::feedback::skeleton;
 use crate::ui::widgets::{
     Button, ChannelLogo, Chip, Dialog, EmptyState, IconButton, MenuRow, PinPad, PinPadEvent,
@@ -1092,6 +1091,14 @@ impl LiveScreen {
         if channel.is_some() {
             // Round the video corners by painting it inset and covering with the frame.
             cx.playback.paint_video(ui, video);
+            // Phase 7 (stream A): the last picture is held, dimmed, while a zap or a
+            // reconnect opens the next stream; controller messages become toasts.
+            if cx.playback.holding_frame() {
+                painter.rect_filled(video, 0.0, Color32::from_black_alpha(110));
+            }
+            for msg in cx.playback.take_messages() {
+                cx.toasts.info(msg);
+            }
             match &status {
                 PlaybackStatus::Opening | PlaybackStatus::Buffering => {
                     paint::spinner(&painter, video.center(), 22.0, ui.input(|i| i.time), 3.0);
@@ -1161,10 +1168,13 @@ impl LiveScreen {
                     (1.0, Color32::from_black_alpha(170)),
                 ],
             );
-            let br = Badge::live(
+            // "LIVE", or "−02:13" when the preview plays behind live (paused or rewound
+            // in the player).
+            let br = super::player::timeshift::live_badge(
                 &painter,
                 pos2(video.left() + 16.0, video.bottom() - 26.0),
                 Align2::LEFT_CENTER,
+                cx.playback.live_view().map(|v| v.behind),
             );
             if let Some(ch) = &channel {
                 text::line(

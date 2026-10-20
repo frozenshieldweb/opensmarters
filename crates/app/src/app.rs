@@ -128,10 +128,10 @@ impl OpensmartersApp {
         );
 
         let mpv_log = LogLevel::from_mpv_str(&config.cli.mpv_log).unwrap_or(LogLevel::Info);
-        let tuning = crate::playback::PlayerTuning {
-            hw_decoding: config.prefs.hw_decoding,
-            buffer: crate::playback::BufferPreset::at(config.prefs.network_buffer),
-        };
+        let tuning = crate::playback::PlayerTuning::from_prefs(&config.prefs);
+        // Empty the player's disk cache folder (left over by a crash) before the player
+        // uses it; `--ephemeral` without `--data-dir` caches in memory.
+        crate::playback::tuning::init_disk_cache(services.paths.data_dir.as_deref());
         let mut playback = PlaybackController::new(
             cc.get_proc_address.clone(),
             ctx,

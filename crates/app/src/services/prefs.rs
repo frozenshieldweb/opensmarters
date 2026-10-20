@@ -25,12 +25,22 @@ pub const AUDIO_LANGUAGE: Setting<Option<String>> = Setting::new("app.audio_lang
 /// off. Live TV subtitles always start off.
 pub const SUBTITLE_LANGUAGE: Setting<Option<String>> =
     Setting::new("app.subtitle_language", || None);
-/// Hardware video decoding (`hwdec=auto-safe`); off = software decoding. Applies when the
-/// player starts (next launch).
+/// Hardware video decoding (`hwdec=auto-safe`); off = software decoding. Applies at once.
 pub const HW_DECODING: Setting<bool> = Setting::new("app.hw_decoding", || true);
-/// Network buffer preset index into [`crate::playback::BufferPreset::ALL`] (default 1 =
-/// standard). Applies when the player starts (next launch).
-pub const NETWORK_BUFFER: Setting<u8> = Setting::new("app.network_buffer", || 1);
+/// Buffering ([`crate::playback::Buffering`] index: 0 = Auto (default), 1 = Small,
+/// 2 = Standard, 3 = Large). Applies at once. (Replaces `app.network_buffer`, whose three
+/// presets applied at the next launch.)
+pub const BUFFERING: Setting<u8> = Setting::new("app.buffering", || 0);
+/// "Rewind live TV" window in minutes: one of [`crate::playback::REWIND_CHOICES`]
+/// (0 = off; default 30).
+pub const LIVE_REWIND: Setting<u8> = Setting::new("app.live_rewind", || 30);
+/// Live channels that stalled get more initial buffering next time (Buffering: Auto):
+/// `"<profile id>:<channel key>"` → (extra level 1..=2, unix time of the last stall).
+/// Capped ([`crate::playback::tuning::MAX_BOOSTED_CHANNELS`], least recently stalled
+/// dropped first). Channel keys are catalogue ids or `m3u:<hash>`, never URLs. Owned by
+/// the playback controller (read and written there, not through [`Prefs`]).
+pub const CHANNEL_BUFFERING: Setting<std::collections::BTreeMap<String, (u8, u64)>> =
+    Setting::new("app.channel_buffering", std::collections::BTreeMap::new);
 
 /// UI size choices (Settings → Appearance), applied as an extra zoom in desktop mode.
 pub const UI_SCALES: [f32; 4] = [0.9, 1.0, 1.1, 1.25];
@@ -58,8 +68,10 @@ pub struct Prefs {
     pub subtitle_language: Option<String>,
     /// Hardware decoding.
     pub hw_decoding: bool,
-    /// Network buffer preset index.
-    pub network_buffer: u8,
+    /// Buffering index (0 = Auto, 1 = Small, 2 = Standard, 3 = Large).
+    pub buffering: u8,
+    /// Live rewind window in minutes (0 = off).
+    pub live_rewind: u8,
 }
 
 impl Default for Prefs {
@@ -75,7 +87,8 @@ impl Default for Prefs {
             audio_language: None,
             subtitle_language: None,
             hw_decoding: true,
-            network_buffer: 1,
+            buffering: 0,
+            live_rewind: 30,
         }
     }
 }
@@ -99,7 +112,8 @@ impl Prefs {
             audio_language: s.get(&AUDIO_LANGUAGE)?.and_then(|l| sanitize_lang(&l)),
             subtitle_language: s.get(&SUBTITLE_LANGUAGE)?.and_then(|l| sanitize_lang(&l)),
             hw_decoding: s.get(&HW_DECODING)?,
-            network_buffer: s.get(&NETWORK_BUFFER)?.min(2),
+            buffering: s.get(&BUFFERING)?.min(3),
+            live_rewind: crate::playback::sanitize_rewind(s.get(&LIVE_REWIND)?),
         })
     }
 
@@ -120,7 +134,8 @@ impl Prefs {
         s.set(&AUDIO_LANGUAGE, &self.audio_language)?;
         s.set(&SUBTITLE_LANGUAGE, &self.subtitle_language)?;
         s.set(&HW_DECODING, &self.hw_decoding)?;
-        s.set(&NETWORK_BUFFER, &self.network_buffer)?;
+        s.set(&BUFFERING, &self.buffering)?;
+        s.set(&LIVE_REWIND, &self.live_rewind)?;
         Ok(())
     }
 
@@ -195,7 +210,8 @@ mod tests {
             audio_language: Some("fre".into()),
             subtitle_language: Some("eng".into()),
             hw_decoding: false,
-            network_buffer: 2,
+            buffering: 3,
+            live_rewind: 60,
         };
         p.save(&store).unwrap();
         assert_eq!(Prefs::load(&store).unwrap(), p);
@@ -212,11 +228,13 @@ mod tests {
         s.set(&settings::UI_SCALE, &40.0).unwrap();
         s.set(&AUDIO_LANGUAGE, &Some("../../etc".to_owned()))
             .unwrap();
-        s.set(&NETWORK_BUFFER, &200).unwrap();
+        s.set(&BUFFERING, &200).unwrap();
+        s.set(&LIVE_REWIND, &44).unwrap();
         let p = Prefs::load(&store).unwrap();
         assert!((p.ui_scale - 1.25).abs() < f32::EPSILON);
         assert_eq!(p.audio_language, None);
-        assert_eq!(p.network_buffer, 2);
+        assert_eq!(p.buffering, 3);
+        assert_eq!(p.live_rewind, 30, "nearest offered window");
         assert!((sanitize_scale(f32::NAN) - 1.0).abs() < f32::EPSILON);
     }
 

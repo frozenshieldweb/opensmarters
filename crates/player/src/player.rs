@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 
-use crate::config::{LogLevel, MpvOption, OptValue, PlayerConfig};
+use crate::config::{Hwdec, LogLevel, MpvOption, OptValue, PlayerConfig, StreamTuning};
 use crate::error::{Error, MpvError};
 use crate::ffi::{self, MpvApi, mpv_handle};
 use crate::node::{NodeIn, NodeOut, OwnedNode};
@@ -56,7 +56,9 @@ struct ResolvedLoad {
     url: PlayableUrl,
     user_agent: String,
     referrer: String,
-    start: Option<String>,
+    /// Per-file options: crate-defined names, values formatted by this crate (the resume
+    /// position and [`StreamTuning`]).
+    file_options: Vec<(&'static str, String)>,
 }
 
 // SAFETY: the libmpv client API is documented as fully thread-safe for a
@@ -268,6 +270,28 @@ pub enum Property {
     KeepAspect,
     /// `hwdec-current`
     HwdecCurrent,
+    /// `width` (source size, before aspect correction)
+    SourceWidth,
+    /// `height`
+    SourceHeight,
+    /// `container-fps`
+    ContainerFps,
+    /// `video-format` (short codec name)
+    VideoFormat,
+    /// `audio-codec-name`
+    AudioCodec,
+    /// `video-bitrate` (state only: updated every second)
+    VideoBitrate,
+    /// `audio-bitrate` (state only)
+    AudioBitrate,
+    /// `cache-speed` (state only)
+    CacheSpeed,
+    /// `frame-drop-count` (state only)
+    FrameDrops,
+    /// `decoder-frame-drop-count` (state only)
+    DecoderFrameDrops,
+    /// `demuxer-cache-state` (state only: changes several times a second)
+    CacheState,
 }
 
 struct PropSpec {
@@ -415,6 +439,73 @@ const PROPS: &[PropSpec] = &[
         name: c"hwdec-current",
         format: ffi::MPV_FORMAT_STRING,
         notify: true,
+    },
+    // Stream details (health overlay) and the live rewind window.
+    PropSpec {
+        prop: Property::SourceWidth,
+        name: c"width",
+        format: ffi::MPV_FORMAT_INT64,
+        notify: true,
+    },
+    PropSpec {
+        prop: Property::SourceHeight,
+        name: c"height",
+        format: ffi::MPV_FORMAT_INT64,
+        notify: true,
+    },
+    PropSpec {
+        prop: Property::ContainerFps,
+        name: c"container-fps",
+        format: ffi::MPV_FORMAT_DOUBLE,
+        notify: true,
+    },
+    PropSpec {
+        prop: Property::VideoFormat,
+        name: c"video-format",
+        format: ffi::MPV_FORMAT_STRING,
+        notify: true,
+    },
+    PropSpec {
+        prop: Property::AudioCodec,
+        name: c"audio-codec-name",
+        format: ffi::MPV_FORMAT_STRING,
+        notify: true,
+    },
+    PropSpec {
+        prop: Property::VideoBitrate,
+        name: c"video-bitrate",
+        format: ffi::MPV_FORMAT_DOUBLE,
+        notify: false,
+    },
+    PropSpec {
+        prop: Property::AudioBitrate,
+        name: c"audio-bitrate",
+        format: ffi::MPV_FORMAT_DOUBLE,
+        notify: false,
+    },
+    PropSpec {
+        prop: Property::CacheSpeed,
+        name: c"cache-speed",
+        format: ffi::MPV_FORMAT_DOUBLE,
+        notify: false,
+    },
+    PropSpec {
+        prop: Property::FrameDrops,
+        name: c"frame-drop-count",
+        format: ffi::MPV_FORMAT_INT64,
+        notify: false,
+    },
+    PropSpec {
+        prop: Property::DecoderFrameDrops,
+        name: c"decoder-frame-drop-count",
+        format: ffi::MPV_FORMAT_INT64,
+        notify: false,
+    },
+    PropSpec {
+        prop: Property::CacheState,
+        name: c"demuxer-cache-state",
+        format: ffi::MPV_FORMAT_NODE,
+        notify: false,
     },
 ];
 
@@ -748,8 +839,88 @@ pub struct PlayerState {
     pub keepaspect: bool,
     /// Active hardware decoder (`hwdec-current`), if any.
     pub hwdec_current: Option<String>,
+    /// Source video width before aspect correction (`width`).
+    pub source_width: Option<u32>,
+    /// Source video height (`height`).
+    pub source_height: Option<u32>,
+    /// Frame rate the container declares (`container-fps`).
+    pub fps: Option<f64>,
+    /// Video codec short name such as `h264` (`video-format`; from the media, sanitised).
+    pub video_codec: Option<String>,
+    /// Audio codec short name such as `aac` (`audio-codec-name`; sanitised).
+    pub audio_codec: Option<String>,
+    /// Video bitrate in bits/s, measured on packets (`video-bitrate`).
+    pub video_bitrate: Option<f64>,
+    /// Audio bitrate in bits/s (`audio-bitrate`).
+    pub audio_bitrate: Option<f64>,
+    /// Download speed in bytes/s (`cache-speed`).
+    pub cache_speed: Option<f64>,
+    /// Frames dropped by the video output (`frame-drop-count`).
+    pub frame_drops: Option<i64>,
+    /// Frames dropped by the decoder (`decoder-frame-drop-count`).
+    pub decoder_frame_drops: Option<i64>,
+    /// The demuxer cache: seekable ranges, newest packet, bytes ahead
+    /// (`demuxer-cache-state`).
+    pub cache: CacheState,
     /// Events dropped because the event channel was full.
     pub dropped_events: u64,
+}
+
+/// A time range (seconds on the `time-pos` timeline) held in the demuxer cache.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SeekRange {
+    /// Oldest position that can be seeked to.
+    pub start: f64,
+    /// Newest position.
+    pub end: f64,
+}
+
+impl SeekRange {
+    /// Length in seconds.
+    pub fn len(&self) -> f64 {
+        (self.end - self.start).max(0.0)
+    }
+
+    /// True if the range holds no time.
+    pub fn is_empty(&self) -> bool {
+        self.len() <= 0.0
+    }
+}
+
+/// Most ranges kept from `demuxer-cache-state` (mpv normally reports one or two).
+pub const MAX_SEEK_RANGES: usize = 16;
+
+/// The demuxer cache (`demuxer-cache-state`), for the live rewind window and the stream
+/// details overlay. Times share the `time-pos` timeline.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CacheState {
+    /// Ranges that can be seeked to without reopening the stream, oldest first (at most
+    /// [`MAX_SEEK_RANGES`]). On a live stream played with a seekable cache, the range
+    /// around `time-pos` is the rewind window: its `end` is the newest data received.
+    pub seekable_ranges: Vec<SeekRange>,
+    /// Timestamp of the newest packet received (`cache-end`).
+    pub cache_end: Option<f64>,
+    /// Bytes buffered ahead of the playback position (`fw-bytes`).
+    pub forward_bytes: Option<u64>,
+    /// Bytes held in the disk cache file (`file-cache-bytes`).
+    pub file_cache_bytes: Option<u64>,
+    /// The stream itself ended; what is cached can still be played (`eof`).
+    pub eof: bool,
+    /// Playback is waiting for data (`underrun`).
+    pub underrun: bool,
+    /// Average input rate in bytes/s (`raw-input-rate`).
+    pub input_rate: Option<f64>,
+}
+
+impl CacheState {
+    /// The range holding `t` (0.5 s tolerance), else the newest range.
+    pub fn range_at(&self, t: f64) -> Option<SeekRange> {
+        self.seekable_ranges
+            .iter()
+            .copied()
+            .find(|r| t >= r.start - 0.5 && t <= r.end + 0.5)
+            .or_else(|| self.seekable_ranges.last().copied())
+    }
 }
 
 impl Default for PlayerState {
@@ -781,6 +952,17 @@ impl Default for PlayerState {
             panscan: 0.0,
             keepaspect: true,
             hwdec_current: None,
+            source_width: None,
+            source_height: None,
+            fps: None,
+            video_codec: None,
+            audio_codec: None,
+            video_bitrate: None,
+            audio_bitrate: None,
+            cache_speed: None,
+            frame_drops: None,
+            decoder_frame_drops: None,
+            cache: CacheState::default(),
             dropped_events: 0,
         }
     }
@@ -885,8 +1067,10 @@ impl Player {
     /// # Errors
     /// [`Error::Load`] if libmpv is missing (the message points to
     /// `docs/LIBMPV.md`), [`Error::MandatoryOption`] if a hardening option
-    /// cannot be applied, or another [`Error`] from libmpv.
+    /// cannot be applied, [`Error::InvalidArgument`] for an unusable
+    /// [`PlayerConfig::cache_dir`], or another [`Error`] from libmpv.
     pub fn new(config: PlayerConfig) -> Result<Self, Error> {
+        config.cache_dir_str().map_err(Error::InvalidArgument)?;
         let api = ffi::api(config.libmpv_path.as_deref())?;
         // SAFETY: no preconditions.
         let raw = unsafe { (api.create)() };
@@ -1057,7 +1241,8 @@ impl Player {
     /// The User-Agent and Referer are set through mpv's `user-agent` and
     /// `referrer` properties first, then `loadfile` runs with the URL as a
     /// single argument (never a string-built command line). The only
-    /// per-file option is a numeric `start`, formatted here.
+    /// per-file option is a numeric `start`, formatted here. The cache uses the
+    /// player's global settings; [`Player::load_with`] tunes it per stream.
     ///
     /// With video output enabled (the default), a load issued before any
     /// [`crate::VideoView`]/[`crate::RenderContext`] is attached is held and
@@ -1072,6 +1257,58 @@ impl Player {
     /// mpv refuses to queue the request. Loading failures arrive later as
     /// [`PlayerEvent::EndFile`] with [`EndReason::Error`].
     pub fn load(&self, url: &PlayableUrl, opts: &LoadOptions) -> Result<(), Error> {
+        self.load_inner(url, opts, None)
+    }
+
+    /// Like [`Player::load`], with the stream's buffering ([`StreamTuning`]) sent as
+    /// `loadfile` per-file options next to `start`. They apply from the first byte (the
+    /// initial buffer, cache sizes, a seekable or disk-backed cache) and end with the
+    /// file, so the next load starts from the player's defaults again.
+    ///
+    /// # Errors
+    /// As [`Player::load`].
+    pub fn load_with(
+        &self,
+        url: &PlayableUrl,
+        opts: &LoadOptions,
+        tuning: &StreamTuning,
+    ) -> Result<(), Error> {
+        self.load_inner(url, opts, Some(tuning))
+    }
+
+    /// Applies `tuning` to the stream that is playing, at once (cache sizes, the buffer
+    /// to wait for after a stall, disk or memory). [`PlayerState::seekable`] is decided
+    /// when a stream opens, so turning on [`StreamTuning::seekable_cache`] here does not
+    /// change it (seeks inside the cache still work). When nothing is loaded this changes the
+    /// player's defaults instead. Failures arrive as [`PlayerEvent::CommandFailed`]
+    /// with [`Op::Tuning`].
+    ///
+    /// # Errors
+    /// [`Error::Mpv`] if mpv refuses to queue a request.
+    pub fn set_tuning(&self, tuning: &StreamTuning) -> Result<(), Error> {
+        let disk = self.config.has_cache_dir();
+        for (name, value) in tuning.mpv_options(disk) {
+            let name = CString::new(name).map_err(|_| Error::InvalidArgument("option name"))?;
+            self.set_string(Op::Tuning, &name, &value)?;
+        }
+        Ok(())
+    }
+
+    /// Switches hardware decoding on or off, at once (mpv re-creates the decoder; the
+    /// stream keeps playing). [`PlayerState::hwdec_current`] reports the decoder in use.
+    ///
+    /// # Errors
+    /// [`Error::Mpv`] if mpv refuses to queue the request.
+    pub fn set_hwdec(&self, hwdec: Hwdec) -> Result<(), Error> {
+        self.set_string(Op::Tuning, c"hwdec", hwdec.as_mpv_str())
+    }
+
+    fn load_inner(
+        &self,
+        url: &PlayableUrl,
+        opts: &LoadOptions,
+        tuning: Option<&StreamTuning>,
+    ) -> Result<(), Error> {
         if url.is_local_file() {
             if !url.is_owned_media() && !self.config.allow_local_files {
                 return Err(Error::LocalFilesDisabled);
@@ -1091,15 +1328,18 @@ impl Player {
             .as_ref()
             .map_or("", Referrer::as_str)
             .to_owned();
-        let start = opts
-            .start
-            .filter(|s| s.is_finite() && *s > 0.0)
-            .map(|s| format!("{:.3}", s.min(1.0e7)));
+        let mut file_options = Vec::new();
+        if let Some(s) = opts.start.filter(|s| s.is_finite() && *s > 0.0) {
+            file_options.push(("start", format!("{:.3}", s.min(1.0e7))));
+        }
+        if let Some(t) = tuning {
+            file_options.extend(t.mpv_options(self.config.has_cache_dir()));
+        }
         let load = ResolvedLoad {
             url: url.clone(),
             user_agent,
             referrer,
-            start,
+            file_options,
         };
         {
             let mut v = self.core.video();
@@ -1424,8 +1664,12 @@ fn set_string_async(core: &Core, op: Op, name: &CStr, v: &str) -> Result<(), Err
     check(core, r, "set_property_async")
 }
 
-/// Sets the HTTP headers, then runs `loadfile` with named arguments: the URL
-/// is one argument and the only per-file option is our own numeric `start`.
+/// Sets the HTTP headers, then runs `loadfile` with named arguments.
+///
+/// Invariant: the URL is one argument, never part of a string-built command. The
+/// per-file `options` map holds only crate-defined option names (`start` and the
+/// [`StreamTuning`] names) whose values this crate formats itself: numbers and
+/// `yes`/`no`/`auto`. No caller-supplied text becomes an option.
 fn issue_load(core: &Core, load: &ResolvedLoad) -> Result<(), Error> {
     set_string_async(core, Op::HttpHeaders, c"user-agent", &load.user_agent)?;
     set_string_async(core, Op::HttpHeaders, c"referrer", &load.referrer)?;
@@ -1434,8 +1678,13 @@ fn issue_load(core: &Core, load: &ResolvedLoad) -> Result<(), Error> {
         ("url", NodeIn::Str(load.url.as_str())),
         ("flags", NodeIn::Str("replace")),
     ];
-    if let Some(start) = &load.start {
-        args.push(("options", NodeIn::Map(vec![("start", NodeIn::Str(start))])));
+    if !load.file_options.is_empty() {
+        let options = load
+            .file_options
+            .iter()
+            .map(|(k, v)| (*k, NodeIn::Str(v.as_str())))
+            .collect();
+        args.push(("options", NodeIn::Map(options)));
     }
     let mut owned = OwnedNode::new(&NodeIn::Map(args))
         .map_err(|_| Error::InvalidArgument("NUL in argument"))?;
@@ -1784,6 +2033,77 @@ fn apply_property(s: &mut PlayerState, prop: Property, v: Value) {
                 _ => None,
             };
         }
+        Property::SourceWidth => s.source_width = positive_u32(int(&v)),
+        Property::SourceHeight => s.source_height = positive_u32(int(&v)),
+        Property::ContainerFps => s.fps = dbl(&v).filter(|f| *f > 0.0 && *f < 1000.0),
+        Property::VideoFormat => s.video_codec = short_text(v),
+        Property::AudioCodec => s.audio_codec = short_text(v),
+        Property::VideoBitrate => s.video_bitrate = dbl(&v).filter(|b| *b >= 0.0),
+        Property::AudioBitrate => s.audio_bitrate = dbl(&v).filter(|b| *b >= 0.0),
+        Property::CacheSpeed => s.cache_speed = dbl(&v).filter(|b| *b >= 0.0),
+        Property::FrameDrops => s.frame_drops = int(&v).filter(|n| *n >= 0),
+        Property::DecoderFrameDrops => s.decoder_frame_drops = int(&v).filter(|n| *n >= 0),
+        Property::CacheState => {
+            s.cache = match &v {
+                Value::Node(n) => parse_cache_state(n),
+                _ => CacheState::default(),
+            };
+        }
+    }
+}
+
+fn positive_u32(v: Option<i64>) -> Option<u32> {
+    v.and_then(|i| u32::try_from(i).ok()).filter(|i| *i > 0)
+}
+
+/// A short media-provided name (codec), sanitised and capped at 32 characters.
+fn short_text(v: Value) -> Option<String> {
+    match v {
+        Value::Str(t) => Some(sanitize(&t).chars().take(32).collect::<String>())
+            .filter(|t: &String| !t.is_empty()),
+        _ => None,
+    }
+}
+
+fn node_f64(n: &NodeOut) -> Option<f64> {
+    match n {
+        NodeOut::Double(d) if d.is_finite() => Some(*d),
+        #[allow(clippy::cast_precision_loss)]
+        NodeOut::Int(i) => Some(*i as f64),
+        _ => None,
+    }
+}
+
+/// Reads mpv's `demuxer-cache-state` map. Unknown or malformed entries are skipped.
+fn parse_cache_state(n: &NodeOut) -> CacheState {
+    let num = |k: &str| n.get(k).and_then(node_f64);
+    let bytes = |k: &str| {
+        n.get(k)
+            .and_then(NodeOut::as_i64)
+            .and_then(|b| u64::try_from(b).ok())
+    };
+    let flag = |k: &str| n.get(k).and_then(NodeOut::as_bool).unwrap_or(false);
+    let mut seekable_ranges: Vec<SeekRange> = match n.get("seekable-ranges") {
+        Some(NodeOut::Array(items)) => items
+            .iter()
+            .filter_map(|r| {
+                let start = r.get("start").and_then(node_f64)?;
+                let end = r.get("end").and_then(node_f64)?;
+                (end >= start).then_some(SeekRange { start, end })
+            })
+            .take(MAX_SEEK_RANGES)
+            .collect(),
+        _ => Vec::new(),
+    };
+    seekable_ranges.sort_by(|a, b| a.start.total_cmp(&b.start));
+    CacheState {
+        seekable_ranges,
+        cache_end: num("cache-end"),
+        forward_bytes: bytes("fw-bytes"),
+        file_cache_bytes: bytes("file-cache-bytes"),
+        eof: flag("eof"),
+        underrun: flag("underrun"),
+        input_rate: num("raw-input-rate").filter(|r| *r >= 0.0),
     }
 }
 
@@ -1964,6 +2284,92 @@ mod tests {
         assert_eq!(s.video_size(), Some((1280, 720)));
         apply_property(&mut s, Property::VideoWidth, Value::None);
         assert_eq!(s.video_size(), None);
+    }
+
+    #[test]
+    fn cache_state_parses_ranges_and_skips_garbage() {
+        let range = |s: f64, e: f64| {
+            NodeOut::Map(vec![
+                ("start".into(), NodeOut::Double(s)),
+                ("end".into(), NodeOut::Double(e)),
+            ])
+        };
+        let node = NodeOut::Map(vec![
+            (
+                "seekable-ranges".into(),
+                NodeOut::Array(vec![
+                    range(40.0, 70.0),
+                    range(0.0, 12.5),
+                    range(9.0, 3.0),
+                    NodeOut::Str("x".into()),
+                    range(f64::NAN, 1.0),
+                ]),
+            ),
+            ("cache-end".into(), NodeOut::Double(70.0)),
+            ("fw-bytes".into(), NodeOut::Int(1_000_000)),
+            ("file-cache-bytes".into(), NodeOut::Int(-5)),
+            ("eof".into(), NodeOut::Flag(true)),
+            ("raw-input-rate".into(), NodeOut::Int(125_000)),
+        ]);
+        let c = parse_cache_state(&node);
+        assert_eq!(
+            c.seekable_ranges,
+            vec![
+                SeekRange {
+                    start: 0.0,
+                    end: 12.5
+                },
+                SeekRange {
+                    start: 40.0,
+                    end: 70.0
+                }
+            ]
+        );
+        assert_eq!(c.cache_end, Some(70.0));
+        assert_eq!(c.forward_bytes, Some(1_000_000));
+        assert_eq!(c.file_cache_bytes, None);
+        assert!(c.eof && !c.underrun);
+        assert_eq!(c.input_rate, Some(125_000.0));
+        assert_eq!(c.range_at(50.0).map(|r| r.start), Some(40.0));
+        assert_eq!(c.range_at(5.0).map(|r| r.end), Some(12.5));
+        assert_eq!(c.range_at(30.0).map(|r| r.start), Some(40.0), "newest");
+        assert_eq!(parse_cache_state(&NodeOut::None), CacheState::default());
+
+        let many = NodeOut::Map(vec![(
+            "seekable-ranges".into(),
+            NodeOut::Array(
+                (0..100)
+                    .map(|i| range(f64::from(i), f64::from(i) + 0.5))
+                    .collect(),
+            ),
+        )]);
+        assert_eq!(
+            parse_cache_state(&many).seekable_ranges.len(),
+            MAX_SEEK_RANGES
+        );
+    }
+
+    #[test]
+    fn stream_details_are_sanitised() {
+        let mut s = PlayerState::default();
+        apply_property(
+            &mut s,
+            Property::VideoFormat,
+            Value::Str("h264\u{1b}".into()),
+        );
+        assert_eq!(s.video_codec.as_deref(), Some("h264"));
+        apply_property(&mut s, Property::AudioCodec, Value::Str("a".repeat(500)));
+        assert_eq!(s.audio_codec.as_ref().map(String::len), Some(32));
+        apply_property(&mut s, Property::ContainerFps, Value::Double(f64::INFINITY));
+        assert_eq!(s.fps, None);
+        apply_property(&mut s, Property::ContainerFps, Value::Double(25.0));
+        assert_eq!(s.fps, Some(25.0));
+        apply_property(&mut s, Property::SourceWidth, Value::Int(-1));
+        assert_eq!(s.source_width, None);
+        apply_property(&mut s, Property::FrameDrops, Value::Int(3));
+        assert_eq!(s.frame_drops, Some(3));
+        apply_property(&mut s, Property::CacheSpeed, Value::Double(-2.0));
+        assert_eq!(s.cache_speed, None);
     }
 
     #[test]

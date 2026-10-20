@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use opensmarters_app::dvr::engine::{Engine, INTERRUPTED, PREEMPTED};
+use opensmarters_app::dvr::engine::{Engine, INTERRUPTED, MISSED, PREEMPTED};
 use opensmarters_app::dvr::{self, ProgrammeToRecord, source};
 use opensmarters_app::playback::MediaKind;
 use opensmarters_app::services::connections::Purpose;
@@ -479,5 +479,81 @@ fn bodies_that_are_not_video_are_refused() {
             .is_some_and(|e| e.contains("isn't a video"))
     );
     assert!(std::fs::read_dir(&env.dir).unwrap().next().is_none());
+    engine.shutdown();
+}
+
+#[test]
+fn a_recording_without_a_connection_waits_for_one() {
+    let Some(env) = env("waiting", "live-endless") else {
+        return;
+    };
+    let session = xtream(&env);
+    session.connections().set_override(Some(1));
+    // The user watches channel 1: the only connection is taken.
+    let watch = session
+        .connections()
+        .acquire_for_viewing(Purpose::Watch)
+        .expect("a free slot");
+    let engine = start(&env, &session);
+    let ch = env.panel.catalogue().live[0].clone();
+    let key = ch.stream_id.to_string();
+    let now = Utc::now();
+    let r = dvr::schedule_programme(
+        &env.services.store,
+        session.profile_id(),
+        &ProgrammeToRecord {
+            stream_id: key.clone(),
+            channel_name: ch.name.clone(),
+            channel_logo: None,
+            title: "Synthetic Waiting".into(),
+            start: now - opensmarters_core::chrono::Duration::seconds(1),
+            end: now + opensmarters_core::chrono::Duration::seconds(6),
+        },
+    )
+    .unwrap();
+    engine.wake();
+    let waiting = wait(&env, r.id, 10, "the waiting message", |r| {
+        r.state == RecordingState::Queued
+            && r.error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("Waiting for a free connection"))
+    });
+    assert!(
+        waiting
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("Your only connection is in use"))
+    );
+    // Offered to the player (it can record what it plays without another connection).
+    assert!(
+        engine
+            .waiting()
+            .iter()
+            .any(|(id, k)| *id == r.id && *k == key)
+    );
+    // The viewer stops: the recording takes the connection and runs to the end.
+    drop(watch);
+    let done = wait(&env, r.id, 30, "the recording", |r| r.state.is_final());
+    assert_eq!(done.state, RecordingState::Done, "{:?}", done.error);
+    // A programme whose whole window passed before it could start is reported as missed.
+    let past = dvr::schedule_programme(
+        &env.services.store,
+        session.profile_id(),
+        &ProgrammeToRecord {
+            stream_id: key,
+            channel_name: ch.name.clone(),
+            channel_logo: None,
+            title: "Synthetic Past".into(),
+            start: now - opensmarters_core::chrono::Duration::hours(2),
+            end: now - opensmarters_core::chrono::Duration::hours(1),
+        },
+    )
+    .unwrap();
+    engine.wake();
+    let missed = wait(&env, past.id, 10, "the missed state", |r| {
+        r.state.is_final()
+    });
+    assert_eq!(missed.state, RecordingState::Failed);
+    assert_eq!(missed.error.as_deref(), Some(MISSED));
     engine.shutdown();
 }

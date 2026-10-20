@@ -279,7 +279,12 @@ pub fn status(cx: &AppCtx<'_>, r: &Recording, p: Option<&Progress>) -> Status {
         },
         RecordingState::Done => {
             let dur = r.duration_secs.filter(|d| *d > 0.0).map(length_label);
-            let line = vod::meta_line([Some("Saved".to_owned()), size, dur].into_iter().flatten());
+            let word = if r.kind.is_download() {
+                "Downloaded"
+            } else {
+                "Saved"
+            };
+            let line = vod::meta_line([Some(word.to_owned()), size, dur].into_iter().flatten());
             Status {
                 glyph: icons::CHECK_CIRCLE,
                 color: color::SUCCESS,

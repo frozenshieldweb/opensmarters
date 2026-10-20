@@ -66,6 +66,9 @@ pub const PREEMPTED: &str =
     "Paused to free a connection for viewing. It continues when a connection is free.";
 /// Message of a scheduled recording whose whole window passed while the app was closed.
 pub const MISSED: &str = "Missed: opensmarters wasn't open at the time.";
+/// Message of a job waiting because the profile opened offline.
+pub const OFFLINE: &str =
+    "Waiting: your provider can't be reached. It starts when opensmarters connects again.";
 
 /// What the UI (or the app) asks a running job to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -619,6 +622,8 @@ async fn tick(sh: &Arc<Shared>) {
     let running: HashSet<RecordingId> = lock(&sh.jobs).keys().copied().collect();
     let owned: HashSet<RecordingId> = lock(&sh.player_owned).keys().copied().collect();
     let mut still_waiting: HashSet<RecordingId> = HashSet::new();
+    // Offline (the provider was unreachable at sign-in): nothing can download.
+    let offline = sh.session.is_offline();
 
     // 1–2. Live recordings: due → queued → running.
     for r in rows.iter().filter(|r| r.kind == RecordingKind::Live) {
@@ -640,6 +645,10 @@ async fn tick(sh: &Arc<Shared>) {
             sh.set_state(r.id, RecordingState::Queued, None).await;
             r.state = RecordingState::Queued;
             r.error = None;
+        }
+        if offline {
+            sh.set_message(&r, OFFLINE.to_owned()).await;
+            continue;
         }
         match sh
             .session
@@ -672,6 +681,10 @@ async fn tick(sh: &Arc<Shared>) {
         .filter(|r| r.kind.is_download() && r.state == RecordingState::Queued)
     {
         if running.contains(&r.id) {
+            continue;
+        }
+        if offline {
+            sh.set_message(r, OFFLINE.to_owned()).await;
             continue;
         }
         if slots == 0 {

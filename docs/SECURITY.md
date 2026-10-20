@@ -1,0 +1,403 @@
+# Security
+
+opensmarters treats everything a provider sends as hostile input: a panel, a playlist or
+a network attacker on plain HTTP must never be able to run code on the viewer's PC.
+Security is the headline requirement ([BUILD_PROMPT.md §3](BUILD_PROMPT.md#3-non-negotiable-security-requirements)).
+This document is the threat model, the list of mitigations with pointers into the code, the
+known residual risks, and a checklist to re-verify all of it.
+
+- **Report a vulnerability:** see [Reporting a vulnerability](#9-reporting-a-vulnerability).
+- **Last review:** 2026-10-20 (Phase 5 security review). Findings and their status are in
+  [§7](#7-security-review-2026-10-20).
+
+---
+
+## 1. What we protect (assets)
+
+| Asset | Where it lives | Why it matters |
+|---|---|---|
+| Xtream password | OS keychain (`profile/<uuid>/password`) | Pays for the subscription; reused by people elsewhere |
+| M3U playlist URL | OS keychain (`profile/<uuid>/m3u_url`) | Usually `get.php?username=…&password=…`: the credentials themselves |
+| EPG URL override | OS keychain (`profile/<uuid>/epg_url`) | `xmltv.php?username=…&password=…` |
+| TMDB API key (opt-in) | OS keychain (`tmdb_api_key`) | The user's own API key |
+| Cache master key | OS keychain (`cache_key`) | Decrypts the response cache (which holds playlists with credentials) |
+| Parental PIN | SQLite, Argon2id PHC hash only | Keeps locked categories from a child; people reuse PINs |
+| Stream / API URLs | Memory only (`PlayableUrl`, `url::Url`) | Every Xtream stream URL embeds username and password |
+| Viewing history, favourites | SQLite (plain) | Private, not secret |
+| The PC itself | — | A media player must not become a code-execution vector |
+
+Usernames and server URLs are stored in SQLite (not secret on their own, but never logged
+next to a password).
+
+## 2. Who we defend against (actors)
+
+| Actor | Capabilities | In scope? |
+|---|---|---|
+| **Malicious provider / playlist author** | Controls every byte of Xtream JSON, M3U, XMLTV, EPG text, images, stream content, HTTP status codes, redirects and headers; can point stream/image URLs at any host, including LAN addresses | **Yes, primary** |
+| **Network attacker on plain HTTP** | Many panels are `http://` only: reads credentials, rewrites any response (same power as a malicious provider for that session) | Yes: same defences as above; credential exposure is warned about, not prevented |
+| **Network attacker against HTTPS** | Can intercept but has no trusted certificate | Yes: TLS verification is always on, no downgrade |
+| **Child at the keyboard** | Uses the app (mouse, keyboard, remote), can restart it, can type command-line flags into a shortcut, may know the provider password | Yes, for parental control |
+| **Other local user on the same PC** | Can write to shared/badly-ACLed folders (e.g. a `C:\Tool` on `PATH`) | Partly: DLL planting and file permissions |
+| **Malware running as the same user** | Can read the keychain, edit the database, inject into the process | **No** (nothing local can stop it) |
+| **Supply chain** | Compromised crate, compromised libmpv build, compromised CI action | Yes: pinning, audits, review |
+
+## 3. Trust boundaries
+
+```text
+ provider / playlist / EPG host (untrusted)                    TMDB (opt-in, user key)
+        │ HTTP(S) JSON, M3U, XMLTV, images                          │
+        ▼                                                           ▼
+ ┌──────────────── crates/core (forbid unsafe) ───────────────────────────────┐
+ │ net::HttpClient: rustls + platform verifier, timeouts, 256 MiB cap after   │
+ │ gzip, redirect policy (≤5, no https→http)                                   │
+ │ de / model (lenient JSON) · m3u (line parser, caps) · xmltv (streaming,    │
+ │ no DTD, caps) · urls (percent-encoded builders) · redact (log scrubbing)   │
+ └───────────────┬───────────────────────────────┬────────────────────────────┘
+                 │ typed models (text only)      │ URLs (secret)
+                 ▼                               ▼
+ ┌──── crates/app (forbid unsafe) ────┐   ┌──── crates/player (only unsafe crate) ────┐
+ │ egui: every provider string is     │   │ PlayableUrl allowlist (http/https)         │
+ │ painted as text, capped, controls/ │──▶│ UserAgent / Referrer validated             │
+ │ bidi stripped; images decoded with │   │ hardened mpv options, ffmpeg whitelist     │
+ │ limits; parental gates; logging    │   │ ────────── FFI boundary ──────────         │
+ │ through RedactingWriter            │   │ libmpv-2.dll (C: mpv, FFmpeg, libcurl,     │
+ └──────┬──────────────────┬──────────┘   │ OpenSSL, libass…)  ◀── stream bytes from  │
+        │                  │              │                         provider hosts     │
+        ▼                  ▼              └────────────────────────────────────────────┘
+ OS keychain          SQLite + logs + image cache (%LOCALAPPDATA%\opensmarters\…)
+ (secrets only)       (no secrets; cache values encrypted)
+```
+
+The most important boundary is the **FFI boundary to libmpv**: FFmpeg's demuxers and
+decoders parse provider-controlled bytes in C. Everything before it is memory-safe Rust.
+
+## 4. Mitigations
+
+### 4.1 Provider data never becomes code or markup
+
+- **No web engine.** The UI is native egui (`crates/app`); there is no HTML, JavaScript,
+  CSS or webview anywhere, so the XSS→RCE class of bugs does not exist. Provider
+  strings are painted as text.
+- **Display hygiene.** `crates/app/src/ui/text.rs` (`cap`, `cap_paragraph`) caps lengths and
+  replaces control and bidi-override characters before display (no RTL spoofing of channel
+  names). EPG base64 is decoded leniently (`crates/core/src/epg.rs`).
+- **No shell, no string-built commands.** mpv is driven with node-based commands; the URL
+  is one argument (`issue_load` in `crates/player/src/player.rs`). The only processes the
+  app starts are `explorer` for "open data folder" (`crates/app/src/platform.rs`) and the
+  system browser for a validated YouTube watch URL after confirmation
+  (`crates/app/src/screens/detail/trailer.rs`); both pass a single argument, no shell.
+- **Trailers** are never embedded: only `https://www.youtube.com/watch?v=<11 chars>` is
+  ever handed to the OS.
+
+### 4.2 Hostile-input parsing (bounded, panic-free)
+
+| Input | Parser | Limits | Code |
+|---|---|---|---|
+| Any HTTP body | `net::HttpClient::get_bytes` | 256 MiB after decompression (images 10 MiB); connect 10 s, read 30 s, total 300 s; ≤ 5 redirects | `crates/core/src/net.rs` |
+| Xtream JSON | serde + lenient helpers | serde_json recursion limit (128); malformed items skipped and counted; error messages capped at 200 bytes, never the body | `crates/core/src/de.rs` |
+| M3U | line parser | 256 MiB, 256 KiB/line, 1 M entries, **64 attributes/line, 16 XMLTV URLs, 256 header attributes**; never inherits a URL | `crates/core/src/m3u.rs` |
+| XMLTV | quick-xml streaming, gzip | 1 GiB decompressed, 16 MiB per text node, 8 KiB per field, 16 values/field, 100 k channels, 5 M programmes; **DTDs ignored** (no XXE, no entity expansion); no recursion | `crates/core/src/xmltv.rs` |
+| Images | `image` crate (png, jpeg; pure Rust) | 10 MiB download, 8192 px per side, 256 MiB decode allocation, 6 concurrent, downscaled to ≤ 1920 px | `crates/app/src/services/images.rs` |
+| mpv node trees | `NodeOut::from_raw` | depth 16, 4096 items | `crates/player/src/node.rs` |
+| Backup import | serde + store validation | 64 MiB, 1000 profiles, 100 k favourites/profile, all-or-nothing transaction | `crates/store/src/export.rs` |
+
+Robustness: `proptest` suites run in `cargo test` (`crates/core/tests/robustness.rs`) and
+three `cargo-fuzz` targets exist (`fuzz/fuzz_targets/{m3u,xmltv,xtream_json}.rs`).
+
+### 4.3 Playback (libmpv) hardening
+
+- **One entry point.** Media reaches mpv only as a `PlayableUrl`
+  (`crates/player/src/playable.rs`): absolute `http`/`https` URL with a host (plus
+  `rtmp`/`rtsp`/`udp` only if a `UrlPolicy` enables them; the app does not), checked on the
+  raw text *and* after WHATWG normalisation, ≤ 8 KiB, no control/whitespace/zero-width/bidi
+  characters, no backslashes. `file:`, `edl://`, `lavfi://`, `av://`, `memory://`, `fd://`,
+  `appending://`, `concat:`, `subfile:` … are rejected. The player re-checks its own
+  policy at `load` time.
+- **Headers.** `UserAgent` and `Referrer` accept printable ASCII only (no CR/LF header
+  injection), ≤ 1 KiB, and are set as whole properties, never as option strings. M3U
+  `#EXTVLCOPT` values that fail validation are dropped; a referrer is used only for the
+  stream's own host (`stream_headers` in `crates/app/src/playback/request.rs`).
+- **Options** (all before `mpv_initialize`; mandatory ones abort player creation): `config=no`,
+  `load-scripts=no`, `ytdl=no`, no input bindings/terminal/IPC, `load-unsafe-playlists=no`,
+  `use-filedir-conf=no`, `ordered-chapters=no`, no resume files, `tls-verify=yes`, and an
+  FFmpeg `protocol_whitelist` (`http,https,tls,tcp,crypto,data,httpproxy`) for top-level and
+  nested opens; best effort: no auto-loaded subtitles/audio/cover art, no embedded fonts, no
+  built-in OSC/console/stats/select scripts. Full table: [LIBMPV.md](LIBMPV.md#mpv-options-set-by-the-player-security-rule-6).
+- **Stream origin.** mpv tags everything opened from the network: a remote playlist, EDL,
+  HLS manifest or `hex://`/`memory://` blob it contains can only open other network URLs.
+  The pinned build's HTTP backend is **libcurl**, which verifies certificates (self-signed
+  refused, public CA accepted) and does not follow redirects to `file:`.
+- **Verified against the real DLL** (`crates/player/tests/mpv.rs`): HLS segment pointing at
+  a local file; 302 → `file://`; remote M3U with `file://`, raw paths, `edl://`, lavfi,
+  `archive://`, `slice://`, `mf://`, `dvd/bd/cdda`, `fd://` and EDLs smuggled through
+  `hex://`; remote file with an EDL header; redirects to 13 non-HTTP protocols. None plays
+  or touches local files.
+- **The player crate never logs URLs**; mpv log lines are forwarded raw and redacted by the
+  app before logging (`crates/app/src/playback/mod.rs`).
+
+### 4.4 Credentials
+
+- **Keychain only** (`crates/store/src/secrets.rs`): Windows Credential Manager via
+  `keyring`, one generic credential per key, all calls serialised. No column for any
+  secret exists (`crates/store/src/db.rs`); server URLs with userinfo/query and item ids
+  that look like URLs are rejected. `crates/store/tests/leak.rs` plants passwords, M3U/EPG
+  URLs, a TMDB key and PINs through every API, then scans the raw `.db`, `-wal` and `-shm`
+  bytes (UTF-8 and UTF-16) for them.
+- **In memory**: passwords are `secrecy::SecretString` (zeroised on drop); keychain bytes
+  and cache keys use `Zeroizing`. Strings that travel through URLs, the redactor and egui
+  text fields are not zeroised (out of our control).
+- **Never printed**: `Debug` of `Client`, `StreamUrls`, `PlayableUrl`, `Referrer`,
+  `XtreamM3uLink`, `M3uEntry`, `Playlist`, `Redactor`, secret stores and `CachedValue` is
+  redacted; the login response's echoed `user_info.password` is not even deserialised;
+  `Error`/`Display` values never contain URLs (`core::Error::InvalidUrl` carries a reason,
+  network messages have the URL stripped and are redacted).
+- **Log redaction** (`crates/core/src/redact.rs`), applied to every line by
+  `RedactingWriter` (`crates/app/src/logging.rs`) and again to mpv lines:
+  1. *structural*: query values of `username`, `password`, `user`, `pass`, `pwd`, `passwd`,
+     `token`, `auth`, `api_key`, `apikey`, `access_token`, `secret`; the two segments after
+     `/live/`, `/movie/`, `/series/`, `/timeshift/`; the short live form
+     `host/{user}/{pass}/{id}`; URL userinfo;
+  2. *known secrets*: every registered password, username, playlist/EPG URL **and the
+     credentials embedded in those URLs**, in raw, percent-encoded (four encode sets, both
+     hex cases), form-encoded, `Debug`-escaped and JSON-escaped spellings.
+  Verified end to end: the fake panel's `special` user (password `p@ss/w#rd %&+`) logged
+  in through the UI with `OPENSMARTERS_LOG=trace --mpv-log debug`, played a stream; the
+  password appears in no encoding in the log file or stderr (also for an M3U profile whose
+  streams use the short form, see SR-01).
+- **Percent-encoding**: every query value (form encoding) and path segment (RFC 3986
+  unreserved kept) is encoded (`crates/core/src/xtream.rs`, `crates/core/src/urls.rs`).
+- **Exports** contain no secrets, no PIN hash and no history (`crates/store/src/export.rs`,
+  `crates/app/src/services/backup.rs`); they do contain server URLs and usernames.
+
+### 4.5 Network
+
+- **TLS**: reqwest with rustls (aws-lc-rs) and the platform verifier (Windows certificate
+  store); no `danger_*` option exists anywhere; OpenSSL/native-tls are banned in
+  `deny.toml`. mpv: `tls-verify=yes`.
+- **No downgrade**: a redirect from an `https` request to `http` fails with
+  `Error::InsecureRedirect` (`redirect_policy` in `crates/core/src/net.rs`).
+- **HTTP is allowed but visible**: plain-HTTP accounts show an "Unencrypted" warning
+  during onboarding and in the status cluster.
+- **No Referer, no cookies** on API/playlist/image requests.
+- **No telemetry**: the only hosts contacted are the panel/playlist host, the stream and
+  image hosts it returns, an EPG host the user or playlist names, and — only after the user
+  enters their own key — `api.themoviedb.org`. The trailer button opens youtube.com in the
+  browser after a confirmation. No API key is embedded.
+- **SSRF to the LAN is accepted**: a provider can make the app fetch images or streams from
+  `127.0.0.1` or LAN addresses (GET only, nothing reflected back). This is inherent to
+  IPTV and acceptable for a desktop player.
+
+### 4.6 Local storage
+
+- **Location**: `%LOCALAPPDATA%\opensmarters\opensmarters\data\` (database, `logs\`,
+  `images\`), protected by the per-user profile ACL; on Unix the directory is `0700` and
+  the database `0600`.
+- **SQLite hardening**: `SQLITE_DBCONFIG_DEFENSIVE`, `trusted_schema=OFF`, STRICT tables,
+  `secure_delete=FAST`, forward-only migrations; a newer schema is refused.
+- **Encrypted cache** (`crates/store/src/cache.rs`): random 256-bit master key in the
+  keychain; per-purpose keys derived with keyed BLAKE2b (personalisation strings);
+  XChaCha20-Poly1305 with a fresh random 192-bit nonce per write (no nonce-reuse risk);
+  the row id (keyed BLAKE2b of scope + key) is the AEAD associated data, so rows cannot be
+  swapped; cache keys themselves are never stored. Tampered rows fail authentication and
+  are dropped. A local attacker could roll a row back to an older ciphertext of the same
+  key (out of scope).
+- **PIN** (`crates/store/src/parental.rs`): 4–8 digits; Argon2id m = 64 MiB, t = 3, p = 4
+  (RFC 9106 second recommendation), random salt, constant-time verify with parameters
+  bounded (a tampered hash cannot ask for > 1 GiB). Persisted rate limit: 4 free tries,
+  then 30 s, doubling to 1 h per further failure; never reset except by a correct PIN;
+  moving the clock backwards cannot lengthen a lockout. Once the lockout reaches 1 h, a
+  4-digit PIN takes about 200 days of attempts at the keyboard on average.
+- **Backups**: import is PIN-gated, validated field by field and applied in one
+  transaction; machine-local settings (PIN length, window, search history) are stripped.
+- **Logs**: `logs\opensmarters.log`, rotated at 5 MiB with one old file, redacted at write
+  time. "Copy log" copies a redacted tail.
+
+### 4.7 Parental control
+
+Categories whose names match whole-word keywords (NFKC, case-insensitive, so "Sussex" does
+not match "sex") or that are locked manually need the PIN in Live TV, Movies, Series,
+Guide, Catch-up and Search; "All"/"Favourites" lists in Live/Movies/Series hide their
+items. The PIN also guards the parental settings page, profile add/edit/delete and backup
+import. "Forgot PIN" requires an Xtream password or M3U address stored on the PC.
+
+**Known gaps** at the time of the review are listed as SR-02, SR-03 and SR-14 in §7: the
+gate is enforced in browse lists, not at the point where a playback request or a detail
+page is created.
+
+### 4.8 Supply chain
+
+- `Cargo.lock` committed; `cargo deny check` (advisories, licences, bans, sources:
+  crates.io only, no git) passes, with five documented Linux-only advisory exceptions.
+- `#![forbid(unsafe_code)]` in `core`, `store`, `app`, `fake-panel`; `unsafe` exists only in
+  `crates/player` (FFI), where clippy's `undocumented_unsafe_blocks` is `deny` and every
+  block has a `// SAFETY:` comment.
+- Dependency closure on Windows: core ≈ 120 crates, store ≈ 100, player ≈ 90, app ≈ 300
+  (normal + build). Native code compiled from source: SQLite (bundled), aws-lc (TLS crypto).
+- libmpv (`tools/fetch-libmpv.ps1`, [LIBMPV.md](LIBMPV.md)): a pinned shinchiro build from
+  the mpv.io-linked GitHub releases or the SourceForge mirror; the archive's SHA-256 is
+  pinned and checked before extraction; nothing is extracted on mismatch.
+- The fake panel is dev-only and compiled into the app only with `--features demo`.
+
+### 4.9 Windows specifics
+
+- **libmpv location**: absolute paths only — `PlayerConfig::libmpv_path`, the executable's
+  directory, (debug builds: `vendor/libmpv`, `PATH`); never the working directory. Loaded
+  with `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`.
+- **Process DLL search order**: `opensmarters_player::harden_dll_search_path()` calls
+  `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)` and `SetDllDirectoryW(L"")`
+  before libmpv is loaded, so DLLs loaded by name later (by mpv, FFmpeg, drivers) come only
+  from the app directory and System32.
+- The `windows` crate is used only through its safe WinRT projection
+  (`UISettings.AnimationsEnabled`). File dialogs are `rfd` (system common dialogs). The exe
+  embeds only an icon resource; no elevation is requested.
+
+## 5. Residual risks and out of scope
+
+- **Memory-safety bugs in libmpv/FFmpeg/libcurl/OpenSSL/libass** on hostile streams are the
+  largest remaining risk: they run in-process with the user's rights. Mitigations: pinned,
+  recent build; minimal protocol surface; no scripts. Keep the pinned build current (it
+  is a git snapshot; GitHub keeps ~30 days). Future hardening: run playback in a separate
+  low-privilege process, and ship a libmpv built without unneeded features (libarchive,
+  bluray/dvd, Lua/JS, VapourSynth, SDL, OpenAL).
+- **Plain-HTTP panels** expose credentials and content to the network; we warn, we cannot
+  fix it. Xtream panels can also tell the app to fetch *streams* over HTTP from an HTTPS
+  account (`server_info.server_protocol`) — see SR-12.
+- **Malware running as the user** can read Windows Credential Manager entries (any process
+  of the same user can), edit the database (e.g. clear the PIN row), or read the plain
+  image cache and history. Local file access is out of scope for parental control: deleting
+  the data folder resets everything by design.
+- **Clock manipulation**: changing the system time forward (needs admin rights on a standard
+  Windows setup) shortens PIN lockouts; the failure counter still grows.
+- **Provider-chosen category names** decide keyword locks: a provider can name an adult
+  category with homoglyphs or zero-width characters so no keyword matches; use manual
+  locks for such providers.
+- **SSRF to LAN** via provider image/stream URLs (GET only) is accepted. libcurl in mpv
+  follows a redirect to `ftp://` (SR-09).
+- **Large-but-bounded resource use**: a 667 KiB gzip XMLTV within the default limits takes
+  ~1.8 GiB and ~30 s (debug build) to parse (SR-11); 6 concurrent maximum-size images can
+  take ~1.5 GiB (SR-10).
+
+## 6. Design rules for contributors
+
+- Every provider string is data: render it with `ui::text::cap`, never interpret it.
+- Every URL from a provider goes through `PlayableUrl` before mpv, `is_fetchable` before an
+  image download, and nowhere near a shell.
+- Never log a URL or an error that might contain one without the redactor; register every
+  secret you obtain with `Redactor::add_secret` (URLs register their embedded credentials).
+- New HTTP downloads go through `core::net::HttpClient` (caps, timeouts, redirect policy).
+- Parental checks belong where a playback request or detail page is created, not only in
+  the list that led there.
+- `unsafe` only in `crates/player`, each block with a `// SAFETY:` comment and a test.
+
+## 7. Security review 2026-10-20
+
+Scope: all crates on `main` at `d1b8ae6` (Phases 0–4, including Guide/Search/Catch-up/
+Favourites), the pinned libmpv, CI and tooling. Method: code review plus dynamic tests
+against the fake panel and the real DLL (commands in §8).
+
+| ID | Severity | Component | Finding | Status |
+|---|---|---|---|---|
+| SR-01 | High | core redact | M3U playlists using the short live form `http://host/{user}/{pass}/{id}` were not recognised by the redactor and only the whole playlist URL was registered, so mpv's warning lines ("stream: Failed to open <url>", logged at the default level on every 403/404) wrote the username and percent-encoded password to `opensmarters.log` (reproduced: 3 lines at default level, 4 with debug) | Fixed (`0953800`) |
+| SR-02 | High | app | Locked content is reachable without the PIN: Home's *Continue watching*, *Live now* (favourites/recently watched) and *Recently added* rails, the Favourites screen (incl. zapping), the Detail page ("More like this" lists the locked category) and `Session::live_request`/`movie_request`/`episode_request` do not check locks | Open (app fix) |
+| SR-03 | Medium | app | Dev-harness flags are available in release builds: `--route player:live=<id>` and `--route detail:movie=<id>` play locked items without the PIN (verified; zapping then covers the whole catalogue), `--route onboarding` adds a profile without the "add profile" PIN gate, which lets a child add an M3U playlist they know and use it for "Forgot PIN" | Open (app fix) |
+| SR-04 | Medium | core m3u | Attribute-heavy M3U lines grew ~21× in memory (64 MiB → 1.36 GiB peak; ~5 GiB at the 256 MiB cap) | Fixed (`9d0f8e6`, now 71 MiB) |
+| SR-06 | Medium | player | Release builds searched every `PATH` directory for `libmpv-2.dll`, and the process DLL search order was not restricted for DLLs libmpv/drivers load by name | Fixed in player (`2cca850`); app should also call `harden_dll_search_path()` first in `main` |
+| SR-07 | Medium | core net | reqwest followed `https` → `http` redirects, resending `player_api.php?…password=…` in clear while the UI showed the account as encrypted | Fixed (`4562d00`) |
+| SR-05 | Low | core m3u | Quadratic duplicate check on `url-tvg` lists: 1 MiB of header took 36 s; a few MiB hang the playlist load | Fixed (`9d0f8e6`) |
+| SR-08 | Low | CI | `cargo audit` (CI `rustsec/audit-check`) fails: the five accepted advisories are ignored only in `deny.toml` | Open (add `.cargo/audit.toml`) |
+| SR-09 | Low | libmpv | libcurl follows provider redirects to `ftp://`/`ftps://` (13 other protocols refused; never plays or reads files) | Accepted (test documents it) |
+| SR-10 | Low | app images | Decode limits (8192 px, 256 MiB, 6 concurrent) allow ~1.5 GiB of transient memory from hostile artwork | Open (app: tighten) |
+| SR-11 | Low | core xmltv / app | Default XMLTV limits let a 667 KiB gzip cost ~1.8 GiB and ~30 s | Open (consider lower limits or a time window) |
+| SR-12 | Low | app | The "Unencrypted" warning reflects only the API/playlist URL; stream URLs built from `server_info` (or M3U entries) may be `http` with credentials | Open (app) |
+| SR-13 | Low | app | Artwork of unlocked adult categories is cached as plain PNGs in `images\` (viewable in Explorer); history/search history are plain SQLite | Open (app) |
+| SR-14 | Low | app | "Forgot PIN" rate limit lives in memory (restart = 3 new tries); unlocked categories stay unlocked for the whole session | Open (app) |
+| SR-15 | Low | app | Search hides locked VOD only by the primary `category_id` and applies keyword locks only when the category list is cached | Open (app) |
+| SR-16 | Low | app | `explorer` is started by bare name (`platform.rs`, `trailer.rs`); no panic hook (panic text goes unredacted to stderr in debug builds) | Open (app) |
+| SR-17 | Info | store | Lockout can be shortened by moving the clock forward (admin); DB edits remove the PIN | Accepted (§5) |
+| SR-18 | Info | core parental | Keyword matching can be evaded by provider names using homoglyphs/zero-width characters | Accepted (§5) |
+| SR-19 | Info | supply chain | CI actions pinned by tag, not commit SHA; `fetch-libmpv.ps1` trusts an existing DLL when `VERSION.txt` matches (no DLL hash re-check); the libmpv build carries many unused C features; releases are not Authenticode-signed | Open (hardening) |
+| SR-20 | Info | platform | Credential Manager entries are readable by any process of the same user; exports contain server URLs and usernames | Accepted (§5) |
+
+Verified with no finding: TLS verification in both stacks (rustls; mpv/libcurl refuses a
+self-signed certificate and accepts a public one); no telemetry or embedded keys; no
+`unsafe` outside `crates/player`; secrets never reach SQLite (leak test); no credential in
+logs for an Xtream profile at `trace` level with mpv `debug`; remote playlists, EDLs,
+`hex://` blobs, HLS segments and redirects cannot reach local files, lavfi or devices;
+header values cannot carry CR/LF; Argon2id/lockout logic; encrypted cache design.
+
+## 8. Verification checklist
+
+Run from the repository root (PowerShell or Git Bash). Use your own target directory if
+other builds run in parallel.
+
+```bash
+# Gates
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo deny check                    # advisories, licences, bans, sources
+cargo audit                         # needs .cargo/audit.toml mirroring deny.toml's ignores (SR-08)
+
+# libmpv: pinned DLL and hostile-content tests against it
+powershell -ExecutionPolicy Bypass -File tools/fetch-libmpv.ps1
+powershell -ExecutionPolicy Bypass -File tools/gen-test-media.ps1
+sha256sum vendor/libmpv/libmpv-2.dll   # 82bae3b6bf7bb737afc9b52d590b477983c715f3c63c1a361f9ee06523dc5dc2
+cargo test -p opensmarters-player --test mpv -- --test-threads 1
+
+# Secrets never on disk / never in logs
+cargo test -p opensmarters-store --test leak
+cargo test -p opensmarters-core redact
+
+# unsafe only in the player crate
+grep -rln "unsafe" crates --include=*.rs | grep -v "^crates/player/" # only comments/test names
+grep -rn "forbid(unsafe_code)" crates --include=*.rs                # core, store, app, fake-panel
+
+# Fuzzing (nightly; 5 minutes each)
+cd fuzz && cargo +nightly fuzz run m3u -- -max_total_time=300
+cargo +nightly fuzz run xmltv -- -max_total_time=300
+cargo +nightly fuzz run xtream_json -- -max_total_time=300
+```
+
+**End-to-end log check** (synthetic credentials only; the fake panel's `special` user has
+the password `p@ss/w#rd %&+`):
+
+```bash
+cargo build -p fake-panel && cargo build -p opensmarters --features demo
+target/debug/fake-panel --port 18765 &      # wait for "LISTENING http://127.0.0.1:18765"
+# A fresh --ephemeral run starts on the welcome screen: Enter opens the Xtream form.
+OPENSMARTERS_LOG=trace target/debug/opensmarters --ephemeral --data-dir "$TMP/os-check" \
+  --mpv-log debug --route player:live=1001 \
+  --keys "wait:3,Enter,wait:1,text:Test,Enter,text:http://127.0.0.1:18765,Enter,text:special,Enter,text:p@ss/w#rd %&+,Enter,wait:10,quit"
+for p in 'p@ss/w#rd' 'p%40ss' 'w%23rd' '%26%2B' 'special'; do
+  grep -c -F -e "$p" "$TMP/os-check/logs/opensmarters.log"   # every count must be 0
+done
+```
+
+Repeat with an M3U profile whose playlist uses the short form
+`http://127.0.0.1:18765/special/p%40ss%2Fw%23rd%20%25%26%2B/1001` (any static file server
+can serve it as `get.php?username=special&password=…`), and with a missing channel id so
+mpv logs a warning at the default level.
+
+**Secrets on disk**: after a real login, search the data folder for the password; only the
+encrypted cache may hold it, never in clear:
+
+```powershell
+Select-String -Path "$env:LOCALAPPDATA\opensmarters\opensmarters\data\*","$env:LOCALAPPDATA\opensmarters\opensmarters\data\logs\*" -Pattern '<your password>' -SimpleMatch
+```
+
+**Parental control** (`--demo --ephemeral` sets PIN `1234`; "Adult Night" and
+"18+ After Dark" are keyword-locked): check that Live TV, Movies, Series, Guide, Catch-up,
+Search, Home rails, Favourites, Detail and `--route` cannot show or play a locked item
+without the PIN, and that a lockout survives a restart.
+
+**TLS**: playing `https://` from a server with a self-signed certificate must fail
+(`curl: TLS certificate verification failed`), a public HTTPS URL must connect.
+
+## 9. Reporting a vulnerability
+
+Please **do not open a public issue** for a security problem. Use GitHub's private
+vulnerability reporting on the repository (Security → *Report a vulnerability*). Include
+the opensmarters version or commit, Windows version, what an attacker controls (provider,
+playlist, network, local access) and the steps or a sample (synthetic data only — never
+send real provider credentials). We aim to acknowledge within 7 days and to fix or publish
+an advisory within 90 days; reporters are credited unless they ask not to be.

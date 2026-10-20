@@ -57,6 +57,14 @@ pub enum Error {
         /// Description of the problem. Never contains the response body.
         message: String,
     },
+    /// An `https` request was redirected to a plain `http` address and was stopped, so
+    /// the credentials in the URL never travel unencrypted (see
+    /// [`crate::HttpConfig::allow_https_downgrade`]).
+    #[error(
+        "the server redirected a secure (https) request to an unencrypted (http) address, \
+         so it was stopped to protect your password"
+    )]
+    InsecureRedirect,
     /// Login was refused, or a list endpoint answered with an auth-failure object.
     #[error("authentication failed: {status}")]
     Auth {

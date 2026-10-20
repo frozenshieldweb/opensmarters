@@ -7,6 +7,11 @@
 //! streamed and **capped after decompression** ([`HttpConfig::max_response_bytes`]), so
 //! neither a huge `get_live_streams` nor a gzip bomb can exhaust memory.
 //!
+//! Redirects: at most [`HttpConfig::max_redirects`]; no `Referer` is sent; a redirect
+//! from an `https` request to a plain `http` address is refused
+//! ([`Error::InsecureRedirect`]) unless [`HttpConfig::allow_https_downgrade`] is set,
+//! because API and playlist URLs carry the password.
+//!
 //! [`HttpClient`] is used by the Xtream client and is also the right tool for M3U and
 //! XMLTV downloads (`get_bytes`). Its errors never contain the request URL.
 
@@ -42,6 +47,11 @@ pub struct HttpConfig {
     pub max_response_bytes: u64,
     /// Maximum redirects followed. Default 5.
     pub max_redirects: usize,
+    /// Follow a redirect that takes an `https` request to a plain `http` address.
+    /// Default `false`: such a redirect fails with [`Error::InsecureRedirect`], because
+    /// Xtream API and playlist URLs carry the password and the user chose `https`.
+    /// Only turn it on for credential-free downloads (e.g. artwork).
+    pub allow_https_downgrade: bool,
 }
 
 impl Default for HttpConfig {
@@ -53,8 +63,55 @@ impl Default for HttpConfig {
             request_timeout: Duration::from_secs(300),
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_redirects: 5,
+            allow_https_downgrade: false,
         }
     }
+}
+
+/// Marker error raised by the redirect policy for an `https` → `http` redirect.
+#[derive(Debug)]
+struct DowngradeRefused;
+
+impl std::fmt::Display for DowngradeRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("refused a redirect from https to http")
+    }
+}
+
+impl std::error::Error for DowngradeRefused {}
+
+/// Too many redirects (same meaning as reqwest's built-in limit).
+#[derive(Debug)]
+struct TooManyRedirects;
+
+impl std::fmt::Display for TooManyRedirects {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("too many redirects")
+    }
+}
+
+impl std::error::Error for TooManyRedirects {}
+
+/// True if following `next` would downgrade a request that started as `https`.
+fn is_downgrade(original: &Url, next: &Url) -> bool {
+    original.scheme() == "https" && next.scheme() != "https"
+}
+
+fn redirect_policy(max: usize, allow_downgrade: bool) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() > max {
+            return attempt.error(TooManyRedirects);
+        }
+        let downgrade = attempt
+            .previous()
+            .first()
+            .is_some_and(|first| is_downgrade(first, attempt.url()));
+        if downgrade && !allow_downgrade {
+            attempt.error(DowngradeRefused)
+        } else {
+            attempt.follow()
+        }
+    })
 }
 
 impl HttpConfig {
@@ -95,7 +152,10 @@ impl HttpClient {
             .connect_timeout(config.connect_timeout)
             .read_timeout(config.read_timeout)
             .timeout(config.request_timeout)
-            .redirect(reqwest::redirect::Policy::limited(config.max_redirects))
+            .redirect(redirect_policy(
+                config.max_redirects,
+                config.allow_https_downgrade,
+            ))
             .referer(false)
             .gzip(true)
             .build()
@@ -167,9 +227,22 @@ impl HttpClient {
 fn map_reqwest_error(e: &reqwest::Error, redactor: &Redactor) -> Error {
     if e.is_timeout() || source_chain_has_timeout(e) {
         Error::Timeout
+    } else if source_chain_has::<DowngradeRefused>(e) {
+        Error::InsecureRedirect
     } else {
         network_error(e, redactor)
     }
+}
+
+fn source_chain_has<T: std::error::Error + 'static>(e: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = current {
+        if err.downcast_ref::<T>().is_some() {
+            return true;
+        }
+        current = err.source();
+    }
+    false
 }
 
 fn source_chain_has_timeout(e: &(dyn std::error::Error + 'static)) -> bool {
@@ -223,6 +296,28 @@ mod tests {
             HttpConfig::smarters_compatible().user_agent,
             "IPTVSmartersPro"
         );
+    }
+
+    #[test]
+    fn https_to_http_is_a_downgrade() {
+        let u = |s: &str| Url::parse(s).unwrap();
+        assert!(is_downgrade(
+            &u("https://panel.example.com/player_api.php?password=x"),
+            &u("http://panel.example.com/player_api.php?password=x")
+        ));
+        assert!(!is_downgrade(
+            &u("https://a.example.com/"),
+            &u("https://b.example.com/")
+        ));
+        assert!(!is_downgrade(
+            &u("http://a.example.com/"),
+            &u("https://a.example.com/")
+        ));
+        assert!(!is_downgrade(
+            &u("http://a.example.com/"),
+            &u("http://b.example.com/")
+        ));
+        assert!(!HttpConfig::default().allow_https_downgrade);
     }
 
     #[test]

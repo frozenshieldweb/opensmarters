@@ -14,7 +14,7 @@ pub enum LoadError {
     #[error(
         "{} not found (looked next to the executable{}). See docs/LIBMPV.md for how to install it.",
         crate::ffi::LIBMPV_FILE_NAME,
-        if cfg!(debug_assertions) { ", in vendor/libmpv and on PATH" } else { " and on PATH" }
+        if cfg!(debug_assertions) { ", in vendor/libmpv and on PATH" } else { "" }
     )]
     NotFound {
         /// Every absolute path that was checked, in order.

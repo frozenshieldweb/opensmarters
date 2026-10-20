@@ -575,3 +575,38 @@ async fn m3u_download_detect_and_parse() {
         .unwrap_err();
     assert!(matches!(err, Error::InvalidUrl { .. }));
 }
+
+/// The custom redirect policy (https → http refusal) still follows ordinary redirects
+/// and still stops redirect loops.
+#[tokio::test]
+async fn redirects_are_followed_and_bounded() {
+    let target = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/list.m3u"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("#EXTM3U\n"))
+        .mount(&target)
+        .await;
+    let origin = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/moved.m3u"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", format!("{}/list.m3u", target.uri()).as_str()),
+        )
+        .mount(&origin)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/loop"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/loop"))
+        .mount(&origin)
+        .await;
+    let http = HttpClient::new(&HttpConfig::default(), Redactor::new()).unwrap();
+    let url =
+        |s: &str| opensmarters_core::url::Url::parse(&format!("{}{s}", origin.uri())).unwrap();
+    assert_eq!(
+        http.get_bytes(&url("/moved.m3u")).await.unwrap(),
+        b"#EXTM3U\n"
+    );
+    let err = http.get_bytes(&url("/loop")).await.unwrap_err();
+    assert!(matches!(err, Error::Network { .. }), "{err:?}");
+}

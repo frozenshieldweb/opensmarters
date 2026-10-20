@@ -1,0 +1,10 @@
+# Accepted advisories — keep in sync with deny.toml [advisories].ignore (reasons documented there
+# and in docs/SECURITY.md): Linux-only accessibility stack (eframe -> accesskit_unix -> zbus).
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
+]

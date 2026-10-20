@@ -10,13 +10,21 @@
 //!
 //! 1. **Structural** ([`redact_url`]), works on any text, no knowledge needed:
 //!    - query values of `username`, `password`, `user`, `pass`, `pwd`, `passwd`,
-//!      `token` and `auth` (case-insensitive) → `***`;
+//!      `token`, `auth`, `api_key`, `apikey`, `access_token` and `secret`
+//!      (case-insensitive) → `***`;
 //!    - the two path segments after `/live/`, `/movie/`, `/series/`, `/timeshift/`
 //!      when at least three segments follow (`/live/***/***/1.ts`);
+//!    - the short live form that `get.php` playlists use,
+//!      `scheme://host[:port]/{user}/{pass}/{stream_id}[.ext]` (exactly three path
+//!      segments, the last one numeric) → `scheme://host[:port]/***/***/1234`;
 //!    - URL userinfo: `scheme://user:pass@host` → `scheme://***@host`.
 //! 2. **Known secrets** ([`Redactor`]): exact occurrences of registered secrets
-//!    (passwords, usernames, whole M3U URLs), including their common percent-encoded
-//!    and form-encoded spellings, are replaced by `***`. Secrets shorter than
+//!    (passwords, usernames, whole M3U URLs), including their common percent-encoded,
+//!    form-encoded, `Debug`-escaped and JSON-escaped spellings, are replaced by `***`.
+//!    Registering a URL also registers the credentials embedded in it (userinfo and the
+//!    sensitive query values above), so the `username`/`password` of a
+//!    `get.php?username=…&password=…` playlist are scrubbed wherever they appear (for
+//!    example in the stream URLs of that playlist). Secrets shorter than
 //!    [`MIN_SECRET_LEN`] are not scrubbed from free text (it would mangle every line);
 //!    they are still covered by the structural layer inside URLs.
 //!
@@ -35,8 +43,19 @@ pub const REDACTED: &str = "***";
 /// Secrets shorter than this (in bytes) are only redacted structurally.
 pub const MIN_SECRET_LEN: usize = 3;
 
-const SENSITIVE_PARAMS: [&str; 8] = [
-    "username", "password", "user", "pass", "pwd", "passwd", "token", "auth",
+const SENSITIVE_PARAMS: [&str; 12] = [
+    "username",
+    "password",
+    "user",
+    "pass",
+    "pwd",
+    "passwd",
+    "token",
+    "auth",
+    "api_key",
+    "apikey",
+    "access_token",
+    "secret",
 ];
 
 const CREDENTIAL_PATHS: [&str; 4] = ["/live/", "/movie/", "/series/", "/timeshift/"];
@@ -79,7 +98,71 @@ fn is_value_delim(b: u8) -> bool {
 pub fn redact_url(text: &str) -> String {
     let step1 = redact_userinfo(text);
     let step2 = redact_query_params(&step1);
-    redact_credential_paths(&step2)
+    let step3 = redact_credential_paths(&step2);
+    redact_short_live_paths(&step3)
+}
+
+/// `1234`, `1234.ts`, `1234.m3u8`: the last segment of a short-form live URL.
+fn is_stream_id_file(s: &str) -> bool {
+    let (stem, ext) = match s.split_once('.') {
+        Some((stem, ext)) => (stem, Some(ext)),
+        None => (s, None),
+    };
+    !stem.is_empty()
+        && stem.len() <= 20
+        && stem.bytes().all(|b| b.is_ascii_digit())
+        && ext.is_none_or(|e| {
+            !e.is_empty()
+                && e.len() <= 8
+                && e.bytes().all(|b| b.is_ascii_alphanumeric())
+                // `/images/logo/123.png` is artwork, not a credential path.
+                && !IMAGE_EXTENSIONS.iter().any(|i| e.eq_ignore_ascii_case(i))
+        })
+}
+
+const IMAGE_EXTENSIONS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp"];
+
+/// `scheme://host[:port]/{user}/{pass}/{id}[.ext]` → `scheme://host[:port]/***/***/{id}…`:
+/// the short live form of Xtream `get.php` playlists (no `/live/` prefix). Only URLs
+/// with exactly three path segments whose last one is a numeric stream id qualify.
+fn redact_short_live_paths(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    let mut search = 0;
+    while let Some(rel) = text[search..].find("://") {
+        let auth_start = search + rel + 3;
+        let auth_end = bytes[auth_start..]
+            .iter()
+            .position(|&b| is_url_delim(b) || matches!(b, b'/' | b'?' | b'#'))
+            .map_or(bytes.len(), |p| auth_start + p);
+        search = auth_end.max(auth_start);
+        if bytes.get(auth_end) != Some(&b'/') {
+            continue;
+        }
+        let path_start = auth_end + 1;
+        let path_end = bytes[path_start..]
+            .iter()
+            .position(|&b| is_url_delim(b) || matches!(b, b'?' | b'#'))
+            .map_or(bytes.len(), |p| path_start + p);
+        let mut segs = text[path_start..path_end].split('/');
+        if let (Some(user), Some(pass), Some(tail), None) =
+            (segs.next(), segs.next(), segs.next(), segs.next())
+            && !user.is_empty()
+            && !pass.is_empty()
+            && is_stream_id_file(tail)
+        {
+            out.push_str(&text[last..path_start]);
+            out.push_str(REDACTED);
+            out.push('/');
+            out.push_str(REDACTED);
+            out.push('/');
+            last = path_start + user.len() + 1 + pass.len() + 1;
+        }
+        search = path_end.max(search);
+    }
+    out.push_str(&text[last..]);
+    out
 }
 
 fn redact_userinfo(text: &str) -> String {
@@ -178,21 +261,85 @@ fn redact_credential_paths(text: &str) -> String {
     out
 }
 
-/// The spellings under which a secret may appear in a log line.
+/// Everything except RFC 3986 unreserved characters: how [`crate::urls`] encodes
+/// credentials in stream URL paths.
+const UNRESERVED_KEPT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// The spellings under which a secret may appear in a log line: verbatim,
+/// percent-encoded (several encode sets, upper- and lower-case hex), form-encoded,
+/// Rust-`Debug`-escaped (`{:?}`) and JSON-escaped (with and without PHP's `\/`).
 fn variants(secret: &str) -> Vec<String> {
     let mut v = vec![
         secret.to_owned(),
         utf8_percent_encode(secret, NON_ALPHANUMERIC).to_string(),
+        utf8_percent_encode(secret, UNRESERVED_KEPT).to_string(),
         utf8_percent_encode(secret, PATH_SEGMENT).to_string(),
         utf8_percent_encode(secret, QUERY).to_string(),
         url::form_urlencoded::byte_serialize(secret.as_bytes()).collect(),
+        secret.escape_debug().to_string(),
     ];
     // Lower-case hex escapes.
     let lower_hex: Vec<String> = v.iter().map(|s| lower_percent_hex(s)).collect();
     v.extend(lower_hex);
+    let json = json_escape(secret);
+    v.push(json.replace('/', "\\/"));
+    v.push(json);
     v.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     v.dedup();
     v
+}
+
+/// The body of a JSON string literal for `s` (no surrounding quotes).
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Credentials embedded in a URL-shaped secret (an M3U or XMLTV address): its userinfo
+/// and the values of sensitive query parameters, decoded. Empty for anything else.
+fn embedded_credentials(secret: &str) -> Vec<String> {
+    let Ok(url) = url::Url::parse(secret.trim()) else {
+        return Vec::new();
+    };
+    if !url.has_host() {
+        return Vec::new();
+    }
+    let decode = |s: &str| {
+        percent_encoding::percent_decode_str(s)
+            .decode_utf8_lossy()
+            .into_owned()
+    };
+    let mut out = Vec::new();
+    if !url.username().is_empty() {
+        out.push(decode(url.username()));
+    }
+    if let Some(p) = url.password() {
+        out.push(decode(p));
+    }
+    for (k, v) in url.query_pairs() {
+        if SENSITIVE_PARAMS.iter().any(|p| k.eq_ignore_ascii_case(p)) && !v.is_empty() {
+            out.push(v.into_owned());
+        }
+    }
+    out.retain(|s| !s.is_empty() && s != secret);
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn lower_percent_hex(s: &str) -> String {
@@ -211,10 +358,59 @@ fn lower_percent_hex(s: &str) -> String {
     out
 }
 
+struct Entry {
+    secret: String,
+    /// Its spellings, longest first.
+    spellings: Vec<String>,
+    /// Registrations still holding it (see [`Redactor::remove_secret`]).
+    refs: usize,
+}
+
 #[derive(Default)]
 struct Inner {
-    /// (secret, its spellings longest first)
-    secrets: Vec<(String, Vec<String>)>,
+    /// Longest secret first, so a secret containing another is replaced whole.
+    secrets: Vec<Entry>,
+}
+
+impl Inner {
+    fn add(&mut self, secret: &str) {
+        if let Some(e) = self.secrets.iter_mut().find(|e| e.secret == secret) {
+            e.refs = e.refs.saturating_add(1);
+            return;
+        }
+        self.secrets.push(Entry {
+            secret: secret.to_owned(),
+            spellings: variants(secret),
+            refs: 1,
+        });
+        self.secrets.sort_by(|a, b| {
+            b.secret
+                .len()
+                .cmp(&a.secret.len())
+                .then_with(|| a.secret.cmp(&b.secret))
+        });
+    }
+
+    fn remove(&mut self, secret: &str) {
+        if let Some(i) = self.secrets.iter().position(|e| e.secret == secret) {
+            let e = &mut self.secrets[i];
+            e.refs = e.refs.saturating_sub(1);
+            if e.refs == 0 {
+                self.secrets.remove(i);
+            }
+        }
+    }
+}
+
+/// `secret` plus the credentials embedded in it, without duplicates.
+fn with_embedded(secret: &str) -> Vec<String> {
+    let mut all = vec![secret.to_owned()];
+    for c in embedded_credentials(secret) {
+        if !all.contains(&c) {
+            all.push(c);
+        }
+    }
+    all
 }
 
 /// Scrubs known secrets and URL credentials from text. Cheap to clone: clones share the
@@ -244,25 +440,32 @@ impl Redactor {
     /// Registers a secret (password, username, M3U URL, …). Empty strings are ignored;
     /// secrets shorter than [`MIN_SECRET_LEN`] are accepted but only redacted
     /// structurally.
+    ///
+    /// When `secret` is a URL, the credentials embedded in it (userinfo, and the values
+    /// of `username`, `password`, `token`, … query parameters) are registered too: the
+    /// streams of a `get.php?username=u&password=p` playlist carry `u` and `p` in their
+    /// paths (`http://host/u/p/123`), not the playlist URL itself.
+    ///
+    /// Registrations are counted: a secret stays registered until
+    /// [`remove_secret`](Self::remove_secret) has been called as many times as it was
+    /// added (directly or as part of a URL).
     pub fn add_secret(&self, secret: &str) {
         if secret.is_empty() {
             return;
         }
         let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
-        if inner.secrets.iter().any(|(s, _)| s == secret) {
-            return;
+        for s in with_embedded(secret) {
+            inner.add(&s);
         }
-        inner.secrets.push((secret.to_owned(), variants(secret)));
-        // Longest first, so a secret containing another is replaced whole.
-        inner
-            .secrets
-            .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
     }
 
-    /// Unregisters a secret (e.g. when an account is deleted).
+    /// Unregisters a secret added with [`add_secret`](Self::add_secret) (e.g. when an
+    /// account is deleted), including the credentials embedded in it.
     pub fn remove_secret(&self, secret: &str) {
         let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
-        inner.secrets.retain(|(s, _)| s != secret);
+        for s in with_embedded(secret) {
+            inner.remove(&s);
+        }
     }
 
     /// Number of registered secrets.
@@ -280,7 +483,10 @@ impl Redactor {
         let scrubbed = {
             let inner = self.inner.read().unwrap_or_else(PoisonError::into_inner);
             let mut current = text.to_owned();
-            for (secret, spellings) in &inner.secrets {
+            for Entry {
+                secret, spellings, ..
+            } in &inner.secrets
+            {
                 if secret.len() < MIN_SECRET_LEN {
                     continue;
                 }
@@ -440,6 +646,42 @@ mod tests {
     }
 
     #[test]
+    fn short_live_form_paths() {
+        assert_eq!(
+            redact_url("cplayer: Playing: http://stream.example.net:8080/bob/hunter22/1234"),
+            "cplayer: Playing: http://stream.example.net:8080/***/***/1234"
+        );
+        assert_eq!(
+            redact_url("http://h/bob/hunter22/1234.ts?x=1 and https://h/a%2Fb/c%23d/9.m3u8"),
+            "http://h/***/***/1234.ts?x=1 and https://h/***/***/9.m3u8"
+        );
+        // With redacted userinfo in front.
+        assert_eq!(
+            redact_url("http://u:p@h:80/bob/hunter22/7"),
+            "http://***@h:80/***/***/7"
+        );
+        // Not the short form: other shapes are left alone.
+        for keep in [
+            "http://h/a/b/c.ts",
+            "http://h/a/b/123/x",
+            "http://h/a/123",
+            "http://h/images/logo/1139.png",
+            "http://h//b/123",
+            "/bob/hunter22/123",
+        ] {
+            assert_eq!(redact_url(keep), keep, "{keep}");
+        }
+    }
+
+    #[test]
+    fn extra_sensitive_query_params() {
+        assert_eq!(
+            redact_url("https://api.example.org/3/x?api_key=abcd&q=1&access_token=zz&apikey=k"),
+            "https://api.example.org/3/x?api_key=***&q=1&access_token=***&apikey=***"
+        );
+    }
+
+    #[test]
     fn userinfo() {
         assert_eq!(
             redact_url("http://alice:s3cret@panel.example.com:8080/x"),
@@ -499,6 +741,68 @@ mod tests {
         assert_eq!(clone.redact("zzz9"), "zzz9");
         // Debug never prints secrets.
         assert!(!format!("{r:?}").contains("abc"));
+    }
+
+    #[test]
+    fn url_secrets_register_their_embedded_credentials() {
+        let r = Redactor::new();
+        let m3u = "http://panel.example.com:8080/get.php?username=bob99&password=s%40fe%2Fpw&type=m3u_plus";
+        r.add_secret(m3u);
+        // url + username + password
+        assert_eq!(r.secret_count(), 3);
+        assert_eq!(r.redact(&format!("loading {m3u}")), "loading ***");
+        // The playlist's own stream URLs carry the decoded credentials in their path.
+        assert_eq!(
+            r.redact("Opening http://s.example.com/x/bob99/s@fe/pw/77.ts"),
+            "Opening http://s.example.com/x/***/***/77.ts"
+        );
+        assert_eq!(r.redact("user bob99 said s@fe/pw"), "user *** said ***");
+        // Userinfo too.
+        let r2 = Redactor::new();
+        r2.add_secret("rtsp://cam-user:cam%20pass@192.0.2.9/stream");
+        assert_eq!(r2.redact("x cam-user y cam pass z"), "x *** y *** z");
+        // Non-URL secrets are taken as they are.
+        let r3 = Redactor::new();
+        r3.add_secret("not a url");
+        assert_eq!(r3.secret_count(), 1);
+    }
+
+    #[test]
+    fn registrations_are_counted() {
+        let r = Redactor::new();
+        let m3u = "http://h.example.com/get.php?username=bob99&password=hunter22";
+        r.add_secret(m3u);
+        r.add_secret("hunter22"); // also the password of an Xtream profile
+        r.remove_secret(m3u);
+        assert_eq!(r.redact("hunter22 bob99"), "*** bob99");
+        r.remove_secret("hunter22");
+        assert_eq!(r.redact("hunter22"), "hunter22");
+        assert_eq!(r.secret_count(), 0);
+        // Removing something never added is harmless.
+        r.remove_secret("nothing");
+    }
+
+    #[test]
+    fn escaped_spellings() {
+        let r = Redactor::new();
+        let pw = "p\"a/s\\s~1é";
+        r.add_secret(pw);
+        // `{:?}` (tracing `?field`) escapes quotes and backslashes.
+        let debug = format!("{pw:?}");
+        assert!(!r.redact(&debug).contains("a/s"), "{}", r.redact(&debug));
+        // JSON, with and without PHP's escaped slash.
+        assert_eq!(
+            r.redact(r#"{"password":"p\"a/s\\s~1é"}"#),
+            r#"{"password":"***"}"#
+        );
+        assert_eq!(
+            r.redact(r#"{"password":"p\"a\/s\\s~1é"}"#),
+            r#"{"password":"***"}"#
+        );
+        // Percent-encoding that keeps RFC 3986 unreserved characters (`urls.rs`).
+        let r2 = Redactor::new();
+        r2.add_secret("p@ss~1.x");
+        assert_eq!(r2.redact("a p%40ss~1.x b"), "a *** b");
     }
 
     #[test]

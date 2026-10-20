@@ -4,6 +4,8 @@ opensmarters plays video with **libmpv**, loaded at runtime from `libmpv-2.dll`.
 
 > libmpv-2.dll not found (looked next to the executable, in vendor/libmpv and on PATH). See docs/LIBMPV.md for how to install it.
 
+(Release builds look next to the executable only.)
+
 ## Quick start (Windows x86_64)
 
 ```powershell
@@ -75,12 +77,14 @@ The player searches these locations in order, using absolute paths only (`opensm
 1. `PlayerConfig::libmpv_path(..)`, if the app sets one.
 2. **The executable's directory.** This is the location for release builds: ship `libmpv-2.dll` next to `opensmarters.exe`.
 3. `<repo>/vendor/libmpv/libmpv-2.dll`. Debug builds only; the path is baked in at compile time.
-4. Each absolute directory on `PATH`.
+4. Each absolute directory on `PATH`. Debug builds only: a `PATH` directory can be writable by other users, so release builds never look there.
 
 The current working directory is **never** searched, which closes off DLL planting. The DLL is loaded with `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`, so its own dependencies resolve only from:
 
 - its own directory
 - System32
+
+Before loading it, the player also calls `opensmarters_player::harden_dll_search_path()` (`SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)` plus `SetDllDirectoryW(L"")`), so DLLs that libmpv, FFmpeg or GPU drivers load by name later come only from the application directory and System32, never from the working directory or `PATH`. The app should call it first thing in `main` as well. See [SECURITY.md](SECURITY.md).
 
 The library is never unloaded.
 

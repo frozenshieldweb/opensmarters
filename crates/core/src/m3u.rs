@@ -26,7 +26,8 @@
 //! - Entries are classified ([`EntryKind`]) by URL: `/movie/` → movie, `/series/` →
 //!   series, VOD file extensions (`.mp4`, `.mkv`, `.avi`, …) → movie, else live.
 //! - Limits ([`M3uLimits`]): total size, line length and entry count, each with its own
-//!   error.
+//!   error; attributes per line and XMLTV URLs are capped (extra ones are ignored), so
+//!   neither memory nor parse time can be blown up by a hostile playlist.
 //!
 //! [`detect_xtream`] recognises `get.php?username=…&password=…&type=m3u…` playlist URLs
 //! so the app can offer an Xtream login instead.
@@ -50,6 +51,13 @@ pub struct M3uLimits {
     pub max_line_len: usize,
     /// Maximum number of entries. Default 1 000 000.
     pub max_entries: usize,
+    /// Attributes kept per `#EXTINF` / `#EXTM3U` line; further ones are ignored (the
+    /// title is still found). Bounds memory: each kept attribute costs ~100 bytes, so
+    /// without a cap a playlist of `a=b a=b …` lines grows ~20× in memory. Default 64.
+    pub max_attributes_per_line: usize,
+    /// XMLTV URLs kept from `#EXTM3U` headers ([`Playlist::tvg_urls`]); further ones
+    /// are ignored. Default 16.
+    pub max_tvg_urls: usize,
 }
 
 impl Default for M3uLimits {
@@ -58,9 +66,14 @@ impl Default for M3uLimits {
             max_total_bytes: 256 * 1024 * 1024,
             max_line_len: 256 * 1024,
             max_entries: 1_000_000,
+            max_attributes_per_line: 64,
+            max_tvg_urls: 16,
         }
     }
 }
+
+/// `#EXTM3U` attributes kept in [`Playlist::header_attributes`] across all header lines.
+const MAX_HEADER_ATTRIBUTES: usize = 256;
 
 /// Why a playlist could not be parsed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -352,7 +365,19 @@ fn is_ws(b: u8) -> bool {
 
 /// Tokenizes `key=value` attributes. With `title_comma`, an unquoted comma ends the
 /// attributes and the rest is returned as the title.
+/// [`tokenize_capped`] without a cap (tests).
+#[cfg(test)]
 fn tokenize(s: &str, title_comma: bool) -> (Vec<(String, String)>, Option<String>) {
+    tokenize_capped(s, title_comma, usize::MAX)
+}
+
+/// Like `tokenize`, keeping at most `max_attrs` attributes (the rest of the line is
+/// still scanned, so the title after the comma is found).
+fn tokenize_capped(
+    s: &str,
+    title_comma: bool,
+    max_attrs: usize,
+) -> (Vec<(String, String)>, Option<String>) {
     let bytes = s.as_bytes();
     let n = bytes.len();
     let mut attrs = Vec::new();
@@ -405,11 +430,11 @@ fn tokenize(s: &str, title_comma: bool) -> (Vec<(String, String)>, Option<String
                 }
                 &s[start..i]
             };
-            if !key.is_empty() {
+            if !key.is_empty() && attrs.len() < max_attrs {
                 attrs.push((key.to_lowercase(), value.to_owned()));
             }
         } else {
-            if !key.is_empty() {
+            if !key.is_empty() && attrs.len() < max_attrs {
                 attrs.push((key.to_lowercase(), String::new()));
             }
             if i == key_start {
@@ -426,7 +451,7 @@ struct ExtInf {
     title: String,
 }
 
-fn parse_extinf(rest: &str) -> ExtInf {
+fn parse_extinf(rest: &str, max_attrs: usize) -> ExtInf {
     let s = rest.trim_start();
     let dur_len = s
         .find(|c: char| !(c.is_ascii_digit() || matches!(c, '-' | '+' | '.')))
@@ -435,7 +460,7 @@ fn parse_extinf(rest: &str) -> ExtInf {
         .parse::<f64>()
         .ok()
         .filter(|d| d.is_finite() && *d > 0.0);
-    let (attrs, title) = tokenize(&s[dur_len..], true);
+    let (attrs, title) = tokenize_capped(&s[dur_len..], true, max_attrs);
     ExtInf {
         duration,
         attrs,
@@ -548,23 +573,37 @@ fn parse_text(text: &str, limits: &M3uLimits) -> Result<Playlist, M3uError> {
         if line.starts_with('#') {
             if let Some(rest) = strip_directive(line, "#EXTM3U") {
                 saw_marker = true;
-                let (attrs, _) = tokenize(rest.strip_prefix(':').unwrap_or(rest), false);
+                let (attrs, _) = tokenize_capped(
+                    rest.strip_prefix(':').unwrap_or(rest),
+                    false,
+                    limits.max_attributes_per_line,
+                );
                 for (k, v) in &attrs {
                     if matches!(k.as_str(), "url-tvg" | "x-tvg-url" | "tvg-url") {
                         for u in v.split(',').map(str::trim).filter(|u| !u.is_empty()) {
+                            // Capped first: the duplicate check is linear in the list.
+                            if playlist.tvg_urls.len() >= limits.max_tvg_urls {
+                                break;
+                            }
                             if !playlist.tvg_urls.iter().any(|x| x == u) {
                                 playlist.tvg_urls.push(u.to_owned());
                             }
                         }
                     }
                 }
-                playlist.header_attributes.extend(attrs);
+                let room = MAX_HEADER_ATTRIBUTES.saturating_sub(playlist.header_attributes.len());
+                playlist
+                    .header_attributes
+                    .extend(attrs.into_iter().take(room));
             } else if let Some(rest) = strip_directive(line, "#EXTINF") {
                 saw_marker = true;
                 if pending.extinf.is_some() {
                     playlist.skipped += 1;
                 }
-                pending.extinf = Some(parse_extinf(rest.strip_prefix(':').unwrap_or(rest)));
+                pending.extinf = Some(parse_extinf(
+                    rest.strip_prefix(':').unwrap_or(rest),
+                    limits.max_attributes_per_line,
+                ));
             } else if let Some(rest) = strip_directive(line, "#EXTGRP") {
                 let group = rest.strip_prefix(':').unwrap_or(rest).trim();
                 if !group.is_empty() {
@@ -895,6 +934,74 @@ http://a.example/13.ts
         assert_eq!(pl.skipped, 1);
         // Header alone: empty but valid.
         assert!(p("#EXTM3U\n").entries.is_empty());
+    }
+
+    #[test]
+    fn attribute_and_tvg_url_caps() {
+        let mut line = String::from("#EXTINF:-1");
+        for i in 0..200 {
+            line.push_str(&format!(" k{i}=v{i}"));
+        }
+        line.push_str(
+            " tvg-name=\"late\",The Title
+http://h/1.ts
+",
+        );
+        let pl = p(&line);
+        assert_eq!(pl.entries[0].attributes.len(), 64);
+        assert_eq!(pl.entries[0].title, "The Title");
+
+        let mut header = String::from("#EXTM3U url-tvg=\"");
+        for i in 0..50 {
+            header.push_str(&format!("http://e{i}.example/x.xml,"));
+        }
+        header.push_str(
+            "\"
+#EXTM3U x-tvg-url=\"http://late.example/y.xml\"
+",
+        );
+        header.push_str(
+            "#EXTINF:-1,x
+http://h/1
+",
+        );
+        let pl = p(&header);
+        assert_eq!(pl.tvg_urls.len(), 16);
+        assert_eq!(pl.tvg_urls[0], "http://e0.example/x.xml");
+    }
+
+    /// A hostile header with ~40 000 distinct XMLTV URLs per line used to take seconds
+    /// per line (quadratic duplicate check). Now the list is capped first.
+    #[test]
+    fn many_tvg_urls_parse_quickly() {
+        let mut s = String::new();
+        let mut n = 0u64;
+        for _ in 0..8 {
+            s.push_str("#EXTM3U url-tvg=\"");
+            let start = s.len();
+            while s.len() - start < 250 * 1024 {
+                s.push_str(&format!("u{n},"));
+                n += 1;
+            }
+            s.push_str(
+                "\"
+",
+            );
+        }
+        s.push_str(
+            "#EXTINF:-1,x
+http://h/1
+",
+        );
+        let t = std::time::Instant::now();
+        let pl = p(&s);
+        assert_eq!(pl.tvg_urls.len(), 16);
+        assert!(pl.header_attributes.len() <= MAX_HEADER_ATTRIBUTES);
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t.elapsed()
+        );
     }
 
     #[test]

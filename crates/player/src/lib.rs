@@ -11,9 +11,11 @@
 //! even when it is missing and can show [`LoadError`]'s message ("…not found
 //! … See docs/LIBMPV.md"). Search order, absolute paths only:
 //! [`PlayerConfig::libmpv_path`] → next to the executable →
-//! `<repo>/vendor/libmpv/` (debug builds only) → directories on `PATH`.
+//! `<repo>/vendor/libmpv/` and directories on `PATH` (debug builds only).
 //! On Windows dependencies are resolved from the DLL's directory and
-//! System32 only, never the working directory. Run
+//! System32 only, never the working directory, and before loading libmpv the
+//! process-wide DLL search order is restricted with
+//! [`harden_dll_search_path`] (apps should call it at startup too). Run
 //! `tools/fetch-libmpv.ps1` to install the pinned build into
 //! `vendor/libmpv/`; release builds must ship `libmpv-2.dll` next to the
 //! executable.
@@ -118,7 +120,7 @@ mod video;
 
 pub use config::{Hwdec, LogLevel, PlayerConfig};
 pub use error::{Error, LoadError, MpvError, ValidationError};
-pub use ffi::LIBMPV_FILE_NAME;
+pub use ffi::{LIBMPV_FILE_NAME, harden_dll_search_path};
 pub use playable::{
     Container, MAX_HEADER_LEN, MAX_URL_LEN, MediaOutput, PlayableUrl, Referrer, SNIFF_BYTES,
     UrlPolicy, UserAgent, sniff_container,

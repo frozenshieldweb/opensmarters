@@ -16,7 +16,7 @@ use std::sync::Arc;
 use eframe::egui::{self, Align2, CornerRadius, Id, Key, Modifiers, Rect, Ui, pos2, vec2};
 use opensmarters_core::chrono::{DateTime, Local, Utc};
 use opensmarters_store::{
-    Recording, RecordingId, RecordingKind, RecordingState, Reminder, ReminderId,
+    ContentKind, Recording, RecordingId, RecordingKind, RecordingState, Reminder, ReminderId,
 };
 
 use super::{AppCtx, Screen, shell};
@@ -215,6 +215,21 @@ fn short_path(p: &std::path::Path) -> String {
     )
 }
 
+/// True if the row's item is locked by parental control right now (its item is in a
+/// locked category, or its categories aren't known yet while a PIN is set): the row
+/// shows "Locked", no title or artwork, and Play asks for the PIN.
+fn row_locked(cx: &AppCtx<'_>, row: &Row) -> bool {
+    let Some(session) = cx.session() else {
+        return false;
+    };
+    match row {
+        Row::Job(r) => crate::dvr::is_row_locked(&session, r),
+        Row::Reminder(r) => session
+            .check_unlocked(ContentKind::Live, &r.stream_id, None)
+            .is_err(),
+    }
+}
+
 /// The Recordings screen.
 #[derive(Debug)]
 pub struct RecordingsScreen {
@@ -278,7 +293,13 @@ impl RecordingsScreen {
                 });
             }
             (Row::Job(r), Action::Delete) => {
-                self.confirm = Some((r.id, r.title.clone()));
+                // A locked item's title isn't shown, not even here.
+                let title = if row_locked(cx, row) {
+                    String::new()
+                } else {
+                    r.title.clone()
+                };
+                self.confirm = Some((r.id, title));
             }
             (Row::Reminder(r), _) => {
                 let id: ReminderId = r.id;
@@ -341,7 +362,8 @@ impl RecordingsScreen {
                 color::SURFACE_1
             },
         );
-        // Art.
+        // Art (none for a locked item: no title, no artwork, SR-02/SR-13).
+        let locked = row_locked(cx, row);
         let images = &cx.services.images;
         let (icon_url, name, is_live) = match row {
             Row::Job(r) => (
@@ -351,7 +373,22 @@ impl RecordingsScreen {
             ),
             Row::Reminder(r) => (r.icon_url.as_deref(), r.channel_name.as_str(), true),
         };
-        let tx = if is_live {
+        let tx = if locked {
+            let art = Rect::from_min_size(
+                pos2(rect.left() + 16.0, rect.center().y - 24.0),
+                vec2(76.0, 48.0),
+            );
+            painter.rect_filled(art, CornerRadius::same(radius::SM), color::SURFACE_2);
+            icons::paint(
+                &painter,
+                art.center(),
+                icons::LOCK_SIMPLE,
+                22.0,
+                Style::Regular,
+                color::TEXT_3,
+            );
+            art.right() + 20.0
+        } else if is_live {
             let art = Rect::from_min_size(
                 pos2(rect.left() + 16.0, rect.center().y - 24.0),
                 vec2(76.0, 48.0),
@@ -439,6 +476,14 @@ impl RecordingsScreen {
                     }),
                 )
             }
+        };
+        let (title, sub) = if locked {
+            (
+                "Locked".to_owned(),
+                "Parental control: enter your PIN to show and play it".to_owned(),
+            )
+        } else {
+            (title, sub)
         };
         text::line(
             &painter,
@@ -545,7 +590,11 @@ impl Screen for RecordingsScreen {
             {
                 cx.dvr.cancel(r.id);
             } else {
-                self.confirm = Some((r.id, r.title));
+                let locked = cx
+                    .session()
+                    .is_some_and(|s| crate::dvr::is_row_locked(&s, &r));
+                let title = if locked { String::new() } else { r.title };
+                self.confirm = Some((r.id, title));
             }
         }
     }
@@ -561,6 +610,8 @@ impl Screen for RecordingsScreen {
         if self.space_epoch != Some(cx.dvr.epoch()) && !self.space.is_loading() {
             self.load_space(cx);
         }
+        // The PIN prompt of a locked item's Play (and other DVR dialogs).
+        dvr_ui::draw_dialogs(cx);
         shell::status_cluster(cx, ui);
         shell::page_title(cx, ui, "Recordings");
         let content = cx.layout.content;
@@ -745,7 +796,11 @@ impl Screen for RecordingsScreen {
         if let Some((id, title)) = self.confirm.clone() {
             let mut yes = false;
             let mut no = false;
-            let heading = format!("Delete \u{201c}{}\u{201d}?", text::cap(&title, 60));
+            let heading = if title.is_empty() {
+                "Delete this locked item?".to_owned()
+            } else {
+                format!("Delete \u{201c}{}\u{201d}?", text::cap(&title, 60))
+            };
             Dialog::new(Id::unique("rec.delete"), &heading)
                 .body("The file is removed from this computer. This can't be undone.")
                 .show(ui.ctx(), |ui| {

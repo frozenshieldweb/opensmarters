@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use opensmarters_app::dvr::engine::{Engine, INTERRUPTED, MISSED, PREEMPTED};
 use opensmarters_app::dvr::{self, ProgrammeToRecord, source};
+use opensmarters_app::error::AppError;
 use opensmarters_app::playback::MediaKind;
 use opensmarters_app::services::connections::Purpose;
 use opensmarters_app::services::{Paths, Services, Session};
@@ -21,8 +22,9 @@ use opensmarters_core::chrono::Utc;
 use opensmarters_core::secrecy::SecretString;
 use opensmarters_player::{Container, sniff_container};
 use opensmarters_store::{
-    MemorySecretStore, NewProfile, NewProfileSource, NewRecording, ProfileId, ProfileSettings,
-    Recording, RecordingId, RecordingKind, RecordingState, Store, StoreOptions,
+    CategoryLock, ContentKind, MemorySecretStore, NewProfile, NewProfileSource, NewRecording,
+    ProfileId, ProfileSettings, Recording, RecordingId, RecordingKind, RecordingState, Store,
+    StoreOptions,
 };
 
 struct Env {
@@ -555,5 +557,126 @@ fn a_recording_without_a_connection_waits_for_one() {
     });
     assert_eq!(missed.state, RecordingState::Failed);
     assert_eq!(missed.error.as_deref(), Some(MISSED));
+    engine.shutdown();
+}
+
+/// A profile (demo account) with the parental PIN set and these categories locked.
+fn locked_xtream(env: &Env, movie_cat: u32, live_cat: u32) -> Arc<Session> {
+    let store = &env.services.store;
+    let id = store
+        .profiles()
+        .create(NewProfile {
+            name: "Locked".into(),
+            source: NewProfileSource::Xtream {
+                server_url: env.panel.base_url().to_owned(),
+                username: "demo".into(),
+                password: SecretString::from("demo".to_owned()),
+            },
+            settings: ProfileSettings::default(),
+        })
+        .unwrap()
+        .id;
+    if !store.parental().is_pin_set().unwrap() {
+        store
+            .parental()
+            .set_pin(&SecretString::from("1234".to_owned()))
+            .unwrap();
+    }
+    for (kind, cat) in [
+        (ContentKind::Movie, movie_cat),
+        (ContentKind::Live, live_cat),
+    ] {
+        store
+            .parental()
+            .set_category_lock(id, kind, &cat.to_string(), Some(CategoryLock::Locked))
+            .unwrap();
+    }
+    env.rt
+        .block_on(Session::open(env.services.clone(), id))
+        .unwrap_or_else(|f| panic!("open failed: {}", f.error))
+}
+
+#[test]
+fn locked_items_still_download_and_record_but_need_the_pin_to_play() {
+    let Some(env) = env("locked", "live-endless") else {
+        return;
+    };
+    let movie = env
+        .panel
+        .catalogue()
+        .movies
+        .iter()
+        .find(|m| m.container_extension == "mkv")
+        .unwrap()
+        .clone();
+    let ch = env.panel.catalogue().live[0].clone();
+    let session = locked_xtream(&env, movie.category_id, ch.category_id);
+    // Parental control applies: playing either needs the PIN (unknown categories count
+    // as locked too).
+    assert!(matches!(
+        session.movie_request(movie.stream_id, Some("mkv"), &movie.title, None, None, None),
+        Err(AppError::Locked(_))
+    ));
+
+    // A download queued earlier (by someone who had the PIN) still runs in the
+    // background, and so does a scheduled recording of a locked channel.
+    let engine = start(&env, &session);
+    let row = queue_movie(&env, session.profile_id(), movie.stream_id, &movie.title);
+    let now = Utc::now();
+    let rec = dvr::schedule_programme(
+        &env.services.store,
+        session.profile_id(),
+        &ProgrammeToRecord {
+            stream_id: ch.stream_id.to_string(),
+            channel_name: ch.name.clone(),
+            channel_logo: None,
+            title: "Locked News".into(),
+            start: now - opensmarters_core::chrono::Duration::seconds(1),
+            end: now + opensmarters_core::chrono::Duration::seconds(4),
+        },
+    )
+    .unwrap();
+    engine.wake();
+    let done = wait(&env, row.id, 30, "the locked download", |r| {
+        r.state.is_final()
+    });
+    assert_eq!(done.state, RecordingState::Done, "{:?}", done.error);
+    let recorded = wait(&env, rec.id, 30, "the locked recording", |r| {
+        r.state.is_final()
+    });
+    assert_eq!(recorded.state, RecordingState::Done, "{:?}", recorded.error);
+
+    // The saved files are locked like their items: no title in lists, the PIN to play.
+    for r in [&done, &recorded] {
+        assert!(
+            dvr::is_row_locked(&session, r),
+            "{:?} must be locked",
+            r.kind
+        );
+        let (kind, item) = dvr::lock_target(r).unwrap();
+        // What `UnlockFlow` does: look the item up, then the PIN unlocks its category.
+        let locked = match env.rt.block_on(session.verify_item(kind, &item)) {
+            Err(AppError::Locked(l)) => l,
+            other => panic!("{:?} should stay locked: {other:?}", r.kind),
+        };
+        match &locked.category {
+            Some(c) => session.unlock_category(kind, c),
+            None => session.unlock_item(kind, &item),
+        }
+        assert!(
+            !dvr::is_row_locked(&session, r),
+            "{:?} after the PIN",
+            r.kind
+        );
+        assert!(session.check_unlocked(kind, &item, None).is_ok());
+    }
+    assert_eq!(
+        dvr::lock_target(&done),
+        Some((ContentKind::Movie, movie.stream_id.to_string()))
+    );
+    assert_eq!(
+        dvr::lock_target(&recorded),
+        Some((ContentKind::Live, ch.stream_id.to_string()))
+    );
     engine.shutdown();
 }

@@ -298,8 +298,10 @@ impl SettingsPageUi for RecordingsPage {
             });
         ui.add_space(28.0);
 
-        // p7c: the coordinator adds the reminder settings here:
-        // crate::services::alerts::settings_rows(cx, ui);
+        // Stream C's rows: when reminders appear, sleep timer fade-out.
+        section(ui, "Reminders and sleep timer", None);
+        crate::services::alerts::settings_rows(cx, ui);
+        ui.add_space(28.0);
 
         if cx.services.ephemeral && cx.services.paths.data_dir.is_none() {
             ui.add_space(8.0);

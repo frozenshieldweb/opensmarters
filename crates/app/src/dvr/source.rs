@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Where a job's bytes come from, and how a saved file is played.
 //!
-//! **Stream URLs are rebuilt from the profile every time a job starts** (the session's
-//! request builders, or for an Xtream recording the session's own URL builder with the
-//! `.ts` container) and live only in memory: rows hold ids, never URLs.
+//! **Stream URLs are rebuilt from the profile every time a job starts**
+//! (`Session::dvr_movie_url` / `dvr_episode_url` / `dvr_live_url`, the request builders'
+//! URL logic without the parental-lock check, which gates starting and playing instead)
+//! and live only in memory: rows hold ids, never URLs.
 //!
 //! Saved files play through `PlayableUrl::from_owned_media` (inside the recordings
 //! folder, first bytes must be video): films and episodes as `Movie`/`Episode` (the
@@ -13,15 +14,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use opensmarters_core::Episode;
 use opensmarters_core::url::Url;
-use opensmarters_core::urls::LiveContainer as CoreContainer;
 use opensmarters_player::{PlayableUrl, ValidationError};
-use opensmarters_store::{LiveContainer, PlaybackKind, Recording, RecordingKind, Store};
+use opensmarters_store::{PlaybackKind, Recording, RecordingKind, Store};
 
 use super::files;
 use crate::error::{AppError, AppResult};
-use crate::playback::{MediaKind, PlaybackItem, PlaybackRequest, StreamHeaders, stream_headers};
+use crate::playback::{MediaKind, PlaybackItem, PlaybackRequest, StreamHeaders};
 use crate::services::Session;
 use crate::services::catalog::LiveChannel;
 
@@ -46,65 +45,37 @@ impl Source {
     }
 }
 
-/// The episode a download row describes (enough for the URL builder).
-fn episode_of(r: &Recording) -> AppResult<Episode> {
-    let id = r
-        .item_id
-        .parse::<u64>()
-        .map_err(|_| AppError::msg("This episode can't be downloaded."))?;
-    Ok(Episode {
-        id,
-        episode_num: r.episode,
-        title: r.title.clone(),
-        container_extension: r.container_extension.clone(),
-        season: r.season,
-        added: None,
-        direct_source: None,
-        info: Default::default(),
-    })
-}
-
-/// The source of a film or episode download.
+/// The source of a film or episode download. Built with the session's unchecked
+/// `dvr_*_url` helpers: the parental lock gates starting the job and playing the file,
+/// not the transfer (a background job can't ask for the PIN).
 ///
 /// # Errors
 ///
 /// Not an Xtream account, bad ids, a rejected URL.
 pub fn download_source(session: &Session, r: &Recording) -> AppResult<Source> {
-    let req = match r.kind {
+    let (url, headers) = match r.kind {
         RecordingKind::Movie => {
             let id = r
                 .item_id
                 .parse::<u64>()
                 .map_err(|_| AppError::msg("This film can't be downloaded."))?;
-            session.movie_request(
-                id,
-                r.container_extension.as_deref(),
-                &r.title,
-                None,
-                None,
-                None,
-            )?
+            session.dvr_movie_url(id, r.container_extension.as_deref())?
         }
         RecordingKind::Episode => {
-            let series = r
-                .series_id
-                .as_deref()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or_default();
-            session.episode_request(series, "", &episode_of(r)?, None, None)?
+            let id = r
+                .item_id
+                .parse::<u64>()
+                .map_err(|_| AppError::msg("This episode can't be downloaded."))?;
+            session.dvr_episode_url(id, r.container_extension.as_deref())?
         }
         _ => return Err(AppError::msg("Only films and episodes can be downloaded.")),
     };
-    Ok(Source {
-        url: req.url,
-        headers: req.headers,
-    })
+    Ok(Source { url, headers })
 }
 
-/// The channel `key` and the source to record it from: on Xtream the `.ts` container
-/// when the account allows it (one continuous stream records more reliably than HLS),
-/// otherwise what the player would open (M3U entries: the playlist's own address; the
-/// engine detects HLS by the content).
+/// The channel `key` and the source to record it from (Xtream `.ts` when the account
+/// allows it; M3U entries: their own address, HLS is detected by the content). No lock
+/// check here either (see [`download_source`]).
 ///
 /// # Errors
 ///
@@ -115,25 +86,8 @@ pub async fn live_source(session: &Arc<Session>, key: &str) -> AppResult<(LiveCh
         .get(key)
         .cloned()
         .ok_or_else(|| AppError::msg("This channel is no longer offered by your provider."))?;
-    if let (Some(client), Some(login), Some(stream_id)) =
-        (session.xtream(), session.login(), channel.stream_id())
-        && session
-            .allowed_live_containers()
-            .contains(&LiveContainer::Ts)
-    {
-        let url = client.stream_urls(login).live(stream_id, CoreContainer::Ts);
-        let headers = stream_headers(url.as_str(), session.user_agent(), None, None);
-        let url = PlayableUrl::parse(url.as_str())?;
-        return Ok((channel, Source { url, headers }));
-    }
-    let req = session.live_request(&channel, None)?;
-    Ok((
-        channel,
-        Source {
-            url: req.url,
-            headers: req.headers,
-        },
-    ))
+    let (url, headers) = session.dvr_live_url(&channel)?;
+    Ok((channel, Source { url, headers }))
 }
 
 /// The resume point to use for a saved file (blocking: reads the store).
@@ -248,7 +202,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn episode_rows_rebuild_the_episode() {
+    fn nothing_to_play_before_the_file_exists() {
         let r = Recording {
             id: opensmarters_store::RecordingId(3),
             profile: opensmarters_store::ProfileId::new_random(),
@@ -273,9 +227,6 @@ mod tests {
             created_at: opensmarters_store::Timestamp::EPOCH,
             updated_at: opensmarters_store::Timestamp::EPOCH,
         };
-        let e = episode_of(&r).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!((e.id, e.season, e.episode_num), (77, Some(2), Some(5)));
-        assert_eq!(e.container_extension.as_deref(), Some("mkv"));
         // No file yet: nothing to play.
         assert!(playback_request(Path::new("C:/nowhere"), &r, None).is_err());
     }

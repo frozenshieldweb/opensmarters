@@ -38,7 +38,7 @@ use opensmarters_store::{
 
 use crate::error::AppError;
 use crate::focus::{self, FocusOpts};
-use crate::nav::{PlayerRoute, RecordingsTab, Route};
+use crate::nav::{PlayerRoute, Route};
 use crate::screens::AppCtx;
 use crate::services::alerts::{Countdown, Prompt};
 use crate::services::catalog::{LiveChannel, Programme, split_tag};
@@ -713,7 +713,7 @@ enum Act {
     CancelReminder,
     Record,
     CancelRecording,
-    OpenRecordings,
+    StopRecording,
 }
 
 /// What the user did in [`programme_menu`].
@@ -762,10 +762,10 @@ pub fn programme_menu(
             false,
         ),
         Some(RecordingState::Active) => (
-            Act::OpenRecordings,
-            icons::RECORD,
+            Act::StopRecording,
+            icons::STOP,
+            "Stop recording".to_owned(),
             "Recording now".to_owned(),
-            "Open Recordings".to_owned(),
             true,
         ),
         Some(_) => (
@@ -907,7 +907,7 @@ pub fn programme_menu(
     if chosen.is_some() || closed {
         cx.alerts.reminders.menu = None;
     }
-    if chosen.is_some_and(|a| a != Act::Watch && a != Act::OpenRecordings) || closed {
+    if chosen.is_some_and(|a| a != Act::Watch) || closed {
         cx.alerts.reminders.refocus = back_to;
     }
     if closed {
@@ -1007,9 +1007,15 @@ pub fn programme_menu(
                 Ok(())
             });
         }
-        Act::OpenRecordings => cx.nav.push(Route::Recordings {
-            tab: RecordingsTab::Recordings,
-        }),
+        // p7b: stop it here (keeps what was recorded).
+        Act::StopRecording => {
+            if let Some(id) = crate::dvr::ui::running_recording(cx, &stream_id, start_at) {
+                crate::dvr::ui::stop_recording(cx, id);
+            }
+            cx.alerts
+                .reminders
+                .set_mark(&stream_id, start, |m| m.recording = None);
+        }
     }
     out
 }

@@ -18,18 +18,21 @@ use std::sync::Arc;
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, Id, Key, Modifiers, Pos2, Rect, Ui, pos2, vec2,
 };
-use opensmarters_core::SeriesInfo;
 use opensmarters_core::chrono::{DateTime, Local, Utc};
-use opensmarters_store::{NewRecording, Recording, RecordingId, RecordingKind, RecordingState};
+use opensmarters_core::{CategoryId, SeriesInfo};
+use opensmarters_store::{
+    ContentKind, NewRecording, Recording, RecordingId, RecordingKind, RecordingState,
+};
 use tokio::sync::oneshot;
 
 use super::engine::Progress;
 use super::{CLIP_CHOICES, ProgrammeToRecord, source};
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::focus;
 use crate::nav::{RecordingsTab, Route};
 use crate::playback::{PlaybackItem, PlaybackRequest};
 use crate::screens::AppCtx;
+use crate::screens::common::unlock::{UnlockFlow, UnlockResult};
 use crate::screens::settings::human_bytes;
 use crate::services::vod;
 use crate::ui::icons::{self, Style};
@@ -73,6 +76,61 @@ pub struct UiState {
     /// Where the focus goes back after a dialog (requested the next frame, once the
     /// dialog's focus trap is gone).
     refocus: Option<Id>,
+    /// An action waiting for the PIN (parental control), see [`gate`].
+    unlock: Option<Pending>,
+}
+
+/// What runs once the viewer may use the item (after the PIN when needed).
+#[derive(Debug, Clone)]
+enum Gated {
+    /// Queue these downloads, then say this.
+    Queue(Vec<NewRecording>, String),
+    /// Record what plays ("Record" in the player).
+    Record,
+    /// Play this saved file.
+    Play(RecordingId),
+}
+
+/// The unlock flow of a gated action.
+#[derive(Debug)]
+struct Pending {
+    flow: UnlockFlow,
+    then: Gated,
+}
+
+/// Runs `then` if the viewer may use the item now (`Session::check_unlocked`); else runs
+/// the unlock flow (look-up of unknown categories, then the PIN) and `then` after it.
+/// Parental control gates **starting** a job and **playing** a saved file; the transfer
+/// itself never asks (see `services/session/dvr.rs`). An offline session can't look
+/// categories up, so the PIN is needed (fail closed).
+fn gate(
+    cx: &mut AppCtx<'_>,
+    kind: ContentKind,
+    item: &str,
+    categories: Option<&[CategoryId]>,
+    then: Gated,
+) {
+    let Some(session) = cx.session() else { return };
+    match session.check_unlocked(kind, item, categories) {
+        Ok(()) => run_gated(cx, then),
+        Err(AppError::Locked(locked)) => {
+            let flow = UnlockFlow::new(cx, locked);
+            cx.dvr.ui.drawn_pass = cx.egui.cumulative_pass_nr();
+            cx.dvr.ui.unlock = Some(Pending { flow, then });
+        }
+        Err(e) => cx.toasts.error(e.user_message()),
+    }
+}
+
+fn run_gated(cx: &mut AppCtx<'_>, then: Gated) {
+    match then {
+        Gated::Queue(list, message) => {
+            cx.dvr.queue_all(list);
+            cx.toasts.info(message);
+        }
+        Gated::Record => record_current_unchecked(cx),
+        Gated::Play(id) => play_saved_unchecked(cx, id),
+    }
 }
 
 /// Per frame: plays a saved file once its request is ready, closes a dialog on
@@ -96,16 +154,21 @@ pub(crate) fn on_frame(cx: &mut AppCtx<'_>) {
         }
     }
     let pass = cx.egui.cumulative_pass_nr();
-    if cx.dvr.ui.dialog.is_some() && pass > cx.dvr.ui.drawn_pass + 3 {
+    let open = cx.dvr.ui.dialog.is_some() || cx.dvr.ui.unlock.is_some();
+    if open && pass > cx.dvr.ui.drawn_pass + 3 {
         cx.dvr.ui.dialog = None;
+        cx.dvr.ui.unlock = None;
     }
-    if cx.dvr.ui.dialog.is_some() && !focus::text_input_focused(&cx.egui) {
+    if open && !focus::text_input_focused(&cx.egui) {
         let back = cx.egui.input_mut(|i| {
             i.consume_key(Modifiers::NONE, Key::Escape)
                 || i.consume_key(Modifiers::NONE, Key::Backspace)
         });
         if back {
-            close_dialog(cx);
+            // Esc cancels the PIN prompt first, then a dialog.
+            if cx.dvr.ui.unlock.take().is_none() {
+                close_dialog(cx);
+            }
         }
     }
 }
@@ -122,14 +185,32 @@ fn close_dialog(cx: &mut AppCtx<'_>) {
     }
 }
 
-/// True while a DVR dialog is open (screens that handle Esc themselves can check it).
+/// True while a DVR dialog or PIN prompt is open (screens that handle Esc themselves
+/// can check it).
 pub fn dialog_open(cx: &AppCtx<'_>) -> bool {
-    cx.dvr.ui.dialog.is_some()
+    cx.dvr.ui.dialog.is_some() || cx.dvr.ui.unlock.is_some()
 }
 
 /// Plays the saved file of `id` (the request is built off the UI thread: it checks the
 /// file and reads the resume point).
 pub fn play_saved(cx: &mut AppCtx<'_>, id: RecordingId) {
+    let Some(r) = cx.dvr.row(id).cloned() else {
+        cx.toasts.error("This recording isn't available.");
+        return;
+    };
+    // The original item's lock applies (films; episodes by their series; recordings and
+    // clips by their channel).
+    match super::lock_target(&r) {
+        Some((kind, item)) => gate(cx, kind, &item, None, Gated::Play(id)),
+        None if cx.session().is_some_and(|s| s.parental_enabled()) => {
+            cx.toasts
+                .warning("This episode can't be checked for parental control, so it won't play.");
+        }
+        None => play_saved_unchecked(cx, id),
+    }
+}
+
+fn play_saved_unchecked(cx: &mut AppCtx<'_>, id: RecordingId) {
     let (Some(r), Some(dir)) = (cx.dvr.row(id).cloned(), cx.dvr.dir()) else {
         cx.toasts.error("This recording isn't available.");
         return;
@@ -361,11 +442,18 @@ pub fn movie_download(cx: &mut AppCtx<'_>, ui: &mut Ui, t: &MovieTarget<'_>) {
                 let mut new = NewRecording::download(RecordingKind::Movie, item, t.title);
                 new.container_extension = t.extension.map(str::to_owned);
                 new.icon_url = session.safe_url(t.poster);
-                cx.dvr.queue(new);
-                cx.toasts.info(format!(
+                let message = format!(
                     "\u{201c}{}\u{201d} will download in the background. It's in Recordings › Downloads.",
                     text::cap(t.title, 50)
-                ));
+                );
+                let id = t.stream_id.to_string();
+                gate(
+                    cx,
+                    ContentKind::Movie,
+                    &id,
+                    None,
+                    Gated::Queue(vec![new], message),
+                );
             }
         }
         Some(r) if r.state == RecordingState::Done => {
@@ -664,11 +752,18 @@ pub fn episode_action(
         DownloadAction::Episode(id) => {
             if let Some(mut new) = episode_new(info, series_id, id, poster) {
                 new.icon_url = session.safe_url(new.icon_url.as_deref());
-                cx.toasts.info(format!(
+                let message = format!(
                     "\u{201c}{}\u{201d} will download in the background.",
                     text::cap(&new.title, 50)
-                ));
-                cx.dvr.queue(new);
+                );
+                let sid = series_id.to_string();
+                gate(
+                    cx,
+                    ContentKind::Series,
+                    &sid,
+                    None,
+                    Gated::Queue(vec![new], message),
+                );
             }
         }
         DownloadAction::Season(season) => {
@@ -690,12 +785,19 @@ pub fn episode_action(
                 cx.toasts
                     .info("Every episode of this season is already downloaded or queued.");
             } else {
-                cx.toasts.info(format!(
+                let message = format!(
                     "{} episode{} will download in the background, one after another.",
                     list.len(),
                     if list.len() == 1 { "" } else { "s" }
-                ));
-                cx.dvr.queue_all(list);
+                );
+                let sid = series_id.to_string();
+                gate(
+                    cx,
+                    ContentKind::Series,
+                    &sid,
+                    None,
+                    Gated::Queue(list, message),
+                );
             }
         }
         DownloadAction::Open => cx.nav.push(Route::Recordings {
@@ -723,15 +825,32 @@ pub fn detail_dialogs(cx: &mut AppCtx<'_>) {
 // Dialogs
 // ---------------------------------------------------------------------------------------
 
+/// Draws the DVR's PIN prompt and dialogs (the hooks call it; screens of their own,
+/// like Recordings, call it once per frame too).
+pub fn draw_dialogs(cx: &mut AppCtx<'_>) {
+    dialogs(cx);
+}
+
 fn dialogs(cx: &mut AppCtx<'_>) {
-    let Some(d) = cx.dvr.ui.dialog.clone() else {
+    if cx.dvr.ui.dialog.is_none() && cx.dvr.ui.unlock.is_none() {
         return;
-    };
+    }
     let pass = cx.egui.cumulative_pass_nr();
     if cx.dvr.ui.drawn_pass == pass {
         return;
     }
     cx.dvr.ui.drawn_pass = pass;
+    if let Some(mut p) = cx.dvr.ui.unlock.take() {
+        match p.flow.show(cx) {
+            UnlockResult::Unlocked => run_gated(cx, p.then),
+            UnlockResult::Cancelled => {}
+            UnlockResult::Pending => cx.dvr.ui.unlock = Some(p),
+        }
+        return;
+    }
+    let Some(d) = cx.dvr.ui.dialog.clone() else {
+        return;
+    };
     let ctx = cx.egui.clone();
     match d {
         DvrDialog::Clip { .. } => {
@@ -877,9 +996,61 @@ fn recording_of(cx: &AppCtx<'_>, key: &str) -> Option<RecordingId> {
         .map(|r| r.id)
 }
 
+/// Stops the running recording `id` now and keeps what was recorded (the Guide's and
+/// Search's programme menu; the player and the Recordings screen do the same).
+pub fn stop_recording(cx: &mut AppCtx<'_>, id: RecordingId) {
+    cx.dvr.stop_recording(id);
+    cx.toasts
+        .info("Recording stopped. What was recorded is in Recordings.");
+}
+
+/// The running (or waiting) live recording of channel `stream_id` for the programme that
+/// starts at `start_at`, if any.
+pub fn running_recording(
+    cx: &AppCtx<'_>,
+    stream_id: &str,
+    start_at: opensmarters_store::Timestamp,
+) -> Option<RecordingId> {
+    cx.dvr
+        .rows()
+        .iter()
+        .find(|r| {
+            r.kind == RecordingKind::Live
+                && r.item_id == stream_id
+                && r.start_at == Some(start_at)
+                && matches!(r.state, RecordingState::Active | RecordingState::Queued)
+        })
+        .map(|r| r.id)
+}
+
 /// Starts recording what plays: the current programme from the guide (it starts at once
-/// and stops at its end + padding), or "until you stop it" without a guide.
+/// and stops at its end + padding), or "until you stop it" without a guide. Only for a
+/// channel the viewer may use now (parental control: the PIN first otherwise).
 pub fn record_current(cx: &mut AppCtx<'_>) {
+    let Some(req) = cx.playback.request() else {
+        return;
+    };
+    let PlaybackItem::Live { key, .. } = &req.item else {
+        return;
+    };
+    let key = key.clone();
+    let categories = req
+        .zap
+        .as_ref()
+        .and_then(|z| z.channels.get(z.index))
+        .filter(|c| c.key == key)
+        .map(|c| c.categories.clone());
+    gate(
+        cx,
+        ContentKind::Live,
+        &key,
+        categories.as_deref(),
+        Gated::Record,
+    );
+}
+
+/// [`record_current`] once the lock was checked.
+fn record_current_unchecked(cx: &mut AppCtx<'_>) {
     let (Some((key, name, logo, programme)), Some(session), Some(engine)) =
         (playing_channel(cx), cx.session(), cx.dvr.engine())
     else {

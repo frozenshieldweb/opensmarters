@@ -346,6 +346,29 @@ pub fn queue_download(
     store.recordings().add(profile, new)
 }
 
+/// The item whose parental lock applies to a saved file or job: films by their stream
+/// id, episodes by their **series** (`ContentKind::Series`), live recordings and clips by
+/// their channel key. `None` only for an episode row without a series id.
+pub fn lock_target(r: &Recording) -> Option<(opensmarters_store::ContentKind, String)> {
+    use opensmarters_store::ContentKind;
+    match r.kind {
+        RecordingKind::Movie => Some((ContentKind::Movie, r.item_id.clone())),
+        RecordingKind::Episode => r.series_id.clone().map(|s| (ContentKind::Series, s)),
+        RecordingKind::Live | RecordingKind::Clip => Some((ContentKind::Live, r.item_id.clone())),
+    }
+}
+
+/// True if a row must not show its title or artwork (or play) without the PIN right now:
+/// its item is locked, or its categories aren't known yet while a PIN is set (fail
+/// closed; a look-up starts in the background). An episode without a series id counts
+/// as locked while parental control applies to series.
+pub fn is_row_locked(session: &Session, r: &Recording) -> bool {
+    match lock_target(r) {
+        Some((kind, item)) => session.check_unlocked(kind, &item, None).is_err(),
+        None => session.parental_enabled(),
+    }
+}
+
 /// App-wide recording/download state (`cx.dvr`). See the [module docs](self).
 #[derive(Default)]
 pub struct Dvr {

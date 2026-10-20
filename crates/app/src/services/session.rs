@@ -89,6 +89,8 @@ pub use vod::SeriesWatch;
 mod pin;
 // Fast start from the cached login + catalogue, verified in the background.
 mod startup;
+// p7b: stream addresses for background recordings/downloads (no lock check; dvr only).
+mod dvr;
 
 /// TTL of category and stream lists.
 pub const LIST_TTL: Duration = Duration::from_secs(6 * 3600);

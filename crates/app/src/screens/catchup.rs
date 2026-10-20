@@ -451,7 +451,10 @@ impl CatchupScreen {
                 Fallback::OfferSave(_) => {
                     focus::request(&cx.egui, Id::unique("catchup.save-format"));
                 }
-                _ => {}
+                Fallback::GiveUp => {
+                    focus::request(&cx.egui, prog_row_id(&t.attempt.item));
+                }
+                Fallback::None => {}
             }
         }
     }

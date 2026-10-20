@@ -1,3 +1,0 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Windows resources for opensmarters.exe (compiled by build.rs via embed-resource).
-1 ICON "../../assets/icon/opensmarters.ico"

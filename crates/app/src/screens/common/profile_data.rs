@@ -12,17 +12,10 @@
 //!
 //! Blocking (store): call off the UI thread.
 
-use std::collections::BTreeMap;
-
-use opensmarters_store::settings::Setting;
 use opensmarters_store::{ProfileId, Store, StoreError};
 
 use crate::services::search_history;
-
-/// Same key and shape as `services::session::vod`'s (private) last-category setting.
-/// TODO(integration): share one constant (make that one `pub(crate)`).
-const LAST_VOD_CATEGORY: Setting<BTreeMap<String, String>> =
-    Setting::new("app.vod_last_category", BTreeMap::new);
+use crate::services::session::LAST_VOD_CATEGORY;
 
 /// Deletes profile `id` and forgets its machine-local data. Returns `false` if the
 /// profile did not exist.
@@ -60,6 +53,7 @@ pub fn forget_local_data(store: &Store, id: ProfileId) -> Result<(), StoreError>
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use opensmarters_store::{MemorySecretStore, StoreOptions};

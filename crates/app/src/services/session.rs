@@ -84,6 +84,7 @@ pub mod locks;
 // Movies/series: watch state, mark watched, remembered categories (`session/vod.rs`).
 mod vod;
 pub use locks::{ItemLock, Lockable, RELOCK_IDLE};
+pub(crate) use vod::LAST_CATEGORY as LAST_VOD_CATEGORY;
 pub use vod::SeriesWatch;
 mod pin;
 
@@ -304,25 +305,41 @@ struct LiveMemo {
 
 /// The active profile's provider connection. See the [module docs](self).
 pub struct Session {
+    // --- Identity and provider connection (set in open()).
+    /// A weak handle to this session (background look-ups started from &self).
     me: Weak<Session>,
     profile: Profile,
     services: Services,
     source: Source,
     user_agent: String,
     http: HttpClient,
-    offline: AtomicBool,
-    closed: AtomicBool,
     account: Option<AccountSummary>,
+    /// Why the account counts as unencrypted (SR-12), if it does.
     insecure: Option<InsecureReason>,
+
+    // --- Lifecycle.
+    offline: AtomicBool,
+    /// Set by close() (profile switch): background work stops (B5).
+    closed: AtomicBool,
+
+    // --- Caches.
     memo: Mutex<HashMap<String, MemoEntry>>,
     key_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The live catalogue and the lists it was built from (rebuilt only on change).
+    live: Mutex<Option<LiveMemo>>,
+    /// The one EPG cache + bounded request queue, guide state, timeshift choices.
+    ext: Arc<guide::ExtState>,
+    xmltv: tokio::sync::OnceCell<Option<Arc<opensmarters_core::xmltv::Epg>>>,
+
+    // --- Favourites (shared sets, generation bumped on every change).
     favourites: RwLock<HashMap<ContentKind, Arc<HashSet<String>>>>,
     favourites_generation: AtomicU64,
+
+    // --- Parental control.
     parental: RwLock<ParentalState>,
+    /// Category names, item → categories index, session unlocks, idle re-lock,
+    /// background look-ups (session/locks.rs).
     lock_state: locks::LockState,
-    ext: Arc<guide::ExtState>,
-    live: Mutex<Option<LiveMemo>>,
-    xmltv: tokio::sync::OnceCell<Option<Arc<opensmarters_core::xmltv::Epg>>>,
 }
 
 impl std::fmt::Debug for Session {
@@ -543,25 +560,30 @@ impl Session {
             .map(|(k, v)| (k, Arc::new(v)))
             .collect();
         Ok(Arc::new_cyclic(|me| Session {
+            // Identity and provider connection.
             me: me.clone(),
             profile,
             services,
             source,
             user_agent,
             http,
-            offline: AtomicBool::new(offline),
-            closed: AtomicBool::new(false),
             account,
             insecure,
+            // Lifecycle.
+            offline: AtomicBool::new(offline),
+            closed: AtomicBool::new(false),
+            // Caches.
             memo: Mutex::new(HashMap::new()),
             key_locks: Mutex::new(HashMap::new()),
+            live: Mutex::new(None),
+            ext: Arc::new(guide::ExtState::default()),
+            xmltv: tokio::sync::OnceCell::new(),
+            // Favourites.
             favourites: RwLock::new(favourites),
             favourites_generation: AtomicU64::new(0),
+            // Parental control.
             parental: RwLock::new(parental),
             lock_state: locks::LockState::default(),
-            ext: Arc::new(guide::ExtState::default()),
-            live: Mutex::new(None),
-            xmltv: tokio::sync::OnceCell::new(),
         }))
     }
 

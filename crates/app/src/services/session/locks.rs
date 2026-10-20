@@ -403,8 +403,10 @@ impl Session {
     // Items
     // ---------------------------------------------------------------------------------
 
-    /// The lock state of an item with these categories (every one counts).
-    fn categories_lock(&self, kind: ContentKind, categories: &[CategoryId]) -> ItemLock {
+    /// The lock state of an item with these categories (every one counts; session unlocks
+    /// apply). [`ItemLock::Unknown`] when a keyword lock depends on a category name the
+    /// session has not loaded yet (the list is then loaded in the background).
+    pub fn categories_lock(&self, kind: ContentKind, categories: &[CategoryId]) -> ItemLock {
         let mut unknown = false;
         let mut names_needed = false;
         {

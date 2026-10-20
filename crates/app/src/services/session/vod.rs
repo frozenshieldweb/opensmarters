@@ -19,7 +19,7 @@ use crate::playback::PlaybackRequest;
 use crate::services::vod;
 
 /// Last browsed category per profile and kind (`"<profile>:<movie|series>"` → id).
-const LAST_CATEGORY: Setting<BTreeMap<String, String>> =
+pub(crate) const LAST_CATEGORY: Setting<BTreeMap<String, String>> =
     Setting::new("app.vod_last_category", BTreeMap::new);
 
 /// How many history rows the poster grids read for progress bars.

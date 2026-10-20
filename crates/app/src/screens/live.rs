@@ -194,7 +194,7 @@ impl LiveScreen {
             self.pin = Some(PinPrompt {
                 selection: sel,
                 name: name.to_owned(),
-                pad: PinPad::new(Id::unique("live.pin"), 4),
+                pad: PinPad::new(Id::unique("live.pin"), session.pin_length()),
                 verify: Loader::new(),
             });
             return;

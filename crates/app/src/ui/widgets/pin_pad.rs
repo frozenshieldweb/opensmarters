@@ -5,6 +5,12 @@
 //! The pad only collects digits; the caller verifies them off the UI thread with
 //! `store.parental().verify_pin` and reports the outcome back with
 //! [`PinPad::set_wrong`] / [`PinPad::set_locked_until`].
+//!
+//! PINs are 4–8 digits. To check a PIN, create the pad with the stored length
+//! (`session.pin_length()`), so it submits on the last digit. To *choose* a PIN, use
+//! [`PinPad::variable`]: it shows one more dot than typed (at least 4), submits at 8 digits,
+//! and otherwise waits for the caller's "Continue" button ([`PinPad::submit`], registered
+//! with [`PinPad::submit_id`] so typing on the keyboard moves the focus to it).
 
 use std::time::{Duration, Instant};
 
@@ -31,6 +37,7 @@ pub struct PinPad {
     id: Id,
     digits: String,
     length: usize,
+    min: usize,
     shake_at: Option<Instant>,
     message: Option<String>,
     locked_until: Option<Instant>,
@@ -44,11 +51,51 @@ impl PinPad {
             id,
             digits: String::new(),
             length: length.clamp(4, 8),
+            min: length.clamp(4, 8),
             shake_at: None,
             message: None,
             locked_until: None,
             busy: false,
         }
+    }
+
+    /// A pad for choosing a PIN of `min`–`max` digits (4–8): submits at `max` digits or via
+    /// [`PinPad::submit`].
+    pub fn variable(id: Id, min: usize, max: usize) -> Self {
+        let min = min.clamp(4, 8);
+        let mut pad = Self::new(id, max.clamp(min, 8));
+        pad.min = min;
+        pad
+    }
+
+    /// Digits typed so far.
+    pub fn entered(&self) -> usize {
+        self.digits.len()
+    }
+
+    /// True if [`PinPad::submit`] would submit (enough digits, not busy or locked).
+    pub fn can_submit(&self) -> bool {
+        !self.busy && self.locked_remaining().is_none() && self.digits.len() >= self.min
+    }
+
+    /// Submits the digits typed so far (variable pads), if [`PinPad::can_submit`].
+    pub fn submit(&mut self) -> Option<SecretString> {
+        if !self.can_submit() {
+            return None;
+        }
+        self.busy = true;
+        Some(SecretString::from(std::mem::take(&mut self.digits)))
+    }
+
+    /// The id to give the caller's "Continue" button (variable pads move the focus to it
+    /// once enough digits were typed on the keyboard).
+    pub fn submit_id(&self) -> Id {
+        self.id.with("submit")
+    }
+
+    /// True while a lockout is running.
+    pub fn is_locked(&self) -> bool {
+        self.locked_remaining().is_some()
     }
 
     /// Reports a wrong PIN ("Wrong PIN. 2 attempts left").
@@ -123,10 +170,14 @@ impl PinPad {
             }
             v
         });
+        let typed_any = !typed.is_empty();
         for c in typed {
             if let PinPadEvent::Submitted(s) = self.push(c) {
                 event = PinPadEvent::Submitted(s);
             }
+        }
+        if typed_any && self.min < self.length && self.digits.len() >= self.min {
+            focus::request(&ctx, self.submit_id());
         }
 
         let width = 360.0;
@@ -151,9 +202,14 @@ impl PinPad {
             }
         }
         let wrong = self.message.is_some();
-        let n = self.length as f32;
+        let dots = if self.min < self.length {
+            (self.digits.len() + 1).clamp(self.min, self.length)
+        } else {
+            self.length
+        };
+        let n = dots as f32;
         let total = n * 14.0 + (n - 1.0) * 16.0;
-        for i in 0..self.length {
+        for i in 0..dots {
             let c = pos2(
                 dots_rect.center().x - total / 2.0 + 7.0 + i as f32 * 30.0 + dx,
                 dots_rect.center().y,
@@ -167,11 +223,10 @@ impl PinPad {
         }
         let (msg_rect, _) = ui.allocate_exact_size(vec2(width, 22.0), Sense::hover());
         if let Some(rem) = self.locked_remaining() {
-            let s = rem.as_secs();
             painter.text(
                 msg_rect.center(),
                 Align2::CENTER_CENTER,
-                format!("Try again in {}:{:02}", s / 60, s % 60),
+                crate::services::parental::lockout_text(rem),
                 font::caption(),
                 color::WARNING,
             );

@@ -6,12 +6,15 @@
 //! The provider-specific part lives in [`session::Session`] (one per active profile,
 //! `cx.session()`).
 
+pub mod backup;
 pub mod catalog;
 #[cfg(feature = "demo")]
 pub mod demo;
 pub mod epg;
 pub mod images;
+pub mod parental;
 pub mod prefs;
+pub mod search_history;
 pub mod session;
 
 use std::path::PathBuf;

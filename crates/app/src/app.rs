@@ -198,7 +198,7 @@ impl OpensmartersApp {
                 app.sessions.open(&app.services, *id, name.clone());
                 Route::Profiles
             }
-            (Startup::Onboarding, None) => Route::Onboarding { edit: None },
+            (Startup::Onboarding, None) => Route::Welcome,
             (Startup::Profiles, None) => Route::Profiles,
         };
         app.nav.reset(first);

@@ -2,6 +2,9 @@
 //! Profile picker ("Who's watching?", §6.15): choose, add, edit or delete a profile, and
 //! the sign-in progress / failure state of the profile being opened (re-validation at
 //! startup shows expired/banned accounts here with a clear message).
+//!
+//! While a parental PIN is set, managing profiles (edit/delete), adding one and editing a
+//! failed account ask for it first ([`PinPrompt`]); choosing a profile never does.
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, Id, Rect, Sense, Stroke, Ui, pos2, vec2};
 use opensmarters_store::{Profile, ProfileId, ProfileKind};
@@ -13,13 +16,23 @@ use crate::task::Loader;
 use crate::ui::assets::{self, Asset};
 use crate::ui::icons::{self, Style};
 use crate::ui::theme::{color, font, radius};
-use crate::ui::widgets::{Avatar, Button, Callout, CalloutKind, Dialog};
+use crate::ui::widgets::{
+    Avatar, Button, Callout, CalloutKind, Dialog, PinPrompt, PinPromptResult,
+};
 use crate::ui::{paint, text};
 
 #[derive(Debug, Clone, PartialEq)]
 enum Modal {
     Actions(ProfileId, String),
     ConfirmDelete(ProfileId, String),
+}
+
+/// An action waiting for the parental PIN.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Gated {
+    Manage,
+    Add,
+    Edit(ProfileId),
 }
 
 /// The profile picker.
@@ -29,6 +42,7 @@ pub struct ProfilesScreen {
     manage: bool,
     modal: Option<Modal>,
     deleting: Loader<ProfileId>,
+    gate: Option<(PinPrompt, Gated)>,
 }
 
 impl Default for ProfilesScreen {
@@ -45,7 +59,12 @@ impl ProfilesScreen {
             manage: false,
             modal: None,
             deleting: Loader::new(),
+            gate: None,
         }
+    }
+
+    fn ask_pin(&mut self, action: Gated) {
+        self.gate = Some((PinPrompt::new(Id::unique("profiles.gate")), action));
     }
 
     fn reload(&mut self, cx: &AppCtx<'_>) {
@@ -91,7 +110,7 @@ impl Screen for ProfilesScreen {
     }
 
     fn on_back(&mut self, cx: &mut AppCtx<'_>) -> bool {
-        if self.modal.take().is_some() {
+        if self.gate.take().is_some() || self.modal.take().is_some() {
             return true;
         }
         if self.manage {
@@ -296,7 +315,7 @@ impl Screen for ProfilesScreen {
                     .show(ui)
                     .activated
                 {
-                    cx.nav.push(Route::Onboarding { edit: Some(p.id) });
+                    self.ask_pin(Gated::Edit(p.id));
                 }
             });
             y += 140.0;
@@ -321,7 +340,11 @@ impl Screen for ProfilesScreen {
             size,
         )));
         if b.show(&mut child).activated {
-            self.manage = !self.manage;
+            if self.manage {
+                self.manage = false;
+            } else {
+                self.ask_pin(Gated::Manage);
+            }
         }
 
         if let Some(p) = activated {
@@ -332,7 +355,27 @@ impl Screen for ProfilesScreen {
             }
         }
         if add {
-            cx.nav.push(Route::Onboarding { edit: None });
+            self.ask_pin(Gated::Add);
+        }
+        if let Some((gate, action)) = &mut self.gate {
+            let title = match action {
+                Gated::Manage => "Enter your PIN to manage profiles",
+                Gated::Add => "Enter your PIN to add a profile",
+                Gated::Edit(_) => "Enter your PIN to edit this account",
+            };
+            match gate.show_dialog(ui.ctx(), cx.services, title, None) {
+                PinPromptResult::Verified(_) => {
+                    let action = *action;
+                    self.gate = None;
+                    match action {
+                        Gated::Manage => self.manage = true,
+                        Gated::Add => cx.nav.push(Route::Onboarding { edit: None }),
+                        Gated::Edit(id) => cx.nav.push(Route::Onboarding { edit: Some(id) }),
+                    }
+                }
+                PinPromptResult::Cancelled | PinPromptResult::Forgot => self.gate = None,
+                PinPromptResult::Pending => {}
+            }
         }
 
         // Dialogs.

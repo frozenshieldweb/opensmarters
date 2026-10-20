@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Settings → Account: profile type, server (never credentials), status, expiry,
-//! connections, the permanent unencrypted-connection warning, and actions.
+//! connections, the permanent unencrypted-connection warning, and actions. "Edit
+//! account" asks for the parental PIN while one is set.
 
 use eframe::egui::{self, Id, Ui};
 use opensmarters_core::AccountStatus;
@@ -12,13 +13,19 @@ use crate::nav::Route;
 use crate::screens::AppCtx;
 use crate::ui::icons;
 use crate::ui::theme::color;
-use crate::ui::widgets::{Button, Callout, CalloutKind, SettingRow};
+use crate::ui::widgets::{Button, Callout, CalloutKind, PinPrompt, PinPromptResult, SettingRow};
 
 /// The account page.
 #[derive(Debug, Default)]
-pub struct AccountPage;
+pub struct AccountPage {
+    gate: Option<PinPrompt>,
+}
 
 impl SettingsPageUi for AccountPage {
+    fn on_back(&mut self, _cx: &mut AppCtx<'_>) -> bool {
+        self.gate.take().is_some()
+    }
+
     fn ui(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {
         let Some(session) = cx.session() else {
             page_heading(ui, "Account", Some("No account is open."));
@@ -122,9 +129,7 @@ impl SettingsPageUi for AccountPage {
                 .show(ui)
                 .activated
             {
-                cx.nav.push(Route::Onboarding {
-                    edit: Some(profile.id),
-                });
+                self.gate = Some(PinPrompt::new(Id::unique("settings.account.gate")));
             }
             if Button::secondary("Refresh channels and films")
                 .icon(icons::ARROWS_CLOCKWISE)
@@ -149,5 +154,22 @@ impl SettingsPageUi for AccountPage {
                 cx.nav.push(Route::Profiles);
             }
         });
+        if let Some(gate) = &mut self.gate {
+            match gate.show_dialog(
+                ui.ctx(),
+                cx.services,
+                "Enter your PIN to edit the account",
+                None,
+            ) {
+                PinPromptResult::Verified(_) => {
+                    self.gate = None;
+                    cx.nav.push(Route::Onboarding {
+                        edit: Some(profile.id),
+                    });
+                }
+                PinPromptResult::Cancelled | PinPromptResult::Forgot => self.gate = None,
+                PinPromptResult::Pending => {}
+            }
+        }
     }
 }

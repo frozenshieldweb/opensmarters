@@ -194,7 +194,7 @@ impl OpensmartersApp {
             dvr: crate::dvr::Dvr::default(),
             sleep: crate::playback::sleep::SleepTimer::default(),
             alerts: crate::services::alerts::Alerts::default(),
-            multi: crate::playback::multi::MultiView::default(),
+            multi: crate::playback::multi::MultiView::new(cc.get_proc_address.clone(), mpv_log),
             #[cfg(feature = "demo")]
             demo: config.demo,
         };

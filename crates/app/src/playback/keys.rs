@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Channel keys: **one convention everywhere**, the TV remote's.
+//! Channel keys.
 //!
-//! | Step | Keys |
-//! |---|---|
-//! | channel **+1** (next in the list, usually the higher number) | PageUp, Ctrl+↑, media "next track" |
-//! | channel **−1** (previous) | PageDown, Ctrl+↓, media "previous track" |
+//! | Step | Fullscreen player (TV-remote convention) | Live TV list (follows the list) |
+//! |---|---|---|
+//! | channel **+1** (next in the list, usually the higher number) | PageUp, Ctrl+↑, media "next" | Ctrl+↓, media "next" |
+//! | channel **−1** (previous) | PageDown, Ctrl+↓, media "previous" | Ctrl+↑, media "previous" |
 //!
-//! - **Fullscreen player:** all of the above, plus ↑/↓ (and →/← while the OSD is hidden)
-//!   for live channels — handled by the player, which knows whether the OSD is up.
-//! - **Live TV:** PageUp/PageDown page the channel list (it can hold ~10 000 channels);
-//!   Ctrl+↑/↓ and the media keys zap the preview.
+//! - **Fullscreen player:** the TV remote's CH▲/CH▼ (PageUp/PageDown), plus ↑/↓ (and
+//!   →/← while the OSD is hidden) for live channels — handled by the player, which knows
+//!   whether the OSD is up.
+//! - **Live TV:** the list is on screen, so Ctrl+↓ moves the playing channel *down the
+//!   list* (to the next row), like the highlight; PageUp/PageDown page the list (it can
+//!   hold ~10 000 channels).
 //!
 //! Zapping stops at the ends of the list ([`super::ZapEdge`]): no wrap from the first
 //! channel to the last.
@@ -32,8 +34,14 @@ pub fn channel_step(key: Key, mods: Modifiers, surface: Surface) -> Option<isize
     match key {
         Key::MediaTrackNext => Some(1),
         Key::MediaTrackPrevious => Some(-1),
-        Key::ArrowUp if ctrl && !mods.alt => Some(1),
-        Key::ArrowDown if ctrl && !mods.alt => Some(-1),
+        // In the Live list Ctrl+arrows follow the list (↓ = next row); in the player
+        // they follow the remote (↑ = channel up).
+        Key::ArrowUp if ctrl && !mods.alt => {
+            Some(if surface == Surface::LiveList { -1 } else { 1 })
+        }
+        Key::ArrowDown if ctrl && !mods.alt => {
+            Some(if surface == Surface::LiveList { 1 } else { -1 })
+        }
         Key::PageUp if plain && surface == Surface::Player => Some(1),
         Key::PageDown if plain && surface == Surface::Player => Some(-1),
         _ => None,
@@ -89,10 +97,21 @@ mod tests {
     };
 
     #[test]
-    fn one_convention_on_both_surfaces() {
+    fn ctrl_arrows_follow_the_list_in_live_and_the_remote_in_the_player() {
+        assert_eq!(
+            channel_step(Key::ArrowDown, CTRL, Surface::LiveList),
+            Some(1)
+        );
+        assert_eq!(
+            channel_step(Key::ArrowUp, CTRL, Surface::LiveList),
+            Some(-1)
+        );
+        assert_eq!(channel_step(Key::ArrowUp, CTRL, Surface::Player), Some(1));
+        assert_eq!(
+            channel_step(Key::ArrowDown, CTRL, Surface::Player),
+            Some(-1)
+        );
         for s in [Surface::LiveList, Surface::Player] {
-            assert_eq!(channel_step(Key::ArrowUp, CTRL, s), Some(1), "{s:?}");
-            assert_eq!(channel_step(Key::ArrowDown, CTRL, s), Some(-1), "{s:?}");
             assert_eq!(
                 channel_step(Key::MediaTrackNext, Modifiers::NONE, s),
                 Some(1)
@@ -141,7 +160,8 @@ mod tests {
             key(Key::PageUp, Modifiers::NONE),
             key(Key::ArrowDown, Modifiers::NONE),
         ];
-        assert_eq!(take_from(&mut events, Surface::LiveList), Some(1));
+        // Live list: Ctrl+↑ twice (−1 each) and media "previous" (−1).
+        assert_eq!(take_from(&mut events, Surface::LiveList), Some(-3));
         assert_eq!(take_from(&mut events, Surface::LiveList), None);
         // PageUp and the plain arrow are left for the list.
         assert_eq!(events.len(), 2);

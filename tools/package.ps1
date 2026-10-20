@@ -69,7 +69,7 @@ Copy-Item 'packaging/THIRD_PARTY.md' $stage
 Copy-Item 'assets/fonts/OFL-SourceSans3.txt', 'assets/fonts/OFL-Fraunces.txt', 'assets/fonts/LICENSE-Phosphor.txt' (Join-Path $stage 'licenses')
 
 @"
-opensmarters $version: a secure, open-source IPTV player
+opensmarters ${version}: a secure, open-source IPTV player
 =======================================================
 
 Run opensmarters.exe. No installation is needed. Keep libmpv-2.dll in the same folder.

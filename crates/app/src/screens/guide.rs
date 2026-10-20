@@ -1314,9 +1314,11 @@ impl GuideScreen {
         }
         // Hint.
         let hint = if live {
-            "Enter  Watch"
+            "Enter  Watch or record"
         } else if archive {
             "Enter  Replay"
+        } else if p.start > now {
+            "Enter  Remind me or record"
         } else {
             "Enter  Details"
         };

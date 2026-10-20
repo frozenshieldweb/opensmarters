@@ -1,0 +1,117 @@
+# opensmarters
+
+**A secure, open-source IPTV player for Windows, built in Rust.** It works with your own Xtream Codes or M3U subscription. It's fast with large catalogues, comfortable from the sofa, and treats your provider's data as untrusted.
+
+![Home](docs/screenshots/home.jpg)
+
+opensmarters ships with **no channels, no content and no provider**. It plays what your own subscription gives you. It is an independent project: it is not affiliated with IPTV Smarters or WHMCS Smarters, and it uses none of their code.
+
+## Features
+
+- **Live TV**:
+  - categories, plus All and Favourites;
+  - a virtualised channel list that stays smooth with 10,000+ channels;
+  - now/next EPG with progress, and an inline preview player;
+  - a channel banner when zapping, and channel-number entry.
+- **Guide**: an EPG grid from the provider's API or XMLTV (including `url-tvg`). It loads lazily and with bounded resources.
+- **Catch-up**: 14 days of archive, grouped by day on your clock. If a provider rejects the usual timeshift link format, the app retries once with the other one.
+- **Movies and Series**:
+  - loaded per category, so a 35,000-title catalogue never blocks the UI;
+  - detail pages and seasons;
+  - **resume**, **Continue watching**, and **next episode**.
+- **Search** across channels, films, series and cached programmes, plus **Favourites** with reordering.
+- **Player** (libmpv, hardware decoding):
+  - audio and subtitle tracks, aspect and zoom presets;
+  - stall detection with bounded reconnects;
+  - respect for your provider's connection limit.
+- **Parental control**:
+  - a 4–8 digit PIN, Argon2-hashed and rate-limited;
+  - locked words matched as whole words ("Sussex" is fine);
+  - per-category locks enforced everywhere: browse, Search, Home, Favourites, Guide, the player.
+- **Multiple profiles** (Xtream, M3U URL, M3U file); backup and restore without secrets.
+- **Keyboard and remote first**: spatial navigation everywhere, a TV mode (10-foot UI), and full mouse support.
+
+| | |
+|---|---|
+| ![Live TV](docs/screenshots/live-tv.jpg) | ![Guide](docs/screenshots/guide.jpg) |
+| ![Series](docs/screenshots/series-detail.jpg) | |
+
+*(Screenshots use the built-in synthetic demo provider.)*
+
+## Security
+
+Everything a provider sends (names, artwork, EPG, playlists, stream links) is untrusted input, and none of it must ever be able to run code on your PC. opensmarters is designed against that whole class of problems:
+
+- **Native UI.** egui renders provider text as text; there's no HTML or JS engine.
+- **Locked-down libmpv.** No scripts, no config files, no youtube-dl.
+- **Stream links are checked.** A scheme allowlist applies before anything reaches mpv, and the protocol whitelist covers HLS sub-requests.
+- **Secrets stay in Windows Credential Manager.** Passwords and playlist URLs never go in files or logs, and every log line is redacted.
+- **TLS is always verified.** `https`→`http` redirects are refused, and plain-HTTP accounts are flagged.
+- **No telemetry.** Movie-database (TMDB) lookups are off by default.
+- **Hostile input is bounded.** Size, memory and time limits apply to playlists, EPG and artwork. The parsers are fuzzed.
+
+The threat model, mitigations and review findings are in [docs/SECURITY.md](docs/SECURITY.md).
+
+## Install
+
+Download `opensmarters-<version>-windows-x64.zip` and unzip it anywhere. Run `opensmarters.exe`, keeping `libmpv-2.dll` next to it. Windows 10/11 x64 with a current graphics driver is required.
+
+Your data lives in `%LOCALAPPDATA%\opensmarters\opensmarters\data`. Passwords are in Windows Credential Manager, under entries ending in `.opensmarters`.
+
+## Keyboard
+
+| | Everywhere | Live TV | Player |
+|---|---|---|---|
+| Move / select | Arrows, Enter | | |
+| Back | Esc or Backspace | | |
+| Change channel | | Ctrl+↓ next / Ctrl+↑ previous | PageUp / PageDown (or ↑/↓ with controls hidden) |
+| Channel number | | digits | digits |
+| Page the list | | PageUp / PageDown | |
+| Play / pause, seek | | | Space; ←/→ 10 s (Shift: 60 s) |
+| Mute, fullscreen, info | | M, F, I | M, F, I |
+| Audio / subtitles | | | A / S |
+
+## Build from source
+
+Requirements:
+- Windows 10/11 x64
+- Rust stable 1.95 or newer (MSVC toolchain)
+- PowerShell
+
+```powershell
+# 1. Fetch the pinned libmpv build (hash-verified) into vendor/libmpv/
+powershell -ExecutionPolicy Bypass -File tools\fetch-libmpv.ps1
+
+# 2. Run the app
+cargo run -p opensmarters --release
+
+# Try it without an account: the built-in synthetic provider, in memory only
+cargo run -p opensmarters --features demo -- --demo --ephemeral
+```
+
+**Developer workflow:** for the scripted UI harness (screenshots, key scripts), build with `--features demo,harness`; see [docs/APP_ARCHITECTURE.md](docs/APP_ARCHITECTURE.md) §9.
+
+**Checks:**
+```powershell
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo deny check; cargo audit
+```
+
+**Release zip:** `powershell -ExecutionPolicy Bypass -File tools\package.ps1` writes `dist/`. It needs `cargo install --locked cargo-about --features cli`.
+
+## Project layout
+
+| Path | What |
+|---|---|
+| `crates/core` | Xtream client, lenient models, M3U and XMLTV parsers, stream URLs, log redaction |
+| `crates/store` | SQLite storage, keychain secrets, encrypted cache, Argon2id PIN |
+| `crates/player` | Hardened libmpv wrapper and the egui video view (the only crate with `unsafe`) |
+| `crates/app` | The desktop app (eframe/egui) |
+| `crates/fake-panel` | A synthetic provider for development and tests |
+| `docs/` | [Architecture](docs/APP_ARCHITECTURE.md), [design system](docs/DESIGN.md), [protocol](docs/PROTOCOL.md), [security](docs/SECURITY.md), [libmpv](docs/LIBMPV.md), [progress](docs/PROGRESS.md) |
+
+## Licence
+
+opensmarters is free software under the **GNU General Public License v3.0 or later** (see [LICENSE](LICENSE)). Release builds bundle a GPL build of libmpv/FFmpeg; source links are in [packaging/THIRD_PARTY.md](packaging/THIRD_PARTY.md). The fonts (Source Sans 3, Fraunces) are under the SIL OFL 1.1, and the Phosphor icons are under MIT.

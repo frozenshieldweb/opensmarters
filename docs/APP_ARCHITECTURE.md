@@ -379,8 +379,10 @@ match session.movie_request(id, ext.as_deref(), &title, Some(subtitle), poster, 
   buffer ahead / to rewind, download speed, dropped frames, reconnects, "2 of 3"
   connections, start buffer, extra buffering for this channel.
 
-Channel keys, one convention everywhere (`playback/keys.rs`, TV remotes): **PageUp /
-Ctrl+↑ / media "next" = channel +1**, **PageDown / Ctrl+↓ / media "previous" = channel −1**.
+Channel keys (`playback/keys.rs`). In the fullscreen player they follow the TV remote:
+**PageUp / Ctrl+↑ / media "next" = channel +1**, **PageDown / Ctrl+↓ / media "previous" =
+channel −1**. On Live TV the list is on screen, so Ctrl+↓ means the **next row** (+1) and
+Ctrl+↑ the previous row (−1).
 Player keys (documented in `screens/player.rs`): Space play/pause (on live TV pausing
 starts rewinding); with the OSD hidden ←/→ seek ∓10 s (Shift ∓60 s, the scrubber gets the
 focus) on VOD, and on live TV move in the rewind buffer (the live bar gets the focus) or zap
@@ -388,8 +390,8 @@ focus) on VOD, and on live TV move in the rewind buffer (the live bar gets the f
 (§7.1); the channel keys above; digits = channel number entry (zaps after 1.5 s or
 Enter; the current list, else All); M mute, F window fullscreen, I show/hide OSD, A/S next
 audio/subtitle, +/− volume; Esc closes the track sheet or the stream details, then hides the
-OSD, then leaves the player. Live TV: PageUp/PageDown **page the list**; Ctrl+↑/↓ and the media keys zap the
-preview; the same digits; M mute, F fullscreen, I channel banner.
+OSD, then leaves the player. Live TV: PageUp/PageDown **page the list**; Ctrl+↓/↑ (next/previous row) and
+the media keys zap the preview; the same digits; M mute, F fullscreen, I channel banner.
 Other features add OSD buttons with `screens::player::actions::osd_icon` and keys in the
 marked blocks of `player.rs`.
 

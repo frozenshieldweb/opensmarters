@@ -560,7 +560,7 @@ impl Screen for SearchScreen {
         let field_w = (content.width() - 2.0 * m).min(880.0);
         let field_rect = Rect::from_min_size(
             pos2(content.left() + m, content.top() + 96.0),
-            vec2(field_w, 56.0),
+            vec2(field_w, 52.0),
         );
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(field_rect));
         let before = self.query.clone();
@@ -569,7 +569,7 @@ impl Screen for SearchScreen {
                 Id::unique("search.field"),
                 "Search channels, films, series and programmes",
             )
-            .size(field_w, 56.0)
+            .size(field_w, 52.0)
             .autofocus(self.query.is_empty())
             .show(ui, &mut self.query)
         });

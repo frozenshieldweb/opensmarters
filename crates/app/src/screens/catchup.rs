@@ -257,6 +257,9 @@ impl CatchupScreen {
         self.day = 0;
         self.focused = None;
         self.progress_key = None;
+        // A fresh loader: the previous channel's schedule must not show under this one.
+        self.table = Loader::new();
+        self.days_gen = u64::MAX;
         self.table.start(cx.rt(), &cx.egui, move |_| async move {
             session.full_row(&ch).await
         });
@@ -267,7 +270,7 @@ impl CatchupScreen {
         session: &Session,
         now: opensmarters_core::chrono::DateTime<opensmarters_core::chrono::Utc>,
     ) {
-        if self.days_gen == self.table.generation() && !self.days.is_empty() {
+        if self.days_gen == self.table.generation() {
             return;
         }
         let Some(row) = self.table.value() else {
@@ -587,8 +590,8 @@ impl Screen for CatchupScreen {
                 self.select_channel(cx, &key);
             }
         }
-        self.apply_handoff(cx);
         self.rebuild_days(&session, cx.now);
+        self.apply_handoff(cx);
         self.load_progress(cx);
         self.track_attempt(cx, &session);
         // Debounced focus selection.

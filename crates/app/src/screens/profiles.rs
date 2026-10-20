@@ -35,6 +35,17 @@ enum Gated {
     Edit(ProfileId),
 }
 
+fn add_request_id() -> Id {
+    Id::unique("profiles.request-add")
+}
+
+/// Asks the picker to start "Add profile" when it next draws, behind the same PIN gate as
+/// its "Add profile" tile (used for `--route onboarding` on a machine with profiles, so
+/// the harness can't skip the gate).
+pub fn request_add(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.insert_temp(add_request_id(), true));
+}
+
 /// The profile picker.
 #[derive(Debug)]
 pub struct ProfilesScreen {
@@ -126,6 +137,14 @@ impl Screen for ProfilesScreen {
 
     fn ui(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {
         self.profiles.poll();
+        if self.gate.is_none()
+            && ui
+                .ctx()
+                .data_mut(|d| d.remove_temp::<bool>(add_request_id()))
+                .unwrap_or(false)
+        {
+            self.ask_pin(Gated::Add);
+        }
         if self.deleting.poll() && self.deleting.value().is_some() {
             if let Some(id) = self.deleting.take()
                 && cx.session().is_some_and(|s| s.profile_id() == id)

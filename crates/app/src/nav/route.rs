@@ -211,6 +211,28 @@ impl Route {
         })
     }
 
+    /// What a back button on the page above this one says ("‹ Movies", "‹ Home"):
+    /// the section's name, or "Back" for pages without one.
+    pub fn back_label(&self) -> &'static str {
+        match self {
+            Route::Home => "Home",
+            Route::Live { .. } => "Live TV",
+            Route::Guide => "Guide",
+            Route::Movies { .. } => "Movies",
+            Route::Series { .. } => "Series",
+            Route::Catchup { .. } => "Catch-up",
+            Route::Search { .. } => "Search",
+            Route::Favourites => "Favourites",
+            Route::Settings { .. } => "Settings",
+            Route::Welcome
+            | Route::Profiles
+            | Route::Onboarding { .. }
+            | Route::MovieDetail { .. }
+            | Route::SeriesDetail { .. }
+            | Route::Player(_) => "Back",
+        }
+    }
+
     /// True if the route needs an open session (everything but profiles/onboarding).
     pub fn needs_session(&self) -> bool {
         !matches!(

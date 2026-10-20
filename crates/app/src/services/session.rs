@@ -65,6 +65,8 @@ pub mod guide;
 mod vod;
 pub use vod::SeriesWatch;
 mod pin;
+// Fast start from the cached login + catalogue, verified in the background.
+mod startup;
 
 /// TTL of category and stream lists.
 pub const LIST_TTL: Duration = Duration::from_secs(6 * 3600);

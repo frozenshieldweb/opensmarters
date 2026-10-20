@@ -24,6 +24,10 @@ default = []
 ## `--demo`: run the dev-only fake panel in-process and log in to it. Never enable in
 ## release builds.
 demo = ["dep:fake-panel"]
+## The dev/test harness flags (`--route`, `--keys`, `--screenshot-after/-out`,
+## `--exit-after`, `--ppp`, `--window-size`): scripted input and screenshots for reviews
+## and agents. Never enable in release builds (SR-03).
+harness = []
 
 [dependencies]
 opensmarters-core = { path = "../core" }

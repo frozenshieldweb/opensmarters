@@ -11,12 +11,15 @@ use opensmarters_store::ProfileId;
 
 use crate::cli::Cli;
 use crate::focus;
-use crate::harness::{self, Harness};
-use crate::nav::{NavCommand, Navigator, Route, Router};
+#[cfg(feature = "harness")]
+use crate::harness;
+use crate::harness::Harness;
+use crate::nav::{self, NavCommand, Navigator, Route, Router};
 use crate::playback::PlaybackController;
 use crate::screens::{self, AppCtx, Chrome, Screen, shell};
-use crate::services::{Prefs, Services};
+use crate::services::{OpenFailure, Prefs, Services, Session};
 use crate::sessions::{SessionEvent, SessionManager};
+use crate::task::Loader;
 use crate::ui::layout::Layout;
 use crate::ui::theme::color;
 use crate::ui::widgets::{ToastKind, Toasts};
@@ -68,8 +71,54 @@ pub struct OpensmartersApp {
     frame_count: u64,
     system_motion: crate::platform::SystemMotion,
     window: Option<crate::window_state::WindowTracker>,
+    /// The startup profile being opened from its cache (see [`Session::open_cached`]).
+    startup: Option<StartupOpen>,
+    /// The background account check after a cached start.
+    verify: Loader<Result<(), OpenFailure>>,
+    /// The page transition in progress (§7 fade-through).
+    transition: Option<Transition>,
     #[cfg(feature = "demo")]
     demo: Option<crate::services::demo::Demo>,
+}
+
+/// The startup profile while [`Session::open_cached`] runs.
+struct StartupOpen {
+    id: ProfileId,
+    name: String,
+    loader: Loader<Option<Arc<Session>>>,
+}
+
+/// A route change's fade-through (§7 `slow`): the new page fades in from the background
+/// while rising 8 pt. Reduced motion: a ≤ 100 ms fade, no movement.
+#[derive(Debug, Clone, Copy)]
+struct Transition {
+    start: f64,
+    secs: f32,
+    rise: f32,
+}
+
+impl Transition {
+    /// Rise of the incoming page (points).
+    const RISE: f32 = 8.0;
+
+    fn new(ctx: &egui::Context) -> Self {
+        let reduced = motion::reduced(ctx);
+        Self {
+            start: ctx.input(|i| i.time),
+            secs: if reduced { 0.1 } else { theme::motion::SLOW },
+            rise: if reduced { 0.0 } else { Self::RISE },
+        }
+    }
+
+    /// (opacity, downward offset) at `now`, or `None` when finished.
+    fn at(&self, now: f64) -> Option<(f32, f32)> {
+        let t = ((now - self.start) as f32 / self.secs.max(0.001)).clamp(0.0, 1.0);
+        if t >= 1.0 {
+            return None;
+        }
+        let e = egui::emath::easing::cubic_out(t);
+        Some((e, self.rise * (1.0 - e)))
+    }
 }
 
 impl std::fmt::Debug for OpensmartersApp {
@@ -138,22 +187,30 @@ impl OpensmartersApp {
             config.prefs.subtitle_language.clone(),
         );
 
-        let steps = config
-            .cli
-            .keys
-            .as_deref()
-            .map(harness::parse_script)
-            .transpose()
-            .unwrap_or_else(|e| {
-                tracing::error!("--keys: {e}");
-                None
-            })
-            .unwrap_or_default();
-        let final_shot = config
-            .cli
-            .screenshot_after
-            .zip(config.cli.screenshot_out.clone());
-        let harness = Harness::new(steps, final_shot, config.cli.exit_after);
+        // The dev/test harness (scripted keys, screenshots, `--route`) exists only in
+        // builds with the `harness` feature (SR-03): release builds don't even parse
+        // those flags.
+        #[cfg(feature = "harness")]
+        let harness = {
+            let steps = config
+                .cli
+                .keys
+                .as_deref()
+                .map(harness::parse_script)
+                .transpose()
+                .unwrap_or_else(|e| {
+                    tracing::error!("--keys: {e}");
+                    None
+                })
+                .unwrap_or_default();
+            let final_shot = config
+                .cli
+                .screenshot_after
+                .zip(config.cli.screenshot_out.clone());
+            Harness::new(steps, final_shot, config.cli.exit_after)
+        };
+        #[cfg(not(feature = "harness"))]
+        let harness = Harness::default();
         let pending_route = config
             .cli
             .route
@@ -183,26 +240,104 @@ impl OpensmartersApp {
             frame_count: 0,
             system_motion,
             window: config.window.map(crate::window_state::WindowTracker::new),
+            startup: None,
+            verify: Loader::new(),
+            transition: None,
             #[cfg(feature = "demo")]
             demo: config.demo,
         };
         // A `--route` that needs no session (profiles, onboarding) opens right away and
-        // skips the automatic sign-in.
+        // skips the automatic sign-in. Adding a profile is PIN-gated in the picker, so
+        // `--route onboarding|welcome` on a machine that already has profiles goes through
+        // the same gate instead of opening the form directly (SR-03).
+        let first_run = matches!(config.startup, Startup::Onboarding);
         let explicit_first = match &app.pending_route {
+            Some(Route::Onboarding { .. } | Route::Welcome) if !first_run => {
+                app.pending_route = None;
+                crate::screens::profiles::request_add(ctx);
+                Some(Route::Profiles)
+            }
             Some(r) if !r.needs_session() => app.pending_route.take(),
             _ => None,
         };
         let first = match (&config.startup, explicit_first) {
             (_, Some(route)) => route,
             (Startup::Open(id, name), None) => {
-                app.sessions.open(&app.services, *id, name.clone());
-                Route::Profiles
+                // Open from the cache when possible (no "Signing in…" screen); Home shows
+                // its skeleton meanwhile.
+                app.start_profile(*id, name.clone());
+                Route::Home
             }
             (Startup::Onboarding, None) => Route::Welcome,
             (Startup::Profiles, None) => Route::Profiles,
         };
         app.nav.reset(first);
         app
+    }
+
+    /// Opens the startup profile: from its cached login and catalogue if there are any
+    /// (verified in the background), else with a normal sign-in.
+    fn start_profile(&mut self, id: ProfileId, name: String) {
+        let services = self.services.clone();
+        let mut loader = Loader::new();
+        loader.start(
+            self.services.rt(),
+            self.services.egui(),
+            move |_| async move { Ok(Session::open_cached(services, id).await) },
+        );
+        self.startup = Some(StartupOpen { id, name, loader });
+    }
+
+    /// True while the app is still opening its startup profile (Home may show its
+    /// skeleton without a session meanwhile).
+    fn starting(&self) -> bool {
+        self.startup.is_some() || self.sessions.opening().is_some()
+    }
+
+    fn poll_startup(&mut self, ctx: &egui::Context) {
+        if let Some(st) = &mut self.startup
+            && st.loader.poll()
+        {
+            let st = self.startup.take();
+            match st.and_then(|mut s| s.loader.take().map(|r| (s.id, s.name, r))) {
+                Some((_, _, Some(session))) => {
+                    self.sessions.set_current(Arc::clone(&session));
+                    let route = self.pending_route.take();
+                    self.nav.reset(Route::Home);
+                    if let Some(r) = route.filter(|r| !matches!(r, Route::Home)) {
+                        self.nav.push(r);
+                    }
+                    self.verify
+                        .start(self.services.rt(), ctx, move |_| async move {
+                            Ok(session.verify().await)
+                        });
+                }
+                Some((id, name, None)) => self.sessions.open(&self.services, id, name),
+                None => {}
+            }
+        }
+        if self.verify.poll()
+            && let Some(result) = self.verify.take()
+        {
+            match result {
+                Ok(()) => shell::set_account_notice(ctx, None),
+                Err(f) if f.error.is_network() => {
+                    self.toasts
+                        .warning("Your provider can't be reached. Showing saved data.");
+                }
+                Err(f) => {
+                    tracing::info!(error = %f.error, "background account check failed");
+                    let mut msg = f.error.user_message();
+                    if let Some(exp) = f.account.as_ref().and_then(|a| a.exp_date) {
+                        msg.push_str(&format!(" Expiry date: {}.", exp.format("%-d %B %Y")));
+                    }
+                    self.toasts.warning(format!(
+                        "Your provider didn't accept the account. Showing saved data. {msg}"
+                    ));
+                    shell::set_account_notice(ctx, Some(msg));
+                }
+            }
+        }
     }
 
     fn apply_zoom(&self, ctx: &egui::Context) {
@@ -272,9 +407,12 @@ impl OpensmartersApp {
     }
 
     fn apply_nav(&mut self, ctx: &egui::Context, layout: Layout) {
+        let starting = self.starting();
         for cmd in self.nav.drain() {
-            // Session-only routes without a session go to the profile picker.
+            // Session-only routes without a session go to the profile picker (Home may
+            // wait for the startup profile with its skeleton).
             let cmd = match cmd {
+                NavCommand::Reset(Route::Home) if starting => NavCommand::Reset(Route::Home),
                 NavCommand::Push(r)
                 | NavCommand::Replace(r)
                 | NavCommand::Section(r)
@@ -287,11 +425,20 @@ impl OpensmartersApp {
                 other => other,
             };
             let prev_focus = focus::current(ctx);
+            let prev_route = self.router.top().map(|e| e.route.clone());
             let change = self.router.apply(cmd, &mut |r| screens::create(r));
             if !change.top_changed {
                 continue;
             }
             let next = self.router.top().map(|e| e.route.clone());
+            nav::set_back_label(ctx, self.router.below_top().map(Route::back_label));
+            // Fade-through into the new page (not into the player: video appears at once;
+            // not between two instances of the same page, e.g. Home reset after sign-in).
+            let same = matches!((&prev_route, &next), (Some(a), Some(b)) if a.same_page(b));
+            let to_player = matches!(next, Some(Route::Player(_)));
+            if prev_route.is_some() && !same && !to_player {
+                self.transition = Some(Transition::new(ctx));
+            }
             if change.covered_previous {
                 let idx = self.router.len().saturating_sub(2);
                 let Self { router, .. } = self;
@@ -358,6 +505,7 @@ impl eframe::App for OpensmartersApp {
         self.apply_zoom(&ctx);
         let system_animations = self.system_motion.poll();
         motion::set_reduced(&ctx, self.prefs.effective_reduced_motion(system_animations));
+        self.poll_startup(&ctx);
         self.poll_sessions(&ctx);
         self.playback.update();
         for what in self.services.take_background_errors() {
@@ -434,6 +582,13 @@ impl eframe::App for OpensmartersApp {
             .router
             .top()
             .and_then(|e| e.screen.section().or_else(|| e.route.section()));
+        let now = ctx.input(|i| i.time);
+        let fade = self.transition.and_then(|t| t.at(now));
+        if fade.is_none() {
+            self.transition = None;
+        } else {
+            ctx.request_repaint();
+        }
         if let Some(entry) = self.router.top_mut() {
             let screen_obj = &mut entry.screen;
             let mut content_ui = ui.new_child(
@@ -443,8 +598,21 @@ impl eframe::App for OpensmartersApp {
             );
             content_ui.set_clip_rect(layout.content);
             let mut cx = cx!(self, layout, None);
-            focus::group(&mut content_ui, focus::content_group(), |ui| {
-                screen_obj.ui(&mut cx, ui);
+            // Fade-through: the page fades in over the background and rises into place
+            // (visual only; input and focus geometry are unaffected). The page always
+            // runs inside the same scope so its widget ids don't change when the
+            // transition ends.
+            let (opacity, rise) = fade.unwrap_or((1.0, 0.0));
+            content_ui.multiply_opacity(opacity);
+            let shift = if rise > 0.01 {
+                egui::emath::TSTransform::from_translation(egui::vec2(0.0, rise))
+            } else {
+                egui::emath::TSTransform::IDENTITY
+            };
+            content_ui.with_visual_transform(shift, |ui| {
+                focus::group(ui, focus::content_group(), |ui| {
+                    screen_obj.ui(&mut cx, ui);
+                });
             });
         }
         if chrome == Chrome::Shell {

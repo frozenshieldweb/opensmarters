@@ -1000,7 +1000,7 @@ impl SearchScreen {
         .action("Clear search", false)
         .illustration_size(if cx.layout.tv { 140.0 } else { 160.0 });
         if partial && loading.is_none() {
-            state = state.second_action(second, Some(icons::ARROW_DOWN));
+            state = state.second_action(second, Some(icons::LIST_MAGNIFYING_GLASS));
         }
         let r = state.show_both(&mut child);
         if loading.is_some() {
@@ -1428,7 +1428,7 @@ fn load_hint(ui: &mut Ui, kind: Kind, found: bool, loading: Option<LoadAll>, mar
     );
     let b = Button::secondary(format!("Search all {what}"))
         .small()
-        .icon(icons::ARROW_DOWN)
+        .icon(icons::LIST_MAGNIFYING_GLASS)
         .id(Id::unique(("search.load-all", what)));
     let sz = b.size(ui);
     let br = Rect::from_min_size(pos2(tr.right() + 16.0, cy - sz.y / 2.0), sz);

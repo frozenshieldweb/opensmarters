@@ -1,5 +1,10 @@
 # Phase 7: recording, multiscreen, sleep timer, reminders, stable streams
 
+> **Status (2026-10-20):** all four streams are built and merged into `phase-7`, together
+> with `main`'s fix batches (A/B/C1/C2). What each stream did and its follow-ups are in
+> `docs/PROGRESS.md` and `docs/APP_ARCHITECTURE.md` (§7 Playback, §7.1–7.4, §14). The
+> ownership rules below were for the parallel build and no longer apply.
+
 These are features the user chose on 2026-10-20 after the feature review. This file is
 the plan and the contract between the four parallel work streams. Read
 [ENGINEERING.md](ENGINEERING.md), [APP_ARCHITECTURE.md](APP_ARCHITECTURE.md) and
@@ -33,11 +38,12 @@ Already built and tested. Build on it; don't rewrite it.
 
 ### Facts learned while building the foundation
 
-- **This libmpv build fetches `http(s)` with libcurl** (log prefix `curl`), not ffmpeg's
-  `http` protocol. ffmpeg `stream-lavf-o` options (`reconnect=1`, …) therefore do **not**
-  apply to top-level streams. They do still apply inside the lavf demuxer (HLS segments,
-  `demuxer-lavf-o`). Check which mpv options control the curl stream before relying on any
-  of them, and record what you set in `docs/LIBMPV.md`.
+- **This libmpv build fetches all `http(s)` with libcurl** (log prefix `curl`), HLS
+  playlists and segments included; ffmpeg's HTTP options (`stream-lavf-o` /
+  `demuxer-lavf-o` `reconnect=1`, …) have **no effect** (corrected by stream A, see
+  `docs/LIBMPV.md` → Network). libcurl has a connect timeout only, **no read timeout**: a
+  server that stops sending never produces an error, so the app's progress tracker
+  (`playback/tracker.rs`) is the stall detector for every kind of stream.
 - A live TS over HTTP is "not seekable" for mpv. Seeking back in the buffer (pause and
   rewind live) and `dump-cache` both need `demuxer-seekable-cache=yes` +
   `force-seekable=yes` (`PlayerConfig::seekable_cache(true)`).

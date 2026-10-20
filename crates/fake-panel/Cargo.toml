@@ -1,0 +1,13 @@
+[package]
+name = "fake-panel"
+description = "Dev-only fake Xtream Codes / M3U / XMLTV panel with synthetic data"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

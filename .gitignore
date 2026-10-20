@@ -1,0 +1,19 @@
+# Unpacked vendor code (copyrighted; local reference only)
+_reference/
+
+# Build output
+/target/
+**/*.rs.bk
+
+# Native deps and generated media (fetched/generated locally, never committed)
+/vendor/libmpv/
+/testdata/generated/
+*.ts
+*.m3u8
+!crates/**/tests/fixtures/**/*.m3u8
+*.mp4
+*.mkv
+
+# Local app data / logs
+*.log
+.env

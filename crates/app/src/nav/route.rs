@@ -38,29 +38,35 @@ pub enum SettingsPage {
     /// Account status, expiry, connections.
     #[default]
     Account,
-    /// Live container, timeshift format, User-Agent.
+    /// Live container, timeshift format, User-Agent; languages, decoding, buffer.
     Playback,
     /// Accounts / profiles management.
     Profiles,
     /// Parental control (PIN, keywords, locks).
     Parental,
-    /// TV mode, reduced motion, time format.
+    /// TV mode, UI size, reduced motion.
     Appearance,
-    /// Cache size, clear cache, image cache.
+    /// Clock format, display language.
+    Language,
+    /// Cache, history, backup (export/import), data folder, logs.
     Storage,
-    /// Versions, licences, privacy.
+    /// Privacy facts, optional TMDB.
+    Privacy,
+    /// Versions, licences.
     About,
 }
 
 impl SettingsPage {
     /// All pages in menu order.
-    pub const ALL: [SettingsPage; 7] = [
+    pub const ALL: [SettingsPage; 9] = [
         SettingsPage::Account,
-        SettingsPage::Playback,
         SettingsPage::Profiles,
+        SettingsPage::Playback,
         SettingsPage::Parental,
         SettingsPage::Appearance,
+        SettingsPage::Language,
         SettingsPage::Storage,
+        SettingsPage::Privacy,
         SettingsPage::About,
     ];
 
@@ -72,7 +78,9 @@ impl SettingsPage {
             SettingsPage::Profiles => "Profiles",
             SettingsPage::Parental => "Parental control",
             SettingsPage::Appearance => "Appearance",
-            SettingsPage::Storage => "Storage & cache",
+            SettingsPage::Language => "Language & region",
+            SettingsPage::Storage => "Storage & data",
+            SettingsPage::Privacy => "Privacy & security",
             SettingsPage::About => "About",
         }
     }
@@ -85,7 +93,9 @@ impl SettingsPage {
             SettingsPage::Profiles => "profiles",
             SettingsPage::Parental => "parental",
             SettingsPage::Appearance => "appearance",
+            SettingsPage::Language => "language",
             SettingsPage::Storage => "storage",
+            SettingsPage::Privacy => "privacy",
             SettingsPage::About => "about",
         }
     }
@@ -111,6 +121,8 @@ pub enum PlayerRoute {
 /// A screen and its parameters.
 #[derive(Debug, Clone)]
 pub enum Route {
+    /// First-run welcome (no profiles yet).
+    Welcome,
     /// Profile picker ("Who's watching?").
     Profiles,
     /// Add (or edit) an account.
@@ -184,7 +196,9 @@ impl Route {
     /// The side-rail section this route belongs to.
     pub fn section(&self) -> Option<Section> {
         Some(match self {
-            Route::Profiles | Route::Onboarding { .. } | Route::Player(_) => return None,
+            Route::Welcome | Route::Profiles | Route::Onboarding { .. } | Route::Player(_) => {
+                return None;
+            }
             Route::Home => Section::Home,
             Route::Live { .. } => Section::Live,
             Route::Guide => Section::Guide,
@@ -199,7 +213,10 @@ impl Route {
 
     /// True if the route needs an open session (everything but profiles/onboarding).
     pub fn needs_session(&self) -> bool {
-        !matches!(self, Route::Profiles | Route::Onboarding { .. })
+        !matches!(
+            self,
+            Route::Welcome | Route::Profiles | Route::Onboarding { .. }
+        )
     }
 
     /// True if two routes show the same page (pushing it again is a no-op). Player routes
@@ -248,6 +265,7 @@ impl Route {
                 .transpose()
         };
         let route = match name.to_ascii_lowercase().as_str() {
+            "welcome" => Route::Welcome,
             "profiles" => Route::Profiles,
             "onboarding" | "login" | "add-account" => Route::Onboarding { edit: None },
             "home" => Route::Home,
@@ -300,6 +318,7 @@ impl Route {
 impl fmt::Display for Route {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Route::Welcome => f.write_str("welcome"),
             Route::Profiles => f.write_str("profiles"),
             Route::Onboarding { edit: None } => f.write_str("onboarding"),
             Route::Onboarding { edit: Some(id) } => write!(f, "onboarding:edit={id:?}"),
@@ -357,10 +376,14 @@ mod tests {
     #[test]
     fn display_round_trips() {
         for s in [
+            "welcome",
             "home",
             "live",
             "live:category=7",
             "settings:appearance",
+            "settings:language",
+            "settings:privacy",
+            "settings:storage",
             "detail:series=3",
             "player:live=1001",
             "catchup:stream=5",

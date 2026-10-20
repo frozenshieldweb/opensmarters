@@ -19,7 +19,7 @@ use crate::services::{Prefs, Services};
 use crate::sessions::{SessionEvent, SessionManager};
 use crate::ui::layout::Layout;
 use crate::ui::theme::color;
-use crate::ui::widgets::Toasts;
+use crate::ui::widgets::{ToastKind, Toasts};
 use crate::ui::{motion, theme};
 
 /// What to show first.
@@ -42,6 +42,9 @@ pub struct AppConfig {
     pub startup: Startup,
     /// Initial preferences.
     pub prefs: Prefs,
+    /// The restored window geometry; `Some` enables window-state saving (not for
+    /// `--ephemeral` or `--window-size` runs).
+    pub window: Option<Option<crate::window_state::WindowState>>,
     /// Keeps the demo panel alive.
     #[cfg(feature = "demo")]
     pub demo: Option<crate::services::demo::Demo>,
@@ -63,6 +66,8 @@ pub struct OpensmartersApp {
     ppp_override: Option<f32>,
     window_size: Option<(u32, u32)>,
     frame_count: u64,
+    system_motion: crate::platform::SystemMotion,
+    window: Option<crate::window_state::WindowTracker>,
     #[cfg(feature = "demo")]
     demo: Option<crate::services::demo::Demo>,
 }
@@ -108,16 +113,29 @@ impl OpensmartersApp {
         theme::install(ctx);
         egui_extras::install_image_loaders(ctx);
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        crate::ui::motion::set_reduced(ctx, config.prefs.reduced_motion);
+        let mut system_motion = crate::platform::SystemMotion::default();
+        crate::ui::motion::set_reduced(
+            ctx,
+            config.prefs.effective_reduced_motion(system_motion.poll()),
+        );
 
         let mpv_log = LogLevel::from_mpv_str(&config.cli.mpv_log).unwrap_or(LogLevel::Info);
-        let playback = PlaybackController::new(
+        let tuning = crate::playback::PlayerTuning {
+            hw_decoding: config.prefs.hw_decoding,
+            buffer: crate::playback::BufferPreset::at(config.prefs.network_buffer),
+        };
+        let mut playback = PlaybackController::new(
             cc.get_proc_address.clone(),
             ctx,
             services.redactor.clone(),
             config.prefs.video_fit,
             config.prefs.volume,
             mpv_log,
+            tuning,
+        );
+        playback.set_track_prefs(
+            config.prefs.audio_language.clone(),
+            config.prefs.subtitle_language.clone(),
         );
 
         let steps = config
@@ -163,6 +181,8 @@ impl OpensmartersApp {
             ppp_override: config.cli.ppp,
             window_size: config.cli.window_size,
             frame_count: 0,
+            system_motion,
+            window: config.window.map(crate::window_state::WindowTracker::new),
             #[cfg(feature = "demo")]
             demo: config.demo,
         };
@@ -178,7 +198,7 @@ impl OpensmartersApp {
                 app.sessions.open(&app.services, *id, name.clone());
                 Route::Profiles
             }
-            (Startup::Onboarding, None) => Route::Onboarding { edit: None },
+            (Startup::Onboarding, None) => Route::Welcome,
             (Startup::Profiles, None) => Route::Profiles,
         };
         app.nav.reset(first);
@@ -191,11 +211,14 @@ impl OpensmartersApp {
             .unwrap_or(1.0)
             .max(0.25);
         let tv = self.prefs.tv_mode || self.tv_override;
+        let width_px = ctx.content_rect().width() * ctx.pixels_per_point();
         let target_ppp = if tv {
-            let width_px = ctx.content_rect().width() * ctx.pixels_per_point();
             (width_px / 1100.0).max(1.0)
         } else {
-            self.ppp_override.unwrap_or(native)
+            // UI size (Settings → Appearance), never so large that the page drops below the
+            // 960 pt "medium" layout.
+            let base = self.ppp_override.unwrap_or(native);
+            (base * self.prefs.ui_scale).min((width_px / 960.0).max(base))
         };
         let zoom = target_ppp / native;
         if (ctx.zoom_factor() - zoom).abs() > 0.005 {
@@ -305,7 +328,15 @@ impl OpensmartersApp {
             return;
         }
         self.prefs_dirty = false;
-        motion::set_reduced(ctx, self.prefs.reduced_motion);
+        motion::set_reduced(
+            ctx,
+            self.prefs
+                .effective_reduced_motion(self.system_motion.last()),
+        );
+        self.playback.set_track_prefs(
+            self.prefs.audio_language.clone(),
+            self.prefs.subtitle_language.clone(),
+        );
         let prefs = self.prefs.clone();
         self.services
             .blocking("save preferences", move |s| prefs.save(s));
@@ -325,9 +356,27 @@ impl eframe::App for OpensmartersApp {
         self.frame_count += 1;
         focus::set_pointer_enabled(&ctx, !self.harness.is_active() && self.frame_count > 20);
         self.apply_zoom(&ctx);
-        motion::set_reduced(&ctx, self.prefs.reduced_motion);
+        let system_animations = self.system_motion.poll();
+        motion::set_reduced(&ctx, self.prefs.effective_reduced_motion(system_animations));
         self.poll_sessions(&ctx);
         self.playback.update();
+        for what in self.services.take_background_errors() {
+            self.toasts.push(
+                ToastKind::Error,
+                crate::services::background_error_message(what),
+                Some(what),
+            );
+        }
+        if let Some(tracker) = &mut self.window {
+            let ppp = ctx.pixels_per_point();
+            ctx.input(|i| tracker.observe(i.viewport(), ppp));
+            if let Some(state) = tracker.due() {
+                self.services
+                    .blocking("remember the window size and position", move |s| {
+                        s.settings().set(&crate::window_state::WINDOW, &Some(state))
+                    });
+            }
+        }
         if self.frame_count <= 2 {
             // Apply the startup route before drawing anything.
             let layout = Layout::new(ctx.content_rect(), self.prefs.tv_mode || self.tv_override);
@@ -415,6 +464,16 @@ impl eframe::App for OpensmartersApp {
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
         if let Some(gl) = gl {
             self.playback.destroy(gl);
+        }
+        // One small settings write at exit (the background pool may already be gone).
+        if let Some(state) = self.window.as_mut().and_then(|t| t.take_unsaved())
+            && let Err(e) = self
+                .services
+                .store
+                .settings()
+                .set(&crate::window_state::WINDOW, &Some(state))
+        {
+            tracing::warn!(error = %e, "couldn't save the window position");
         }
         #[cfg(feature = "demo")]
         if let Some(demo) = self.demo.take()

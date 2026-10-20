@@ -70,6 +70,15 @@ fn main() -> anyhow::Result<()> {
         secrets,
     )?);
     let prefs = Prefs::load(&store).unwrap_or_default();
+    // Window size/position from the last run (never for ephemeral or harness runs).
+    let window = (!cli.ephemeral && cli.window_size.is_none()).then(|| {
+        store
+            .settings()
+            .get(&opensmarters_app::window_state::WINDOW)
+            .ok()
+            .flatten()
+            .and_then(|w| w.sanitized())
+    });
 
     #[cfg(feature = "demo")]
     let demo = if cli.demo {
@@ -103,7 +112,7 @@ fn main() -> anyhow::Result<()> {
     let icon =
         eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon/icon-256.png"))
             .context("window icon")?;
-    let viewport = egui::ViewportBuilder::default()
+    let mut viewport = egui::ViewportBuilder::default()
         .with_title("opensmarters")
         .with_app_id("opensmarters")
         .with_icon(icon)
@@ -113,6 +122,9 @@ fn main() -> anyhow::Result<()> {
         } else {
             [1024.0, 640.0]
         });
+    if let Some(Some(state)) = &window {
+        viewport = state.apply(viewport);
+    }
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
         viewport,
@@ -125,6 +137,7 @@ fn main() -> anyhow::Result<()> {
         cli,
         startup,
         prefs,
+        window,
         #[cfg(feature = "demo")]
         demo,
     };

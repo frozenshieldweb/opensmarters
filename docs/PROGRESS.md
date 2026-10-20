@@ -9,7 +9,7 @@ This tracks the phases in [BUILD_PROMPT.md](BUILD_PROMPT.md#7-how-to-work).
 | 2: store, keychain, fake-panel | **done** | Encrypted cache and leak test; fake-panel with quirk modes and generated media |
 | Art direction | **done** | "Afterglow": `docs/DESIGN.md`, `assets/` (generated with Codex) |
 | 3: UI shell, navigation, profiles, Live TV | **3a done** (app foundation) | `crates/app`: architecture (`docs/APP_ARCHITECTURE.md`), Afterglow UI kit, spatial focus engine, router, session/cache/EPG/images, shared player with reconnect/progress; screens: shell, onboarding, profiles, Home, Live TV (preview, PIN locks, number entry), fullscreen player, Settings (account, playback, appearance, about); stubs for Movies/Series/Detail/Catch-up/Guide/Search/Favourites/Parental/Storage; dev harness (`--demo --ephemeral --route --keys --screenshot-*`). 50 tests. |
-| 4: VOD, series, resume, catch-up, favourites, parental, settings | not started | |
+| 4: VOD, series, resume, catch-up, favourites, parental, settings | **4C done** (parental, settings, storage, polish) | Parental control (PIN set/change/off with confirm, page behind the PIN, lockout countdown, locked words, per-category Auto/Lock/Allow, forgot PIN via an account secret); PIN also guards profile changes and backup import; Settings pages Profiles, Language & region, Storage & data (cache/pictures/history clearing, cache limit, export/import without secrets, data folder, copy log), Privacy & security (incl. optional TMDB key), richer Playback (audio/subtitle language, hwdec, buffer), Appearance (UI size, motion follows Windows), About (GPL notice, licences); first-run welcome; window state persistence; background-error toasts; focus fixes (Home initial focus, no Up/Down jumps into the rail). 4A/4B (VOD/series, catch-up/guide/search/favourites) in parallel branches. |
 | 5: hardening, packaging, SECURITY.md | not started | `cargo deny check` passes (documented exceptions) |
 | 6: real-provider test | not started | |
 
@@ -26,10 +26,21 @@ This tracks the phases in [BUILD_PROMPT.md](BUILD_PROMPT.md#7-how-to-work).
 - **Connection limit:** quick probing left the panel counting stale connections. Every stream then returns `403` (JSON) until they time out, which takes about 1–3 min each. The app must stop the old stream before zapping, retry with backoff, and explain the connection limit to the user.
 - **Live subtitles:** mpv auto-selected embedded closed captions on a live channel, so live subtitles should default to off.
 
+## Polish backlog (from the real-provider app test, 2026-10-20)
+
+- **Live: Enter on an idle preview card does nothing.** Before anything has played, it should play the channel that is highlighted or was last focused.
+- **Live: zapping gives no feedback.** After CH+/CH− (PageUp/PageDown) in fullscreen, show a channel banner (number, logo, name, now/next) for about 3 s. Show a buffering indicator over the last frame while the new stream starts.
+- **Live: stalls aren't caught.** If `time-pos` stops advancing for more than about 8 s while the player isn't paused, show "Stream stalled — reconnecting…" and reconnect with backoff. We saw a frozen frame for at least 12 s after a zap.
+- **Live: CH− wraps around.** From channel 001, CH− (PageDown) jumps to the last of 9,833 channels. Consider stopping at the ends of the list, or making the wrap visible in the banner.
+- **Live: channel logos are tiny.** Wide provider logos shrink into the square tile. Contain-fit them larger with less padding, and use a neutral plate behind transparent logos.
+- **Player: no OSD on fullscreen entry.** Briefly show the OSD when entering fullscreen.
+- **Home/VOD: the year comes from `added`.** Every card shows 2026. This was sent to the Phase 4A agent.
+
 ## Known issues / follow-ups
 
 - XMLTV in a non-UTF-8 encoding stops at the first invalid byte. The fix would be quick-xml's `encoding` feature.
 - The timeshift format still needs checking against real panels. Both formats are implemented and selectable per profile.
 - Phosphor icons: `egui-phosphor` 0.14 targets egui 0.36, so the app loads the official Phosphor TTFs from `assets/fonts/` (MIT) with generated glyph constants (`crates/app/src/ui/icons/glyphs.rs`).
-- App (3a) follow-ups: Home backdrop crossfade on focus; reduced motion doesn't follow the Windows animation setting yet; M3U EPG uses the first `url-tvg` only; compact breakpoint (< 960 pt) keeps the collapsed rail instead of a top bar.
+- App (3a) follow-ups: Home backdrop crossfade on focus; M3U EPG uses the first `url-tvg` only; compact breakpoint (< 960 pt) keeps the collapsed rail instead of a top bar.
+- 4C follow-ups: Movies/Series PIN prompts must use `session.pin_length()` (or `PinPrompt`); Search should record queries via `services::search_history`; TMDB is only a setting + key so far (no detail-page enrichment); hardware decoding and the buffer apply at the next launch (the player crate has no runtime setter); third-party licence *texts* for release packages are still to be generated (Phase 5).
 - Real-provider findings already handled in the app: one stream at a time (stop before load, debounced zapping), live reconnect 2/5/10/30/30 s, connection-limit message from `account_info()` after a stream failure, subtitles off by default, live OSD without scrubber, catalogue titles (never mpv's media title), catch-up failure message, Home never fetches the VOD/series "All" lists, decorative symbols mapped (★ ➤) and CJK/Arabic/superscripts via the OS font fallback.

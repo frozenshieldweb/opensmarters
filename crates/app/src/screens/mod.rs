@@ -31,6 +31,7 @@ pub mod search;
 pub mod series;
 pub mod settings;
 pub mod shell;
+pub mod welcome;
 
 use std::sync::Arc;
 
@@ -150,6 +151,7 @@ pub trait Screen {
 /// Builds the screen for a route.
 pub fn create(route: &Route) -> Box<dyn Screen> {
     match route {
+        Route::Welcome => Box::new(welcome::WelcomeScreen::new()),
         Route::Profiles => Box::new(profiles::ProfilesScreen::new()),
         Route::Onboarding { edit } => Box::new(onboarding::OnboardingScreen::new(*edit)),
         Route::Home => Box::new(home::HomeScreen::new()),

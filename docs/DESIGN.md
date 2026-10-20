@@ -317,7 +317,7 @@ Centred column, max width 480: illustration 200×200 pt (`assets/illustrations/�
 | `parental-lock.png` | This category is locked | Enter your PIN to unlock it for this session. | Enter PIN |
 
 ### 6.14 PIN pad (parental control)
-Centred panel 360 wide: lock illustration 96 pt (optional), title `title`, 4 dots (14 pt circles, 16 gap; empty = 1.5 pt `text-3` outline, filled = `cream`), keypad 3×4 of 72 pt circular keys (`surface-2`, digits `heading` 600 tabular), bottom row `clear | 0 | ⌫`. Digits from keyboard/remote work directly. Wrong PIN: dots turn `danger` and shake 3× (8 pt, 300 ms; reduced motion: no shake) + `caption` "Wrong PIN. 2 attempts left". Rate-limited: keypad disabled with "Try again in 0:30" (tabular countdown).
+Centred panel 360 wide: lock illustration 96 pt (optional), title `title`, 4 dots (14 pt circles, 16 gap; empty = 1.5 pt `text-3` outline, filled = `cream`), keypad 3×4 of 72 pt circular keys (`surface-2`, digits `heading` 600 tabular), bottom row `clear | 0 | ⌫`. Digits from keyboard/remote work directly. Wrong PIN: dots turn `danger` and shake 3× (8 pt, 300 ms; reduced motion: no shake) + `caption` "Wrong PIN. 2 attempts left". Rate-limited: keypad disabled with "Try again in 0:30" (tabular countdown). PINs are 4–8 digits: a pad that checks a PIN shows as many dots as the PIN has; choosing a PIN shows one more dot than typed (at least 4) and a primary "Continue" button that receives the focus once 4 digits were typed on the keyboard, then asks for the same PIN again.
 
 ### 6.15 Profile picker
 On `home-ambient` background: "Who's watching?" in `display`, centred, 64 pt from the top third. Avatars 136 pt circles in a centred row (40 gap, wraps), name `title-sm` `text-2` below (12 gap). Focus: scale 1.08, ring (circle), name → `text`. Last tile "Add profile": dashed 2 pt `stroke` circle with `PLUS` icon. "Manage profiles" ghost button below. Lock badge (16 pt `LOCK_SIMPLE`) on PIN-protected profiles.
@@ -345,7 +345,7 @@ r-sm, padding 12/16, fill `warning-bg`/`danger-bg`/`#9FB4D6 @12%`, leading icon 
 - Set `style.animation_time = 0.09` (egui's built-in widget transitions) and `style.scroll_animation = egui::style::ScrollAnimation { points_per_second: 1400.0, duration: egui::Rangef::new(0.12, 0.24) }`.
 - Remote/key repeat must never wait for an animation: move focus immediately and let visuals catch up.
 - No springs, bounces, parallax, autoplaying video previews or animated backgrounds.
-- **Reduced motion** (Settings → Appearance; default follows Windows "Show animations in Windows"): all durations 0 except fades ≤ 100 ms; no scale on focus (ring + glow only); no shimmer; no shake.
+- **Reduced motion** (Settings → Appearance → Motion: *Follow Windows* (default; Windows' *Animation effects* switch, re-read every 3 s), *Reduced*, *Full*): all durations 0 except fades ≤ 100 ms; no scale on focus (ring + glow only); no shimmer; no shake.
 
 ---
 
@@ -382,7 +382,7 @@ Launch state (focus on Resume). Scrolled state with a focused poster: [`concepts
 - Video full-bleed on `video` black, OSD per §6.10. Idle (no stream): `player-idle.jpg` + centred mono symbol + status.
 
 ### 8.6 Settings
-- Two panes on `bg`: section list 280 pt (`surface-1`, rows 48 pt: General, Playback, Accounts, Parental control, Appearance (TV mode, Reduce motion, Time format), Storage & cache, About) and the detail pane (max width 760). Rows 64 pt: label `body-strong` + description `caption` `text-3` on the left, control on the right (toggle, value + `CARET_RIGHT`, segmented control). **Toggle:** 52×30 pill; off `surface-4` with a `text-2` knob, on `accent` with a `text-on-accent` knob; 160 ms knob slide.
+- Two panes on `bg`: section list 280 pt (`surface-1`, rows 48 pt: Account, Profiles, Playback, Parental control, Appearance (TV mode, Size, Motion), Language & region (Time format), Storage & data, Privacy & security, About) and the detail pane (max width 760). Rows 64 pt: label `body-strong` + description `caption` `text-3` on the left, control on the right (toggle, value + `CARET_RIGHT`, segmented control). **Toggle:** 52×30 pill; off `surface-4` with a `text-2` knob, on `accent` with a `text-on-accent` knob; 160 ms knob slide.
 - About: lockup, version, licence (GPL-3.0-or-later), font licences (OFL), "No telemetry" statement.
 
 ---

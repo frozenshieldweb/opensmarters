@@ -17,8 +17,12 @@
 //! | [`dialog`] | [`Dialog`] (modal with focus trap) |
 //! | [`toast`] | [`Toasts`] |
 //! | [`feedback`] | skeletons, spinner, progress bar, [`EmptyState`], coming-soon placeholder |
-//! | [`pin_pad`] | [`PinPad`] |
+//! | [`pin_pad`] | [`PinPad`] (fixed length to check a PIN, variable to choose one) |
+//! | [`pin_prompt`] | [`PinPrompt`] (load status → pad → off-thread verify; dialog or inline) |
 //! | [`clock`] | [`clock`](clock::clock) |
+//! | [`dropdown`] | [`Dropdown`] (sort menu with focus trap) |
+//! | [`episode_row`] | [`EpisodeRow`] (still, progress, title, synopsis, watched toggle) |
+//! | [`up_next`] | [`UpNextPrompt`] (next-episode countdown) |
 
 pub mod button;
 pub mod callout;
@@ -26,14 +30,18 @@ pub mod card;
 pub mod chip;
 pub mod clock;
 pub mod dialog;
+pub mod dropdown;
+pub mod episode_row;
 pub mod feedback;
 pub mod field;
 pub mod grid;
 pub mod list;
 pub mod logo;
 pub mod pin_pad;
+pub mod pin_prompt;
 pub mod rail;
 pub mod toast;
+pub mod up_next;
 
 pub use button::{Button, ButtonKind, IconButton};
 pub use callout::{Badge, Callout, CalloutKind};
@@ -46,5 +54,10 @@ pub use grid::VirtualGrid;
 pub use list::{MenuRow, SettingRow, VirtualList};
 pub use logo::{Avatar, ChannelLogo};
 pub use pin_pad::{PinPad, PinPadEvent};
+pub use pin_prompt::{PinPrompt, PinPromptResult};
 pub use rail::Rail;
 pub use toast::{ToastKind, Toasts};
+
+pub use dropdown::Dropdown;
+pub use episode_row::{EpisodeRow, EpisodeRowResponse};
+pub use up_next::{UpNextAction, UpNextPrompt};

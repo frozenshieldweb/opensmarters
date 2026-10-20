@@ -7,13 +7,46 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["egui"]
+## egui/egui_glow video widget (`VideoView`). Without it the crate is a plain libmpv wrapper.
+egui = ["dep:egui", "dep:egui_glow", "dep:glow"]
+
 [dependencies]
+crossbeam-channel = "0.5.15"
+libloading = "0.9"
+thiserror = "2"
+tracing = "0.1.41"
+url = "2.5.4"
+
+egui = { version = "0.37", default-features = false, optional = true }
+egui_glow = { version = "0.37", default-features = false, optional = true }
+# Must match the glow version egui_glow 0.37 uses.
+glow = { version = "0.17", optional = true }
+
+[dev-dependencies]
+anyhow = "1"
+eframe = { version = "0.37", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "accesskit",
+    "x11",
+    "wayland",
+] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[[example]]
+name = "spike"
+required-features = ["egui"]
 
 [lints.rust]
 unsafe_code = "allow"
 missing_debug_implementations = "warn"
+unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]
 unwrap_used = "warn"
 expect_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
 undocumented_unsafe_blocks = "deny"

@@ -270,8 +270,16 @@ async fn timeshift_common(st: &PanelState, a: TimeshiftArgs<'_>, req: Request) -
         duration_minutes: minutes,
         extension: ext.to_owned(),
     };
+    let refused = st.quirks.timeshift_503
+        || (st.quirks.timeshift_smarters_only && format == StartFormat::DashMinutes);
     let mut res = if !ch.tv_archive {
         not_found("archive for this channel")
+    } else if refused {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "fake-panel: timeshift unavailable (quirk)",
+        )
+            .into_response()
     } else if let Some(r) = media_gate(st) {
         r
     } else if ext == "m3u8" {

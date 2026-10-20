@@ -29,8 +29,15 @@ pub struct Demo {
 ///
 /// The panel could not bind, or the profile could not be created.
 pub fn start(rt: &tokio::runtime::Runtime, store: &Store, set_pin: bool) -> anyhow::Result<Demo> {
+    // Dev only: `OPENSMARTERS_DEMO_QUIRKS=huge,timeshift-smarters-only` makes the fake
+    // panel misbehave like real ones (see `fake_panel::Quirks`).
+    let quirks = match std::env::var("OPENSMARTERS_DEMO_QUIRKS") {
+        Ok(list) => fake_panel::Quirks::parse_list([list])?,
+        Err(_) => fake_panel::Quirks::default(),
+    };
     let config = fake_panel::Config {
         media: fake_panel::MediaMode::Background,
+        quirks,
         ..fake_panel::Config::default()
     };
     let panel = rt.block_on(fake_panel::spawn(config))?;

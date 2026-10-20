@@ -1,0 +1,1 @@
+{"user_info":{"username":"demo_user","password":"demo_pass","auth":1,"status":"Expired","exp_date":"1600000000","is_trial":"0","active_cons":"0","max_connections":"1","allowed_output_formats":["ts"]},"server_info":{"url":"stream.example.net","port":"80","https_port":"443","server_protocol":"http","timezone":"UTC","timestamp_now":1704067200,"time_now":"2024-01-01 00:00:00"}}

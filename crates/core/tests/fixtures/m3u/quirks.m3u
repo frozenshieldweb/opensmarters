@@ -1,0 +1,23 @@
+#EXTM3U x-tvg-url="http://epg.example.org/guide.xml.gz"
+#EXTINF:-1 tvg-id="news.synthetic" tvg-name="Synthetic News" tvg-logo="https://img.example.org/news.png" group-title="News",Synthetic News HD
+http://stream.example.net/live/demo_user/demo_pass/1.ts
+
+#EXTINF:-1 tvg-logo="http://img.example.org/logo.png" group-title="News",Logo http, stream https
+https://secure.example.net/live/demo_user/demo_pass/2.m3u8
+#EXTINF:0 group-title="Other",RTMP channel
+rtmp://rtmp.example.net/live/3
+#EXTINF:-1 group-title="Other",UDP multicast
+#EXTVLCOPT:http-user-agent=SyntheticAgent/2.0
+#KODIPROP:inputstream.adaptive.manifest_type=hls
+udp://@239.1.1.1:5000
+# just a comment
+#EXTINF:-1 tvg-name="Movie" group-title="Movies",Synthetic Movie (2020)
+http://stream.example.net/movie/demo_user/demo_pass/201.mkv
+#EXTINF:-1 group-title="Series",Synthetic Series S01E01
+http://stream.example.net/series/demo_user/demo_pass/1001.mp4
+#EXTINF:-1,Local file movie
+http://files.example.org/videos/clip.MP4
+#EXTINF:-1 tvg-name="weird, name" group-title="Odd",Weird "title", with commas
+http://stream.example.net/live/demo_user/demo_pass/9.ts
+
+#EXTINF:-1,Dangling at the end

@@ -1,0 +1,8 @@
+[
+  {"num": 1, "name": "Synthetic News", "stream_type": "live", "stream_id": 101, "stream_icon": "https://img.example.org/news.png", "epg_channel_id": "news.synthetic", "added": "1700000000", "category_id": "1", "custom_sid": "", "tv_archive": 1, "direct_source": "", "tv_archive_duration": "7"},
+  {"num": "2", "name": "Synthetic Sports", "stream_type": "live", "stream_id": "102", "stream_icon": "", "epg_channel_id": null, "added": 1700000100, "category_id": 2, "tv_archive": "0", "tv_archive_duration": 0},
+  {"num": 3, "name": "Broken id", "stream_id": "abc"},
+  {"num": 4, "name": "Synthetic Archive", "stream_id": 103, "tv_archive": true, "category_id": "1", "category_ids": [1, 3]},
+  "not an object",
+  {"num": null, "name": null, "stream_id": 104.0, "is_adult": "1"}
+]

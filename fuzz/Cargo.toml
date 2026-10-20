@@ -1,0 +1,47 @@
+# cargo-fuzz targets for opensmarters-core.
+#
+# This crate is deliberately NOT a member of the main workspace (it needs nightly and
+# libFuzzer). Run from this directory, e.g.:
+#   cargo +nightly fuzz run m3u -- -max_total_time=300
+# On Windows MSVC, add `-s none` if AddressSanitizer is unavailable.
+[package]
+name = "opensmarters-core-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+opensmarters-core = { path = "../crates/core" }
+
+# Standalone workspace: keeps this crate out of the root workspace.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "m3u"
+path = "fuzz_targets/m3u.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xmltv"
+path = "fuzz_targets/xmltv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xtream_json"
+path = "fuzz_targets/xtream_json.rs"
+test = false
+doc = false
+bench = false

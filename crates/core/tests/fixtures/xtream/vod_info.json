@@ -1,0 +1,37 @@
+{
+ "info": {
+  "kinopoisk_url": "",
+  "tmdb_id": 12345,
+  "name": "Synthetic Movie A",
+  "o_name": "Synthetic Movie A (original)",
+  "cover_big": "https://img.example.org/a_big.jpg",
+  "movie_image": "https://img.example.org/a.jpg",
+  "releasedate": "2020-01-01",
+  "episode_run_time": 105,
+  "youtube_trailer": "abcdEFGhijk",
+  "director": "Director X",
+  "actors": "Actor A",
+  "cast": "",
+  "description": "Description text.",
+  "plot": "Plot text.",
+  "age": "",
+  "country": "Nowhere",
+  "genre": "Drama",
+  "backdrop_path": [
+   "https://img.example.org/bd.jpg"
+  ],
+  "duration_secs": 6300,
+  "duration": "01:45:00",
+  "bitrate": 0,
+  "rating": "7.5"
+ },
+ "movie_data": {
+  "stream_id": 201,
+  "name": "Synthetic Movie A",
+  "added": "1700000000",
+  "category_id": "10",
+  "container_extension": "mp4",
+  "custom_sid": "",
+  "direct_source": ""
+ }
+}

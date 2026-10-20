@@ -1,0 +1,46 @@
+{
+ "epg_listings": [
+  {
+   "id": "100",
+   "epg_id": "10",
+   "title": "TGF0ZSBTaG93",
+   "lang": "en",
+   "start": "2023-12-31 23:30:00",
+   "end": "2024-01-01 01:00:00",
+   "description": "U3ludGhldGljIGxhdGUtbmlnaHQgcHJvZ3JhbW1lLg==",
+   "channel_id": "news.synthetic",
+   "start_timestamp": "1704061800",
+   "stop_timestamp": "1704067200",
+   "now_playing": 0,
+   "has_archive": 1
+  },
+  {
+   "id": "101",
+   "title": "Tm90IGFyY2hpdmVk",
+   "start": "2024-01-01 01:00:00",
+   "end": "2024-01-01 02:00:00",
+   "start_timestamp": "1704067200",
+   "stop_timestamp": "1704070800",
+   "has_archive": 0
+  },
+  {
+   "id": "102",
+   "title": "TW9ybmluZyBTaG93",
+   "start": "2024-01-01 08:00:00",
+   "end": "2024-01-01 08:45:30",
+   "start_timestamp": 1704092400,
+   "stop_timestamp": 1704095130,
+   "has_archive": "1"
+  },
+  {
+   "id": "103",
+   "title": "RnV0dXJl",
+   "start": "2024-01-01 14:00:00",
+   "end": "2024-01-01 15:00:00",
+   "start_timestamp": 1704114000,
+   "stop_timestamp": 1704117600,
+   "has_archive": 1,
+   "now_playing": 0
+  }
+ ]
+}

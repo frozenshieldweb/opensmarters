@@ -1,0 +1,28 @@
+{
+  "user_info": {
+    "username": "demo_user",
+    "password": "demo_pass",
+    "message": "Welcome to the synthetic test panel",
+    "auth": 1,
+    "status": "Active",
+    "exp_date": "1893456000",
+    "is_trial": "0",
+    "active_cons": "0",
+    "created_at": "1672531200",
+    "max_connections": "2",
+    "allowed_output_formats": ["m3u8", "ts", "rtmp"]
+  },
+  "server_info": {
+    "xui": true,
+    "version": "1.0.0",
+    "url": "stream.example.net",
+    "port": "8080",
+    "https_port": "8443",
+    "server_protocol": "http",
+    "rtmp_port": "8880",
+    "timezone": "Europe/Paris",
+    "timestamp_now": 1704067200,
+    "time_now": "2024-01-01 01:00:00",
+    "process": true
+  }
+}

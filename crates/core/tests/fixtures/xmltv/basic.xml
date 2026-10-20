@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE tv SYSTEM "xmltv.dtd">
+<tv generator-info-name="opensmarters synthetic fixture">
+  <channel id="news.synthetic">
+    <display-name lang="en">Synthetic News</display-name>
+    <display-name lang="fr">Infos synthétiques</display-name>
+    <icon src="https://img.example.org/news.png" />
+    <url>https://news.example.org/</url>
+  </channel>
+  <channel id="sports.synthetic">
+    <display-name>Synthetic Sports</display-name>
+  </channel>
+  <!-- Out of order on purpose; the parser sorts by start. -->
+  <programme start="20240101080000 +0100" stop="20240101070000 +0100" channel="news.synthetic">
+    <title><![CDATA[CDATA <Title>]]></title>
+  </programme>
+  <programme start="20240101070000 +0100" stop="20240101080000 +0100" channel="news.synthetic" catchup-id="cu-1">
+    <title lang="en">Morning News</title>
+    <title lang="fr">Journal du matin</title>
+    <desc lang="en">Headlines &amp; weather &lt;live&gt; ünïcode ✓ &#169;</desc>
+    <category lang="en">News</category>
+    <episode-num system="xmltv_ns">0.4.0/1</episode-num>
+    <icon src="https://img.example.org/p1.png"/>
+  </programme>
+  <programme start="20240101100000 +0100" stop="20240101110000 +0100" channel="news.synthetic">
+    <title>Late Morning</title>
+    <sub-title>Unknown &custom; entity</sub-title>
+  </programme>
+  <programme start="20240101120000" stop="20240101140000" channel="sports.synthetic">
+    <title>Synthetic Match</title>
+  </programme>
+  <programme stop="20240101140000" channel="sports.synthetic">
+    <title>No start</title>
+  </programme>
+  <programme start="20240101120000">
+    <title>No channel</title>
+  </programme>
+</tv>

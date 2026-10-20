@@ -1,0 +1,88 @@
+{
+ "seasons": [
+  {
+   "air_date": "2020-05-01",
+   "episode_count": 2,
+   "id": 1,
+   "name": "Season 1",
+   "overview": "",
+   "season_number": 1,
+   "cover": "https://img.example.org/s1.jpg",
+   "cover_big": ""
+  },
+  {
+   "air_date": "",
+   "episode_count": "1",
+   "id": 2,
+   "name": "Season 2",
+   "season_number": "2"
+  }
+ ],
+ "info": {
+  "name": "Synthetic Series One",
+  "cover": "https://img.example.org/cover501.jpg",
+  "plot": "A synthetic plot.",
+  "cast": "Actor A",
+  "director": "Director X",
+  "genre": "Drama",
+  "releaseDate": "2020-05-01",
+  "last_modified": "1700000000",
+  "rating": "8",
+  "rating_5based": 4,
+  "backdrop_path": [
+   "https://img.example.org/b1.jpg"
+  ],
+  "youtube_trailer": "",
+  "episode_run_time": "45",
+  "category_id": "20"
+ },
+ "episodes": {
+  "1": [
+   {
+    "id": "1002",
+    "episode_num": 2,
+    "title": "Episode Two",
+    "container_extension": "mkv",
+    "info": {
+     "movie_image": "",
+     "plot": "",
+     "duration_secs": 2700,
+     "duration": "00:45:00",
+     "rating": ""
+    },
+    "custom_sid": "",
+    "added": "1700000000",
+    "season": 1,
+    "direct_source": ""
+   },
+   {
+    "id": "1001",
+    "episode_num": "1",
+    "title": "Episode One",
+    "container_extension": "mkv",
+    "info": {
+     "movie_image": "https://img.example.org/e1.jpg",
+     "plot": "First.",
+     "duration_secs": "2700",
+     "duration": "00:45:00",
+     "rating": 8
+    },
+    "season": "1"
+   },
+   {
+    "episode_num": 3,
+    "title": "Broken (no id)"
+   }
+  ],
+  "2": {
+   "0": {
+    "id": 2001,
+    "episode_num": 1,
+    "title": "Season Two Opener",
+    "container_extension": "mp4",
+    "info": [],
+    "season": 2
+   }
+  }
+ }
+}

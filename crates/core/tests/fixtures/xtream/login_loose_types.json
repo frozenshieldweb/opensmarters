@@ -1,0 +1,25 @@
+{
+  "user_info": {
+    "username": "demo_user",
+    "password": "demo_pass",
+    "message": "",
+    "auth": "1",
+    "status": "Active",
+    "exp_date": null,
+    "is_trial": 1,
+    "active_cons": 1,
+    "created_at": "",
+    "max_connections": "1",
+    "allowed_output_formats": "ts"
+  },
+  "server_info": {
+    "url": "",
+    "port": 80,
+    "https_port": "",
+    "server_protocol": "HTTPS",
+    "rtmp_port": null,
+    "timezone": "",
+    "timestamp_now": "1704067200",
+    "time_now": "2024-01-01 00:00:00"
+  }
+}

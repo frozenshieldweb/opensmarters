@@ -1,0 +1,8 @@
+[
+  {"num": 1, "name": "Synthetic Movie A", "stream_type": "movie", "stream_id": 201, "stream_icon": "https://img.example.org/a.jpg", "rating": "7.5", "added": "1700000000", "category_id": "10", "container_extension": "mp4", "custom_sid": null, "direct_source": ""},
+  {"num": 2, "name": "Synthetic Movie B", "stream_id": "202", "rating": 8, "rating_5based": "4.5", "container_extension": "mkv"},
+  {"num": 3, "name": "Synthetic Movie C", "stream_id": 203, "rating": "", "rating_5based": ""},
+  {"num": 4, "name": "Synthetic Movie D", "stream_id": 204, "rating": "N/A"},
+  {"num": 5, "name": "No id"},
+  {"num": 6, "name": "Synthetic Movie E", "stream_id": 205, "rating": 6.2, "container_extension": ".avi"}
+]

@@ -1,0 +1,6 @@
+[
+  {"num": 1, "name": "Synthetic Series One", "series_id": 501, "cover": "https://img.example.org/cover501.jpg", "plot": "A synthetic plot.", "cast": "Actor A, Actor B", "director": "Director X", "genre": "Drama", "releaseDate": "2020-05-01", "last_modified": "1700000000", "rating": "8", "rating_5based": 4, "backdrop_path": ["https://img.example.org/b1.jpg", "https://img.example.org/b2.jpg"], "youtube_trailer": "", "episode_run_time": "45", "category_id": "20"},
+  {"num": 2, "name": "Synthetic Series Two", "series_id": "502", "cover": "", "stream_icon": "https://img.example.org/icon502.png", "release_date": "2019", "rating": "N/A", "backdrop_path": "https://img.example.org/b3.jpg"},
+  {"num": 3, "name": "Synthetic Series Three", "series_id": 503, "backdrop_path": null, "releaseDate": "2021-01-01", "release_date": "2021-02-02"},
+  {"num": 4, "name": "No series id", "stream_id": 9}
+]

@@ -1,0 +1,32 @@
+{
+ "seasons": [],
+ "info": [],
+ "episodes": [
+  [
+   {
+    "id": 11,
+    "episode_num": 1,
+    "title": "S1E1",
+    "container_extension": "mp4"
+   }
+  ],
+  [
+   {
+    "id": "21",
+    "episode_num": 1,
+    "title": "S2E1",
+    "container_extension": "mp4"
+   }
+  ],
+  [
+   {
+    "id": 51,
+    "episode_num": 1,
+    "season": 5,
+    "title": "S5E1",
+    "container_extension": "mp4"
+   },
+   "junk"
+  ]
+ ]
+}

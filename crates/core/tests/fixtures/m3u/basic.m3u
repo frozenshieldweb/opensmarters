@@ -1,0 +1,5 @@
+#EXTM3U url-tvg="http://epg.example.org/basic.xml"
+#EXTINF:-1 tvg-id="news.synthetic" tvg-chno="1" group-title="News",Synthetic News
+http://stream.example.net/live/demo_user/demo_pass/101.ts
+#EXTINF:-1 tvg-id="sports.synthetic" tvg-chno="2" group-title="Sports" catchup="xc" catchup-days="3",Synthetic Sports
+http://stream.example.net/live/demo_user/demo_pass/102.ts

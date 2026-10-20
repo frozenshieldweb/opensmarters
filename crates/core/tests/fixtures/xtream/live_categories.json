@@ -1,0 +1,7 @@
+[
+  {"category_id": "1", "category_name": "News", "parent_id": 0},
+  {"category_id": 2, "category_name": "Sports", "parent_id": "0"},
+  {"category_name": "No id"},
+  {"category_id": "", "category_name": "Empty id"},
+  {"category_id": "3", "category_name": null}
+]

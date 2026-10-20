@@ -23,7 +23,9 @@
 //! | [`dropdown`] | [`Dropdown`] (sort menu with focus trap) |
 //! | [`episode_row`] | [`EpisodeRow`] (still, progress, title, synopsis, watched toggle) |
 //! | [`up_next`] | [`UpNextPrompt`] (next-episode countdown) |
+//! | [`alert`] | [`alert::AlertCard`] (app-wide prompt card: reminders, "Still watching?") |
 
+pub mod alert;
 pub mod button;
 pub mod callout;
 pub mod card;

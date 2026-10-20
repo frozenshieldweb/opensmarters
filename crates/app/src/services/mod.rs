@@ -13,6 +13,7 @@ pub mod epg;
 pub mod images;
 pub mod prefs;
 pub mod session;
+pub mod vod;
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -34,6 +34,11 @@
 //!   control methods are asynchronous and never block, so they are safe to
 //!   call from the UI/GL thread. A background thread keeps a
 //!   [`PlayerState`] snapshot up to date and queues [`PlayerEvent`]s.
+//! * [`StreamTuning`]: per-stream buffering (initial buffer, cache sizes, a seekable or
+//!   disk-backed cache for pausing and rewinding live TV), sent with
+//!   [`Player::load_with`] or applied at once with [`Player::set_tuning`].
+//!   [`Player::set_hwdec`] switches hardware decoding while playing.
+//!   [`PlayerState::cache`] ([`CacheState`]) reports the seekable window.
 //! * [`VideoView`] (feature `egui`, on by default): renders the player's
 //!   video through libmpv's OpenGL render API into an offscreen FBO and
 //!   blits it into egui's framebuffer, with egui overlays drawn on top.
@@ -118,7 +123,10 @@ mod render;
 #[cfg(feature = "egui")]
 mod video;
 
-pub use config::{Hwdec, LogLevel, PlayerConfig};
+pub use config::{
+    CURL_CONNECT_TIMEOUT_SECS, CURL_MAX_REDIRECTS, Hwdec, LogLevel, MAX_CACHE_BYTES, PlayerConfig,
+    StreamTuning,
+};
 pub use error::{Error, LoadError, MpvError, ValidationError};
 pub use ffi::{LIBMPV_FILE_NAME, harden_dll_search_path};
 pub use playable::{
@@ -126,8 +134,8 @@ pub use playable::{
     UrlPolicy, UserAgent, sniff_container,
 };
 pub use player::{
-    Aspect, EndReason, LoadOptions, LogLine, Op, Player, PlayerEvent, PlayerState, Property, Track,
-    TrackKind, TrackSelection, VideoFit,
+    Aspect, CacheState, EndReason, LoadOptions, LogLine, MAX_SEEK_RANGES, Op, Player, PlayerEvent,
+    PlayerState, Property, SeekRange, Track, TrackKind, TrackSelection, VideoFit,
 };
 pub use render::{GetProcAddress, RenderContext};
 #[cfg(feature = "egui")]

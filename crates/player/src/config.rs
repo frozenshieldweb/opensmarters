@@ -1,10 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! [`PlayerConfig`] and the hardened mpv option set derived from it.
+//! [`PlayerConfig`] and the hardened mpv option set derived from it, and [`StreamTuning`]
+//! (per-load buffering).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::playable::{UrlPolicy, UserAgent};
+
+/// libcurl connect timeout (`curl-connect-timeout`, seconds). mpv's default is 30 s; a
+/// dead host should fail fast so the app can reconnect or say so.
+pub const CURL_CONNECT_TIMEOUT_SECS: u32 = 10;
+/// Redirects libcurl follows (`curl-max-redirects`; mpv's default is 16).
+pub const CURL_MAX_REDIRECTS: u32 = 5;
+
+/// Largest cache size [`StreamTuning`] accepts (8 GiB).
+pub const MAX_CACHE_BYTES: u64 = 8 << 30;
 
 /// mpv log verbosity forwarded as [`crate::PlayerEvent::Log`].
 ///
@@ -74,11 +84,99 @@ pub enum Hwdec {
 }
 
 impl Hwdec {
-    fn as_mpv_str(self) -> &'static str {
+    pub(crate) fn as_mpv_str(self) -> &'static str {
         match self {
             Self::AutoSafe => "auto-safe",
             Self::Disabled => "no",
         }
+    }
+}
+
+/// How one stream is buffered. Pass it to [`crate::Player::load_with`] (sent as
+/// `loadfile` per-file options, so it ends with the file) or apply it to the stream that
+/// is playing with [`crate::Player::set_tuning`].
+///
+/// Every value is a number or a switch that this crate formats itself: nothing from
+/// outside the crate reaches mpv as an option string.
+///
+/// ```
+/// use std::time::Duration;
+/// use opensmarters_player::StreamTuning;
+/// // A live channel with a 30-minute rewind buffer on disk.
+/// let live = StreamTuning {
+///     start_buffer: Duration::from_secs(1),
+///     forward_bytes: 1_800_000_000,
+///     back_bytes: 1_800_000_000,
+///     seekable_cache: true,
+///     disk_cache: true,
+///     ..StreamTuning::default()
+/// };
+/// # let _ = live;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StreamTuning {
+    /// Media to buffer before playback starts, and again after the buffer ran dry
+    /// (`cache-pause-initial=yes` + `cache-pause-wait`). Zero starts at once and resumes
+    /// after 1 s of buffer following a stall. At most 60 s.
+    pub start_buffer: Duration,
+    /// Forward cache cap in bytes (`demuxer-max-bytes`), 1 MiB to [`MAX_CACHE_BYTES`].
+    /// On a live stream it also bounds how long a pause can last before mpv stops
+    /// reading (data received while paused is ahead of the playback position).
+    pub forward_bytes: u64,
+    /// Backward cache cap in bytes (`demuxer-max-back-bytes`), up to [`MAX_CACHE_BYTES`]:
+    /// how far back one can seek without reopening the stream (the live rewind window).
+    pub back_bytes: u64,
+    /// Keep the cache seekable even when the stream is not (a live TS has no `Range`
+    /// support): `demuxer-seekable-cache=yes` + `force-seekable=yes`. Seeks then work
+    /// inside what was received; seeks outside it fail. Off: mpv decides (`auto`, `no`).
+    /// Needed for pause/rewind on live streams and for [`crate::Player::dump_cache`].
+    pub seekable_cache: bool,
+    /// Keep cached packets in a file in the player's cache folder
+    /// ([`PlayerConfig::cache_dir`]) instead of in memory (`cache-on-disk`). Ignored when
+    /// the player has no cache folder.
+    pub disk_cache: bool,
+}
+
+impl Default for StreamTuning {
+    /// mpv-like behaviour: start at once, 64 MiB ahead, 16 MiB behind, in memory.
+    fn default() -> Self {
+        Self {
+            start_buffer: Duration::ZERO,
+            forward_bytes: 64 << 20,
+            back_bytes: 16 << 20,
+            seekable_cache: false,
+            disk_cache: false,
+        }
+    }
+}
+
+impl StreamTuning {
+    /// The mpv options for this tuning, values formatted here. `disk_available`: the
+    /// player has a cache folder.
+    pub(crate) fn mpv_options(&self, disk_available: bool) -> Vec<(&'static str, String)> {
+        let yes_no = |b: bool| if b { "yes" } else { "no" }.to_owned();
+        let start = self.start_buffer.as_secs_f64().min(60.0);
+        let wait = if start > 0.0 { start.max(0.1) } else { 1.0 };
+        vec![
+            ("cache-pause-initial", yes_no(start > 0.0)),
+            ("cache-pause-wait", format!("{wait:.3}")),
+            (
+                "demuxer-max-bytes",
+                self.forward_bytes
+                    .clamp(1 << 20, MAX_CACHE_BYTES)
+                    .to_string(),
+            ),
+            (
+                "demuxer-max-back-bytes",
+                self.back_bytes.min(MAX_CACHE_BYTES).to_string(),
+            ),
+            (
+                "demuxer-seekable-cache",
+                if self.seekable_cache { "yes" } else { "auto" }.to_owned(),
+            ),
+            ("force-seekable", yes_no(self.seekable_cache)),
+            ("cache-on-disk", yes_no(self.disk_cache && disk_available)),
+        ]
     }
 }
 
@@ -109,6 +207,7 @@ pub struct PlayerConfig {
     pub(crate) audio_output: bool,
     pub(crate) video_output: bool,
     pub(crate) seekable_cache: bool,
+    pub(crate) cache_dir: Option<PathBuf>,
 }
 
 impl Default for PlayerConfig {
@@ -127,6 +226,7 @@ impl Default for PlayerConfig {
             audio_output: true,
             video_output: true,
             seekable_cache: false,
+            cache_dir: None,
         }
     }
 }
@@ -156,7 +256,11 @@ impl PlayerConfig {
         self
     }
 
-    /// Network connect/read timeout (`network-timeout`). Clamped to 1..=600 s.
+    /// Network connect/read timeout (`network-timeout`). Clamped to 1..=600 s. It governs
+    /// what FFmpeg's own protocols fetch (`rtmp`/`rtsp`/`udp` when enabled). `http(s)` is
+    /// read by libcurl in this mpv build, HLS segments included, and libcurl has only a
+    /// connect timeout ([`CURL_CONNECT_TIMEOUT_SECS`]) and no read timeout: the app must
+    /// detect stalls itself (see `docs/LIBMPV.md`).
     #[must_use]
     pub fn network_timeout(mut self, timeout: Duration) -> Self {
         self.network_timeout = timeout.clamp(Duration::from_secs(1), Duration::from_secs(600));
@@ -226,6 +330,32 @@ impl PlayerConfig {
     pub fn seekable_cache(mut self, enabled: bool) -> Self {
         self.seekable_cache = enabled;
         self
+    }
+
+    /// Folder for disk-backed caches ([`StreamTuning::disk_cache`]): `demuxer-cache-dir`.
+    /// It must be an absolute path the app owns (e.g. `<data>/cache/player`); mpv creates
+    /// one temporary file per stream there and deletes it when the stream closes
+    /// (`demuxer-cache-unlink-files=whendone`: Windows cannot delete a file that is still
+    /// open). The app should empty the folder at startup in case of a crash.
+    /// [`crate::Player::new`] fails with [`crate::Error::InvalidArgument`] if the path is
+    /// relative, not UTF-8, or contains control characters.
+    #[must_use]
+    pub fn cache_dir(mut self, dir: PathBuf) -> Self {
+        self.cache_dir = Some(dir);
+        self
+    }
+
+    /// Whether a cache folder is configured (disk-backed caches are possible).
+    pub fn has_cache_dir(&self) -> bool {
+        self.cache_dir.is_some()
+    }
+
+    /// The cache folder as the string given to mpv, if one is set and acceptable.
+    pub(crate) fn cache_dir_str(&self) -> Result<Option<&str>, &'static str> {
+        self.cache_dir
+            .as_deref()
+            .map(validate_cache_dir)
+            .transpose()
     }
 
     /// The URL policy in effect.
@@ -326,7 +456,18 @@ impl PlayerConfig {
             // Rendering never blocks the UI thread waiting for frame timing.
             b("video-timing-offset", s("0")),
             b("audio-client-name", s("opensmarters")),
+            // libcurl reads top-level http(s) streams in this build (docs/LIBMPV.md):
+            // fail fast on a dead host, and follow fewer redirects than mpv's 16.
+            b(
+                "curl-connect-timeout",
+                s(&CURL_CONNECT_TIMEOUT_SECS.to_string()),
+            ),
+            b("curl-max-redirects", s(&CURL_MAX_REDIRECTS.to_string())),
         ];
+        if let Ok(Some(dir)) = self.cache_dir_str() {
+            v.push(m("demuxer-cache-dir", s(dir)));
+            v.push(m("demuxer-cache-unlink-files", s("whendone")));
+        }
         if let Some(ua) = &self.user_agent {
             v.push(m("user-agent", s(ua.as_str())));
         }
@@ -360,6 +501,19 @@ pub(crate) enum OptValue {
     /// Key-value list `{protocol_whitelist: <value>}` passed as an
     /// `MPV_FORMAT_NODE_MAP`, so the commas in the value need no escaping.
     Whitelist(String),
+}
+
+/// Accepts an absolute, UTF-8 path without control characters (mpv expands a leading `~`,
+/// so that is refused too).
+fn validate_cache_dir(dir: &Path) -> Result<&str, &'static str> {
+    let s = dir.to_str().ok_or("cache folder is not UTF-8")?;
+    if !dir.is_absolute() || s.starts_with('~') {
+        return Err("cache folder must be an absolute path");
+    }
+    if s.chars().any(char::is_control) {
+        return Err("cache folder contains control characters");
+    }
+    Ok(s)
 }
 
 #[cfg(test)]
@@ -479,5 +633,122 @@ mod tests {
             assert_eq!(LogLevel::from_mpv_str(l.as_mpv_str()), Some(l));
         }
         assert_eq!(LogLevel::from_mpv_str("bogus"), None);
+    }
+
+    fn tuning_value(opts: &[(&'static str, String)], name: &str) -> String {
+        match opts.iter().find(|(n, _)| *n == name) {
+            Some((_, v)) => v.clone(),
+            None => panic!("tuning option {name} missing"),
+        }
+    }
+
+    #[test]
+    fn stream_tuning_formats_numbers_and_switches() {
+        let live = StreamTuning {
+            start_buffer: Duration::from_millis(2500),
+            forward_bytes: 1_800_000_000,
+            back_bytes: 1_800_000_000,
+            seekable_cache: true,
+            disk_cache: true,
+        };
+        let o = live.mpv_options(true);
+        assert_eq!(tuning_value(&o, "cache-pause-initial"), "yes");
+        assert_eq!(tuning_value(&o, "cache-pause-wait"), "2.500");
+        assert_eq!(tuning_value(&o, "demuxer-max-bytes"), "1800000000");
+        assert_eq!(tuning_value(&o, "demuxer-max-back-bytes"), "1800000000");
+        assert_eq!(tuning_value(&o, "demuxer-seekable-cache"), "yes");
+        assert_eq!(tuning_value(&o, "force-seekable"), "yes");
+        assert_eq!(tuning_value(&o, "cache-on-disk"), "yes");
+        // Without a cache folder the cache stays in memory.
+        assert_eq!(
+            tuning_value(&live.mpv_options(false), "cache-on-disk"),
+            "no"
+        );
+
+        let d = StreamTuning::default().mpv_options(true);
+        assert_eq!(tuning_value(&d, "cache-pause-initial"), "no");
+        assert_eq!(tuning_value(&d, "cache-pause-wait"), "1.000");
+        assert_eq!(tuning_value(&d, "demuxer-seekable-cache"), "auto");
+        assert_eq!(tuning_value(&d, "force-seekable"), "no");
+        assert_eq!(tuning_value(&d, "cache-on-disk"), "no");
+        // Every option name is unique and every value is plain text.
+        let mut names: Vec<_> = d.iter().map(|(n, _)| *n).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), d.len());
+    }
+
+    #[test]
+    fn stream_tuning_clamps() {
+        let extreme = StreamTuning {
+            start_buffer: Duration::from_secs(3600),
+            forward_bytes: 0,
+            back_bytes: u64::MAX,
+            seekable_cache: false,
+            disk_cache: false,
+        };
+        let o = extreme.mpv_options(true);
+        assert_eq!(tuning_value(&o, "cache-pause-wait"), "60.000");
+        assert_eq!(
+            tuning_value(&o, "demuxer-max-bytes"),
+            (1u64 << 20).to_string()
+        );
+        assert_eq!(
+            tuning_value(&o, "demuxer-max-back-bytes"),
+            MAX_CACHE_BYTES.to_string()
+        );
+        let tiny = StreamTuning {
+            start_buffer: Duration::from_millis(1),
+            ..StreamTuning::default()
+        };
+        assert_eq!(
+            tuning_value(&tiny.mpv_options(false), "cache-pause-wait"),
+            "0.100"
+        );
+        for (name, v) in o {
+            assert!(
+                v.chars().all(|c| c.is_ascii_alphanumeric() || c == '.'),
+                "{name}={v}"
+            );
+        }
+    }
+
+    #[test]
+    fn network_options_include_curl_limits() {
+        let opts = PlayerConfig::default().mpv_options();
+        assert_eq!(str_of(&opts, "curl-connect-timeout"), "10");
+        assert_eq!(str_of(&opts, "curl-max-redirects"), "5");
+        // Best effort: an mpv build without the libcurl stream skips them.
+        assert!(!find(&opts, "curl-connect-timeout").mandatory);
+    }
+
+    #[test]
+    fn cache_dir_must_be_absolute_plain_text() {
+        let opts = PlayerConfig::default().mpv_options();
+        assert!(opts.iter().all(|o| o.name != "demuxer-cache-dir"));
+        assert!(!PlayerConfig::default().has_cache_dir());
+
+        let dir = std::env::temp_dir().join("opensmarters-cache-test");
+        let cfg = PlayerConfig::default().cache_dir(dir.clone());
+        assert!(cfg.has_cache_dir());
+        let opts = cfg.mpv_options();
+        assert_eq!(
+            str_of(&opts, "demuxer-cache-dir"),
+            dir.to_str().unwrap_or_default()
+        );
+        assert_eq!(str_of(&opts, "demuxer-cache-unlink-files"), "whendone");
+        assert!(find(&opts, "demuxer-cache-dir").mandatory);
+
+        for bad in ["relative/dir", "~~/cache", "~/cache"] {
+            let cfg = PlayerConfig::default().cache_dir(PathBuf::from(bad));
+            assert!(cfg.cache_dir_str().is_err(), "{bad}");
+            assert!(
+                cfg.mpv_options()
+                    .iter()
+                    .all(|o| o.name != "demuxer-cache-dir")
+            );
+        }
+        let ctl = PlayerConfig::default().cache_dir(std::env::temp_dir().join("a\nb"));
+        assert!(ctl.cache_dir_str().is_err());
     }
 }

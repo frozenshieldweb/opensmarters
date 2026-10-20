@@ -57,6 +57,7 @@ pub struct VideoView {
     state: Arc<Mutex<ViewState>>,
     get_proc_address: GetProcAddress,
     bound_player: Option<u64>,
+    hold_last_frame: bool,
     _not_send: PhantomData<*const ()>,
 }
 
@@ -216,6 +217,7 @@ impl ViewState {
         painter: &egui_glow::Painter,
         gpa: &GetProcAddress,
         has_video: bool,
+        hold: bool,
     ) {
         if self.destroyed {
             return;
@@ -269,10 +271,17 @@ impl ViewState {
                 return;
             }
         };
+        if resized {
+            // A new target starts black: nothing to hold any more.
+            self.has_frame = false;
+        }
+        // Holding: keep the last picture while the next stream (or a reconnect) has no
+        // video yet, instead of letting mpv render its blank frame over it.
+        let hold = hold && !has_video && self.has_frame;
         let (Some(rc), Some(target)) = (&self.render, &self.target) else {
             return;
         };
-        if rc.needs_render() || resized {
+        if !hold && (rc.needs_render() || resized) {
             match rc.render(target.fbo.0.get(), w, h, true) {
                 Ok(()) => {
                     self.has_frame = true;
@@ -282,7 +291,7 @@ impl ViewState {
             }
         }
 
-        if has_video && self.has_frame {
+        if (has_video || hold) && self.has_frame {
             let clip = info.clip_rect_in_pixels();
             // SAFETY: GL context current (paint callback). mpv may have
             // changed scissor/framebuffer state, so set what the blit needs:
@@ -363,6 +372,7 @@ impl VideoView {
             })),
             get_proc_address,
             bound_player: None,
+            hold_last_frame: false,
             _not_send: PhantomData,
         }
     }
@@ -401,18 +411,27 @@ impl VideoView {
             return;
         }
         let has_video = player.with_state(crate::PlayerState::has_video);
+        let hold = self.hold_last_frame;
         let state = Arc::clone(&self.state);
         let gpa = Arc::clone(&self.get_proc_address);
         let callback = egui_glow::CallbackFn::new(move |info, painter| {
             state
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .paint(&info, painter, &gpa, has_video);
+                .paint(&info, painter, &gpa, has_video, hold);
         });
         ui.painter().add(egui::PaintCallback {
             rect,
             callback: Arc::new(callback),
         });
+    }
+
+    /// Keep showing the last picture while the player has no video (between
+    /// two streams of a zap, during a reconnect) instead of black. Off by
+    /// default; turn it off for an unrelated new item so a stale picture never
+    /// shows. Resizing the widget drops the held picture.
+    pub fn set_hold_last_frame(&mut self, hold: bool) {
+        self.hold_last_frame = hold;
     }
 
     /// The last rendering error, if any (e.g. render context creation

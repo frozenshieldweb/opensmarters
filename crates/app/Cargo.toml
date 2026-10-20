@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 publish.workspace = true
 build = "build.rs"
 
@@ -44,7 +45,7 @@ eframe = { version = "0.37", default-features = false, features = [
 ] }
 egui_extras = { version = "0.37", default-features = false, features = ["image"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-lru = "0.16"
+lru = "0.18"
 rfd = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -52,6 +53,10 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "registry", "ansi"] }
+
+[target.'cfg(windows)'.dependencies]
+# Safe WinRT projection: `UISettings.AnimationsEnabled` (reduced motion follows Windows).
+windows = { version = "0.62", default-features = false, features = ["UI_ViewManagement"] }
 
 [dev-dependencies]
 fake-panel = { path = "../fake-panel" }

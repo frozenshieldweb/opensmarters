@@ -25,7 +25,10 @@ cargo fmt; cargo clippy -p opensmarters --all-targets --all-features -- -D warni
 | `src/nav/` | `Route` (typed routes, `--route` syntax), `Router` (back stack), `Navigator` (`cx.nav`) |
 | `src/focus/` | The spatial focus engine (`engine.rs`, pure + unit-tested) and its egui glue (`mod.rs`) |
 | `src/ui/` | Design system: `theme` (tokens, fonts, visuals), `icons` (Phosphor), `paint` (focus ring/glow, scrims, cover-fit), `text` (capping, truncation, timecodes), `motion`, `layout` (breakpoints), `assets` (bundled art), `widgets/` |
-| `src/services/` | `Services` (runtime, store, redactor, images, paths), `Session` (provider: catalogue, EPG, favourites, parental, playback requests), `catalog` (`LiveChannel`, `LiveCatalog`, `Programme`), `images`, `epg`, `prefs`, `demo` |
+| `src/services/` | `Services` (runtime, store, redactor, images, paths, background-error queue), `Session` (provider: catalogue, EPG, favourites, parental, playback requests; Phase-4 additions in child modules `session/*.rs`), `catalog` (`LiveChannel`, `LiveCatalog`, `Programme`), `images`, `epg`, `prefs` (app-wide preferences), `parental` (PIN length, lockout/wrong-PIN texts, "forgot PIN" check), `backup` (export/import without secrets or machine-local settings), `search_history` (recent searches per profile), `demo` |
+| `src/platform.rs` | Safe OS queries: Windows *Animation effects* (`UISettings.AnimationsEnabled` via the `windows` crate's WinRT projection) for reduced motion; "open folder" |
+| `src/window_state.rs` | Window size/position/maximised remembered between runs (store setting `app.window`, physical px, debounced; never for `--ephemeral`/`--window-size`) |
+| `src/playback/tracks.rs` | Preferred audio/subtitle languages (ISO 639 normalisation, track choice), network buffer presets, `PlayerTuning` (hwdec + buffer at player start) |
 | `src/playback/` | `PlaybackController` (the one mpv player + video view, reconnect, progress), `PlaybackRequest` and header plumbing (`request.rs`) |
 | `src/sessions.rs` | `SessionManager` (`cx.sessions`): open/switch profiles |
 | `src/task.rs` | `Loader<T>`: background work with staleness protection |
@@ -86,7 +89,7 @@ back. `ui` receives a `Ui` whose max rect is `cx.layout.content` (right of the r
 | `cx.playback` | the shared player (see §7) |
 | `cx.play(req, fullscreen)` | play a `PlaybackRequest` (fullscreen pushes the player route) |
 | `cx.toasts` | `info/success/warning/error` |
-| `cx.prefs` + `cx.save_prefs()` | TV mode, reduced motion, 12/24 h, aspect preset, volume |
+| `cx.prefs` + `cx.save_prefs()` | TV mode, UI size, reduced motion (+ follow Windows), 12/24 h, aspect preset, volume, preferred audio/subtitle language, hardware decoding, network buffer |
 | `cx.sessions` | open/switch profiles, last failure |
 | `cx.layout` | breakpoint, `screen`, `content`, `margin`, `poster_width`, `tv`, card sizes, `safe_area()`, `grid_columns()` |
 | `cx.now` | `DateTime<Utc>` for EPG progress |
@@ -107,12 +110,33 @@ back. `ui` receives a `Ui` whose max rect is `cx.layout.content` (right of the r
 6. Handle Esc in `on_back` only for local state (dialogs, overlays).
 7. Check it at 1920×1080, 1280×720 and `--tv` with the harness (§9), keyboard only.
 
+### Settings pages and parental control (Phase 4C)
+
+| Page | File | Notes |
+|---|---|---|
+| Account | `settings/account.rs` | "Edit account" asks for the PIN |
+| Profiles | `settings/profiles.rs` | switch / add / edit / delete (PIN) |
+| Playback | `settings/playback.rs` | this profile (save + reconnect) and every profile (languages, hwdec, buffer; the last two at next launch) |
+| Parental control | `settings/parental.rs`, `pin_flow.rs` | the page opens only with the PIN; set/change (4–8 digits, confirm) / turn off; locked words; per-category Auto/Lock/Allow; forgot PIN |
+| Appearance | `settings/appearance.rs` | TV mode, UI size (desktop), motion (Follow Windows / Reduced / Full) |
+| Language & region | `settings/language.rs` | 12/24 h clock, display language (English only) |
+| Storage & data | `settings/storage.rs` | cache/pictures usage and clearing, cache limit, history, backup export/import (PIN), data folder, copy log |
+| Privacy & security | `settings/privacy.rs` | plain-language facts; optional TMDB key (keychain, checked on request) |
+| About | `settings/about.rs`, `licences.rs` | versions, GPL notice, source link, third-party licences (a test keeps the list in sync with direct dependencies) |
+
+While a PIN is set it is required for: locked categories, Settings › Parental, adding /
+editing / deleting profiles (picker, Settings › Profiles, Settings › Account) and importing a
+backup. **Forgot PIN:** typing the password of one of this computer's Xtream accounts (or an
+M3U playlist address) removes it (constant-time comparison against the keychain, in-memory
+rate limit); otherwise deleting the data folder is the documented reset. The first run with
+no profile shows `Route::Welcome` (explanation → onboarding, or restore a backup).
+
 ## 4. Navigation and routes
 
 `--route` and `Route::parse` share one syntax: `home`, `live`, `live:category=<id|all|favourites>`,
 `guide`, `movies[:category=<id>]`, `series[:category=<id>]`, `detail:movie=<id>`,
 `detail:series=<id>`, `catchup[:stream=<id>]`, `search[:q=<text>]`, `favourites`,
-`settings[:account|playback|profiles|parental|appearance|storage|about]`, `onboarding`,
+`settings[:account|profiles|playback|parental|appearance|language|storage|privacy|about]`, `welcome`, `onboarding`,
 `profiles`, `player:live=<channel id or number>`.
 
 Rules (unit-tested in `nav/router.rs`):
@@ -135,7 +159,7 @@ Rules (unit-tested in `nav/router.rs`):
 | EPG | `epg(&channel)` → `EpgState` (non-blocking, fetches in the background), `now_next(&channel, now)` |
 | Requests | `live_request(&channel, Option<ZapContext>)`, `movie_request(..)`, `episode_request(..)`, `catchup_request(&channel, &ArchiveProgramme, resume)`, `resume_request(&PlaybackProgress)` |
 | Favourites | `is_favourite(kind, id)`, `favourite_ids(kind)`, `toggle_favourite(kind, id, snapshot)` (optimistic, persisted in the background), `reload_favourites()` |
-| Parental | `parental_enabled()`, `is_category_locked(kind, &id, name)`, `is_selection_locked(..)`, `unlock_category(..)` (session-only), `reload_parental()` (call after Settings → Parental changes) |
+| Parental | `parental_enabled()`, `pin_length()` (4–8: create PIN pads with `PinPad::new(id, session.pin_length())`, or use `widgets::PinPrompt`), `is_category_locked(kind, &id, name)`, `is_selection_locked(..)`, `unlock_category(..)` (session-only), `reload_parental()` (call after Settings → Parental changes) |
 | Cache | `cached(key, ttl, fetch)` (generic SWR), `refresh()` (drop everything) |
 | Movies / series (`session/vod.rs`) | `movie_progress(id)`, `movie_progress_map()`, `series_watch(id)` → `SeriesWatch`, `set_episode_watched(..)`, `series_episode_request(..)` (title "Series · Episode", season/number from the info), `last_vod_category(kind)` / `remember_vod_category(kind, id)`, `resume_thresholds()` |
 
@@ -279,7 +303,7 @@ All widgets in `ui::widgets` already do this.
 | Move programmatically | `focus::request(ctx, id)` (scrolls it into view; may be not-yet-rendered for up to 3 frames) |
 | Virtualised list/grid | `focus::take_nav(ctx, scope, Axis::Vertical)` → handle by index, `request` the next item id, or `give_back_nav(ctx, dir)` at a boundary. `widgets::VirtualList` and `widgets::VirtualGrid` do it (Up/Down by index, PageUp/PageDown, scroll-to-item) |
 | Nested scroll areas | egui's inner `ScrollArea` swallows scroll targets: call `focus::forward_scroll(ui)` after an inner scroll area (Rail, VirtualList and VirtualGrid do) |
-| Modals | `focus::trap(ctx, scope)` every frame (nested scopes included); `widgets::Dialog` does it |
+| Modals | `focus::trap(ctx, scope)` every frame (nested scopes included); `widgets::Dialog` does it. When a dialog closes, `focus::request` the button that opened it (otherwise the fallback picks the screen's autofocus) |
 | Text input | `FocusOpts::text()` (Left/Right/Enter/Space go to the field; Right at the end / Left at the start move on); `widgets::TextField`/`SearchField` |
 | Keys of your own | `on_input` + `ctx.input_mut(|i| i.consume_key(..))` (runs before the engine); check `focus::text_input_focused(ctx)` first |
 | Queries | `focus::current`, `is_focused`, `is_in_scope`, `is_in_group`, `scope_memory`, `group_memory`, `pending_dir`, `clear` |
@@ -294,7 +318,11 @@ Rules and gotchas:
 - Draw the treatment exactly as `ui::paint::{focus_glow, focus_ring, focus_ring_circle}`;
   cards scale by `0.03 * f.anim` per side unless `motion::reduced(ctx)`.
 - The side rail is the *shell* group; entering it lands on the current section. Esc on a
-  root screen moves the focus to the rail.
+  root screen moves the focus to the rail. Only Left/Right cross between the rail and the
+  page (Up/Down at the bottom of a page stay put).
+- While a screen's content has nothing focusable yet (loading), the fallback does **not**
+  park the focus on the rail; it waits for the content (so Home's hero button gets the
+  initial focus), unless the user presses a key.
 
 ## 9. Dev/test harness
 
@@ -339,14 +367,17 @@ The demo provider is plain HTTP on `127.0.0.1:<random>`; to test onboarding by k
   (truncate with ellipsis to N rows), `overline`, `timecode`, `duration_short`, `remaining`.
 - **Widgets** (`ui::widgets`): `Button` (primary/secondary/ghost/danger, large/small, icon,
   trailing), `IconButton` (round; `.primary()` for the OSD play), `Chip`, `Segmented`,
-  `Toggle`, `Tabs`, `chip::tag`, `TextField` (label, password + reveal, error),
+  `Toggle`, `Tabs`, `chip::tag`, `TextField` (label, password + reveal, error; it lays out
+  label + field vertically, so wrap it in `ui.vertical` inside a horizontal row),
   `SearchField`, `Callout` (+ `Callout::unencrypted()`), `Badge::{live, live_dot, pill}`,
   `PosterCard`, `BackdropCard`, `ChannelTile`, `ChannelLogo` (plate / monogram / fallback),
   `Avatar`, `Rail` (heading + carousel, paint allowance, memory, See all), `VirtualList`,
   `VirtualGrid` (row-virtualised card grid; `columns_for(width)`),
   `MenuRow`, `SettingRow`, `Dialog` (modal, focus trap; actions right-to-left, primary
-  first), `Toasts`, `EmptyState`, `coming_soon`, `feedback::skeleton(_line)`, `PinPad`,
-  `clock::clock`.
+  first), `Toasts`, `EmptyState`, `coming_soon`, `feedback::skeleton(_line)`, `PinPad`
+  (fixed length to check a PIN; `PinPad::variable` to choose one), `PinPrompt` (loads the
+  PIN state first so a lockout shows at once, verifies off-thread; dialog or inline;
+  passes immediately when no PIN is set), `clock::clock`.
 - **More widgets** (Phase 4A): `Dropdown` (menu with focus trap; close it from `on_back`),
   `EpisodeRow` (still, progress, watched toggle), `UpNextPrompt`.
 - **VOD helpers** (`services::vod`): `display_title` (tag + trailing year split off),
@@ -385,7 +416,9 @@ reformatting existing code so parallel work merges cleanly.
   categories when the VOD "All" list isn't cached.
 - The compact breakpoint (< 960 pt) uses the collapsed rail (no top bar); the window minimum
   keeps desktop use out of it.
-- Reduced motion does not follow the Windows "Show animations" setting yet (needs a
-  platform call); it is a manual setting.
+- Window-state restore can't be exercised by the harness (it is off for `--ephemeral`, and
+  non-ephemeral runs would touch the real keychain); it is unit-tested only.
+- Search history (`services::search_history`) is stored and cleared by Settings › Storage;
+  the Search screen should record queries with `search_history::record` and show them.
 - EPG for M3U profiles uses the first `url-tvg` only.
 - The connection-limit check cannot see the HTTP status mpv got; it asks the account API.

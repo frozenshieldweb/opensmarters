@@ -60,6 +60,7 @@ use crate::playback::{MediaKind, PlaybackItem, PlaybackRequest, ZapContext, stre
 // Movies/series: watch state, mark watched, remembered categories (`session/vod.rs`).
 mod vod;
 pub use vod::SeriesWatch;
+mod pin;
 
 /// TTL of category and stream lists.
 pub const LIST_TTL: Duration = Duration::from_secs(6 * 3600);
@@ -205,6 +206,8 @@ struct ParentalState {
     matcher: Option<KeywordMatcher>,
     locks: HashMap<ContentKind, HashMap<String, CategoryLock>>,
     unlocked: HashSet<(ContentKind, String)>,
+    /// Digits of the PIN (4–8), see `services::parental::PIN_LENGTH`.
+    pin_len: usize,
 }
 
 struct MemoEntry {
@@ -1387,6 +1390,7 @@ async fn load_parental(store: &Arc<Store>, profile: ProfileId) -> AppResult<Pare
             matcher: Some(KeywordMatcher::new(keywords)),
             locks,
             unlocked: HashSet::new(),
+            pin_len: super::parental::pin_length(s),
         })
     })
     .await

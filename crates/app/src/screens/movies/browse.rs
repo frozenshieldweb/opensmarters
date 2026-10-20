@@ -306,7 +306,7 @@ impl<K: BrowseKind> Browse<K> {
             self.pin = Some(PinPrompt {
                 selection: sel,
                 name: name.to_owned(),
-                pad: PinPad::new(self.id("pin"), 4),
+                pad: PinPad::new(self.id("pin"), session.pin_length()),
                 verify: Loader::new(),
             });
             return;

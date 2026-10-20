@@ -125,6 +125,8 @@ pub struct FocusEngine {
     /// better candidate (autofocus, or content instead of the side rail) that appears
     /// later (data finished loading) takes over.
     provisional: bool,
+    /// The user pressed a key this frame (see [`FocusEngine::begin`]).
+    interacting: bool,
 }
 
 impl FocusEngine {
@@ -147,6 +149,7 @@ impl FocusEngine {
         self.pending_dir = input.dir;
         self.pending_activate = input.activate;
         self.pointer_moved = input.pointer_moved;
+        self.interacting = input.any_input || input.dir.is_some() || input.activate;
         if input.any_input {
             self.provisional = false;
         }
@@ -402,14 +405,31 @@ impl FocusEngine {
                     || self.missing_frames > MISSING_GRACE_FRAMES)
                     && let Some(fallback) = self.fallback(trap)
                 {
-                    self.current = Some(fallback.id);
-                    self.current_scope = Some(fallback.scope);
-                    self.current_group = Some(fallback.group);
-                    self.current_is_text = fallback.text;
-                    self.scroll_to = Some(fallback.id);
-                    self.missing_frames = 0;
-                    self.provisional = true;
-                    changed = true;
+                    // Patience: while the screen's content has nothing focusable yet (still
+                    // loading), don't park the focus on the side rail (it would expand over
+                    // the page and steal the screen's initial focus); wait for the content,
+                    // unless the user presses a key, which then lands on the rail.
+                    let only_avoided = trap.is_none()
+                        && self.avoid_group.is_some()
+                        && Some(fallback.group) == self.avoid_group;
+                    if only_avoided && !self.interacting {
+                        if self.current.take().is_some() {
+                            changed = true;
+                        }
+                        self.current_scope = None;
+                        self.current_group = None;
+                        self.current_is_text = false;
+                        self.missing_frames = 0;
+                    } else {
+                        self.current = Some(fallback.id);
+                        self.current_scope = Some(fallback.scope);
+                        self.current_group = Some(fallback.group);
+                        self.current_is_text = fallback.text;
+                        self.scroll_to = Some(fallback.id);
+                        self.missing_frames = 0;
+                        self.provisional = !self.interacting;
+                        changed = true;
+                    }
                 }
             }
         }
@@ -451,8 +471,15 @@ impl FocusEngine {
         if let Some(best) = best_in_direction(src.rect, dir, same.iter().copied()) {
             return Some(best.id);
         }
-        // 2. Across scopes: geometric best, then prefer the target region's memory.
-        let best = best_in_direction(src.rect, dir, pool.iter().copied())?;
+        // 2. Across scopes: geometric best, then prefer the target region's memory. Up/Down
+        //    never leave the region (the side rail is beside the page: pressing Down at the
+        //    bottom of a page must not jump into the rail's bottom items).
+        let reachable: Vec<&Candidate> = pool
+            .iter()
+            .copied()
+            .filter(|c| dir.axis() == Axis::Horizontal || c.group == src.group)
+            .collect();
+        let best = best_in_direction(src.rect, dir, reachable.iter().copied())?;
         let remembered = |mem: Option<Id>| {
             mem.and_then(|id| pool.iter().find(|c| c.id == id))
                 .filter(|c| is_in_direction(src.rect, c.rect, dir))
@@ -673,9 +700,10 @@ mod tests {
             group: Id::new("rail"),
             ..cand("nav-search", r(0.0, 0.0, 200.0, 48.0), "rail")
         };
-        // Content still loading: only the rail is focusable.
+        // Content still loading: only the rail is focusable. The engine waits instead of
+        // parking the focus on the rail (which would expand over the page).
         frame(&mut e, NavInput::default(), &[rail]);
-        assert_eq!(e.current(), Some(rail.id));
+        assert_eq!(e.current(), None);
         // Content appears: focus moves into it.
         let card = cand("card", r(300.0, 500.0, 100.0, 150.0), "rail-movies");
         frame(&mut e, NavInput::default(), &[rail, card]);
@@ -703,6 +731,101 @@ mod tests {
         };
         frame(&mut e, NavInput::default(), &[rail, card, play, late]);
         assert_eq!(e.current(), Some(card.id));
+    }
+
+    #[test]
+    fn rail_only_screen_waits_until_a_key_is_pressed() {
+        let mut e = FocusEngine::new();
+        e.set_fallback_avoid_group(Some(Id::new("rail")));
+        let rail = Candidate {
+            group: Id::new("rail"),
+            ..cand("nav-search", r(0.0, 0.0, 200.0, 48.0), "rail")
+        };
+        for _ in 0..10 {
+            frame(&mut e, NavInput::default(), &[rail]);
+            assert_eq!(e.current(), None);
+        }
+        // Any key: the user wants to do something, so the rail gets the focus (for good).
+        frame(
+            &mut e,
+            NavInput {
+                dir: Some(Dir::Down),
+                any_input: true,
+                ..Default::default()
+            },
+            &[rail],
+        );
+        assert_eq!(e.current(), Some(rail.id));
+        let play = Candidate {
+            autofocus: true,
+            ..cand("play", r(300.0, 400.0, 100.0, 44.0), "hero")
+        };
+        frame(&mut e, NavInput::default(), &[rail, play]);
+        assert_eq!(
+            e.current(),
+            Some(rail.id),
+            "a chosen rail focus is not stolen"
+        );
+    }
+
+    #[test]
+    fn up_down_never_jump_between_rail_and_page() {
+        let mut e = FocusEngine::new();
+        let rail_settings = Candidate {
+            group: Id::new("rail"),
+            ..cand("nav-settings", r(0.0, 900.0, 200.0, 48.0), "rail")
+        };
+        let rail_home = Candidate {
+            group: Id::new("rail"),
+            ..cand("nav-home", r(0.0, 100.0, 200.0, 48.0), "rail")
+        };
+        let last = Candidate {
+            autofocus: true,
+            ..cand("last-button", r(300.0, 600.0, 120.0, 44.0), "page")
+        };
+        let cands = [rail_home, rail_settings, last];
+        frame(&mut e, NavInput::default(), &cands);
+        assert_eq!(e.current(), Some(last.id));
+        frame(
+            &mut e,
+            NavInput {
+                dir: Some(Dir::Down),
+                ..Default::default()
+            },
+            &cands,
+        );
+        assert_eq!(e.current(), Some(last.id), "Down at the bottom stays put");
+        frame(
+            &mut e,
+            NavInput {
+                dir: Some(Dir::Left),
+                ..Default::default()
+            },
+            &cands,
+        );
+        assert!(
+            e.current() == Some(rail_home.id) || e.current() == Some(rail_settings.id),
+            "Left still reaches the rail"
+        );
+    }
+
+    #[test]
+    fn hero_autofocus_wins_over_rail_when_it_loads_last() {
+        let mut e = FocusEngine::new();
+        e.set_fallback_avoid_group(Some(Id::new("rail")));
+        let rail = Candidate {
+            group: Id::new("rail"),
+            ..cand("nav-search", r(0.0, 0.0, 200.0, 48.0), "rail")
+        };
+        let play = Candidate {
+            autofocus: true,
+            ..cand("play", r(300.0, 400.0, 100.0, 44.0), "hero")
+        };
+        for _ in 0..5 {
+            frame(&mut e, NavInput::default(), &[rail]);
+        }
+        frame(&mut e, NavInput::default(), &[rail, play]);
+        assert_eq!(e.current(), Some(play.id));
     }
 
     #[test]

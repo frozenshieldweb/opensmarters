@@ -70,6 +70,19 @@ pub fn start(rt: &tokio::runtime::Runtime, store: &Store, set_pin: bool) -> anyh
             .profiles()
             .set_epg_url_override(profile.id, Some(&url))?;
     }
+    // Dev only: `OPENSMARTERS_DEMO_MAX_STREAMS=4` sets the profile's "simultaneous
+    // streams" override (the demo account allows 2), e.g. to try multiscreen with 1, 3 or
+    // 4 tiles.
+    if let Some(n) = std::env::var("OPENSMARTERS_DEMO_MAX_STREAMS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u8>().ok())
+        .filter(|n| *n > 0)
+    {
+        use crate::services::connections::MAX_STREAMS_OVERRIDE;
+        let mut limits = store.settings().get(&MAX_STREAMS_OVERRIDE)?;
+        limits.insert(profile.id.to_string(), n);
+        store.settings().set(&MAX_STREAMS_OVERRIDE, &limits)?;
+    }
     tracing::info!("demo provider running on 127.0.0.1:{}", panel.port());
     Ok(Demo {
         panel,

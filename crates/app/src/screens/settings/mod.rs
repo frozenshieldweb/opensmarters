@@ -38,6 +38,7 @@ use super::{AppCtx, Screen};
 use crate::focus;
 use crate::nav::{Section, SettingsPage};
 use crate::ui::icons;
+use crate::ui::layout::Breakpoint;
 use crate::ui::theme::{color, font};
 use crate::ui::widgets::MenuRow;
 
@@ -223,12 +224,18 @@ impl Screen for SettingsScreen {
             self.page_mut(p).on_enter(cx);
         }
 
-        // Detail pane.
+        // Detail pane: up to 760 pt, 880 on wide windows (rows stay readable, the page
+        // doesn't look sparse at 1920).
         let left = pane.right() + 48.0;
+        let max_w = if cx.layout.breakpoint == Breakpoint::Wide {
+            880.0
+        } else {
+            760.0
+        };
         let detail = Rect::from_min_max(
             pos2(left, content.top() + 104.0),
             pos2(
-                (left + 760.0).min(content.right() - cx.layout.margin),
+                (left + max_w).min(content.right() - cx.layout.margin),
                 content.bottom() - 24.0,
             ),
         );

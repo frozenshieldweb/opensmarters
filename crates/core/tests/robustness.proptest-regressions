@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 5620e4fb9e8ec040cb4b1d8387bfcfb3ee2e1c72cc3ef706ce9f9c9e45e967d1 # shrinks to user = ".", pass = "pw~", id = 0
+cc 204e145e05bda8252a190053b45eeaff395143eb6911e50d2e4dc2d2852cdb75 # rating precision (reported by phase-7d)

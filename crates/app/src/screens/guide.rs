@@ -25,28 +25,28 @@ use std::sync::Arc;
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, Id, Key, Modifiers, Rect, Sense, Stroke, Ui, pos2, vec2,
 };
-use opensmarters_core::CategoryId;
-use opensmarters_core::catalog::{CategorySelection, SortOrder, sorted_indices};
+use opensmarters_core::catalog::{CategorySelection, SortOrder};
 use opensmarters_core::chrono::{DateTime, Datelike, Duration, Local, Utc};
-use opensmarters_store::{ContentKind, PinOutcome};
+use opensmarters_store::ContentKind;
 
+use super::common::channel_list;
 use super::{AppCtx, Screen, shell};
-use crate::error::AppError;
 use crate::focus::{self, Axis, Dir, FocusOpts};
 use crate::nav::Section;
 use crate::playback::ZapContext;
 use crate::services::catalog::{LiveCatalog, LiveChannel, Programme, split_tag};
-use crate::services::session::guide::{EpgRow, RowState, XmltvStatus};
+use crate::services::session::guide::{RowState, XmltvStatus};
 use crate::services::{ImageSize, Session};
 use crate::task::Loader;
-use crate::ui::assets::{self, Asset, Illustration};
+use crate::ui::assets::Illustration;
 use crate::ui::icons::{self, Style};
 use crate::ui::theme::{color, font, radius};
 use crate::ui::widgets::callout::Badge;
+use crate::ui::widgets::chip::ChipRow;
 use crate::ui::widgets::feedback::skeleton;
 use crate::ui::widgets::{
-    Button, Callout, CalloutKind, ChannelLogo, Chip, Dialog, EmptyState, IconButton, PinPad,
-    PinPadEvent,
+    Button, Callout, CalloutKind, ChannelLogo, Chip, Dialog, EmptyState, IconButton, PinPrompt,
+    PinPromptResult,
 };
 use crate::ui::{motion, paint, text};
 use layout::{
@@ -67,6 +67,14 @@ fn cell_id(key: &str, start: Option<i64>) -> Id {
     Id::unique(("guide.cell", key, start))
 }
 
+fn chip_id(sel: &CategorySelection) -> Id {
+    match sel {
+        CategorySelection::All => Id::unique("guide.chip.all"),
+        CategorySelection::Favourites => Id::unique("guide.chip.favs"),
+        CategorySelection::Category(id) => Id::unique(("guide.chip", id.as_str())),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Focused {
     row: usize,
@@ -83,12 +91,28 @@ struct ListKey {
     parental: bool,
 }
 
+/// The PIN asked for before a locked category opens.
 #[derive(Debug)]
-struct PinPrompt {
+struct PinGate {
+    prompt: PinPrompt,
     selection: CategorySelection,
     name: String,
-    pad: PinPad,
-    verify: Loader<PinOutcome>,
+}
+
+/// The focused cell, painted after every other cell (§6.2 / §9.4): the next row would
+/// otherwise cover the bottom of its ring and glow.
+#[derive(Debug, Clone)]
+enum FocusedPaint {
+    Cell {
+        rect: Rect,
+        programme: Programme,
+        anim: f32,
+        /// The channel's key (Phase 7 reminder/recording marks).
+        key: String,
+    },
+    Placeholder {
+        rect: Rect,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -116,7 +140,7 @@ pub struct GuideScreen {
     cursor: Option<DateTime<Utc>>,
     body_h: f32,
     view_secs: f64,
-    pin: Option<PinPrompt>,
+    pin: Option<PinGate>,
     details: Option<Details>,
 }
 
@@ -184,29 +208,18 @@ impl GuideScreen {
         if self.list_key.as_ref() == Some(&key) {
             return;
         }
-        let parental = key.parental;
-        let picked: Vec<&LiveChannel> = cat
+        let picked = cat
             .select(&self.selection, &favs)
             .into_iter()
-            .filter_map(|i| cat.channels.get(i))
-            .filter(|c| {
-                !parental
-                    || self.selection.server_category().is_some()
-                    || !c.categories.iter().any(|id| {
-                        session.is_category_locked(
-                            ContentKind::Live,
-                            id,
-                            cat.category_name(id).unwrap_or(""),
-                        )
-                    })
-            })
-            .collect();
-        let owned: Vec<LiveChannel> = picked.into_iter().cloned().collect();
-        let order = sorted_indices(&owned, SortOrder::NumberAsc);
-        let sorted: Vec<LiveChannel> = order
-            .into_iter()
-            .filter_map(|i| owned.get(i).cloned())
-            .collect();
+            .filter_map(|i| cat.channels.get(i));
+        // Locked categories stay out of All/Favourites; a category opened with the PIN
+        // shows all of its channels.
+        let list = if self.selection.server_category().is_some() {
+            channel_list::unlocked(picked, None)
+        } else {
+            channel_list::unlocked_in_session(session, cat, picked)
+        };
+        let sorted = channel_list::sorted(list, SortOrder::NumberAsc);
         let changed_selection = self
             .list_key
             .as_ref()
@@ -223,52 +236,14 @@ impl GuideScreen {
     fn select(&mut self, cx: &mut AppCtx<'_>, sel: CategorySelection, name: &str) {
         let Some(session) = cx.session() else { return };
         if session.is_selection_locked(ContentKind::Live, &sel, name) {
-            self.pin = Some(PinPrompt {
+            self.pin = Some(PinGate {
+                prompt: PinPrompt::new(Id::unique("guide.pin")),
                 selection: sel,
                 name: name.to_owned(),
-                pad: PinPad::new(Id::unique("guide.pin"), session.pin_length()),
-                verify: Loader::new(),
             });
             return;
         }
         self.selection = sel;
-    }
-
-    fn poll_pin(&mut self, cx: &mut AppCtx<'_>) {
-        let Some(p) = &mut self.pin else { return };
-        if !p.verify.poll() {
-            if let Some(e) = p.verify.error().cloned() {
-                p.pad.set_wrong(e.user_message());
-                p.verify = Loader::new();
-            }
-            return;
-        }
-        match p.verify.take() {
-            Some(PinOutcome::Ok) => {
-                if let (Some(session), CategorySelection::Category(id)) =
-                    (cx.session(), &p.selection)
-                {
-                    session.unlock_category(ContentKind::Live, id);
-                }
-                self.selection = p.selection.clone();
-                self.pin = None;
-                self.list_key = None;
-            }
-            Some(PinOutcome::Wrong {
-                remaining_before_lockout,
-            }) => {
-                p.pad.set_wrong(if remaining_before_lockout == 1 {
-                    "Wrong PIN. 1 attempt left".to_owned()
-                } else {
-                    format!("Wrong PIN. {remaining_before_lockout} attempts left")
-                });
-            }
-            Some(PinOutcome::LockedOut { until }) => {
-                let now = opensmarters_store::Timestamp::now();
-                p.pad.set_locked_until(until.duration_since(now));
-            }
-            None => {}
-        }
     }
 
     /// Puts the focus back on the grid cell it was on (after a dialog closes).
@@ -489,7 +464,12 @@ impl Screen for GuideScreen {
     }
 
     fn on_back(&mut self, cx: &mut AppCtx<'_>) -> bool {
-        let closed = self.pin.take().is_some() || self.details.take().is_some();
+        if let Some(g) = self.pin.take() {
+            // Back to the chip that asked for the PIN.
+            focus::request(&cx.egui, chip_id(&g.selection));
+            return true;
+        }
+        let closed = self.details.take().is_some();
         if closed {
             self.restore_grid_focus(cx);
         }
@@ -502,7 +482,6 @@ impl Screen for GuideScreen {
 
     fn ui(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui) {
         self.catalog.poll();
-        self.poll_pin(cx);
         let Some(session) = cx.session() else { return };
         if !self.initialized {
             self.view_start = Self::now_view(cx.now);
@@ -618,8 +597,13 @@ impl GuideScreen {
         catalog: Option<&LiveCatalog>,
         rect: Rect,
     ) {
-        // Time controls on the right.
-        let ctl_w = 44.0 * 4.0 + 8.0 * 4.0 + 92.0;
+        // Time controls on the right, measured so the chips always end before them.
+        let now_button = Button::secondary("Now")
+            .icon(icons::CLOCK)
+            .small()
+            .id(Id::unique("guide.now"));
+        let gap = 8.0;
+        let ctl_w = 44.0 * 4.0 + gap * 4.0 + now_button.size(ui).x + 8.0;
         let ctl = Rect::from_min_max(pos2(rect.right() - ctl_w, rect.top()), rect.max);
         let mut child = ui.new_child(
             egui::UiBuilder::new()
@@ -629,7 +613,8 @@ impl GuideScreen {
         let mut shift: Option<f64> = None;
         let mut now = false;
         focus::scope(&mut child, Id::unique("guide.time-ctl"), |ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.add_space(8.0);
             if IconButton::new(icons::CARET_DOUBLE_LEFT)
                 .id(Id::unique("guide.day-back"))
                 .show(ui)
@@ -644,13 +629,7 @@ impl GuideScreen {
             {
                 shift = Some(-7200.0);
             }
-            if Button::secondary("Now")
-                .icon(icons::CLOCK)
-                .small()
-                .id(Id::unique("guide.now"))
-                .show(ui)
-                .activated
-            {
+            if now_button.show(ui).activated {
                 now = true;
             }
             if IconButton::new(icons::CARET_RIGHT)
@@ -676,60 +655,47 @@ impl GuideScreen {
             self.cursor = Some(cx.now);
         }
 
-        // Category chips.
+        // Category chips (they fade out before the time controls when there are more).
         let Some(cat) = catalog else { return };
-        let chips = Rect::from_min_max(rect.min, pos2(ctl.left() - 16.0, rect.bottom()));
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(chips));
+        let chips = Rect::from_min_max(rect.min, pos2(ctl.left(), rect.bottom()));
         let mut picked: Option<(CategorySelection, String)> = None;
         let selection = self.selection.clone();
-        focus::scope(&mut child, Id::unique("guide.chips"), |ui| {
-            egui::ScrollArea::horizontal()
-                .id_salt("guide.chips.scroll")
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .content_margin(egui::Margin::symmetric(8, 8))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        if Chip::new("All")
-                            .selected(selection == CategorySelection::All)
-                            .id(Id::unique("guide.chip.all"))
-                            .show(ui)
-                            .activated
-                        {
-                            picked = Some((CategorySelection::All, "All".into()));
-                        }
-                        if Chip::new("Favourites")
-                            .selected(selection == CategorySelection::Favourites)
-                            .id(Id::unique("guide.chip.favs"))
-                            .show(ui)
-                            .activated
-                        {
-                            picked = Some((CategorySelection::Favourites, "Favourites".into()));
-                        }
-                        for c in &cat.categories {
-                            if cat.count(&c.id) == 0 {
-                                continue;
-                            }
-                            let sel = CategorySelection::Category(c.id.clone());
-                            let label =
-                                if session.is_category_locked(ContentKind::Live, &c.id, &c.name) {
-                                    format!("{} {}", icons::LOCK_SIMPLE, c.name)
-                                } else {
-                                    c.name.clone()
-                                };
-                            if Chip::new(label)
-                                .selected(selection == sel)
-                                .id(Id::unique(("guide.chip", c.id.as_str())))
-                                .show(ui)
-                                .activated
-                            {
-                                picked = Some((sel, c.name.clone()));
-                            }
-                        }
-                    });
-                });
+        focus::scope(ui, Id::unique("guide.chips"), |ui| {
+            ChipRow::new(Id::unique("guide.chips.row")).show(ui, chips, |ui| {
+                for (sel, name) in [
+                    (CategorySelection::All, "All"),
+                    (CategorySelection::Favourites, "Favourites"),
+                ] {
+                    if Chip::new(name)
+                        .selected(selection == sel)
+                        .id(chip_id(&sel))
+                        .show(ui)
+                        .activated
+                    {
+                        picked = Some((sel, name.into()));
+                    }
+                }
+                for c in &cat.categories {
+                    if cat.count(&c.id) == 0 {
+                        continue;
+                    }
+                    let sel = CategorySelection::Category(c.id.clone());
+                    let label = if session.is_category_locked(ContentKind::Live, &c.id, &c.name) {
+                        format!("{} {}", icons::LOCK_SIMPLE, c.name)
+                    } else {
+                        c.name.clone()
+                    };
+                    if Chip::new(label)
+                        .selected(selection == sel)
+                        .id(chip_id(&sel))
+                        .show(ui)
+                        .activated
+                    {
+                        picked = Some((sel, c.name.clone()));
+                    }
+                }
+            });
         });
-        focus::forward_scroll(&child);
         if let Some((sel, name)) = picked {
             self.select(cx, sel, &name);
         }
@@ -869,7 +835,7 @@ impl GuideScreen {
         let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body));
         body_ui.set_clip_rect(body);
         let cell_painter = painter.with_clip_rect(body);
-        let ring_painter = painter.with_clip_rect(body.expand(6.0));
+        let mut focused_paint: Option<FocusedPaint> = None;
         let chan_clip = Rect::from_min_max(
             pos2(rect.left(), body.top()),
             pos2(body.left(), body.bottom()),
@@ -984,7 +950,6 @@ impl GuideScreen {
                             if let Some((f, act)) = placeholder_cell(
                                 ui,
                                 &cell_painter,
-                                &ring_painter,
                                 ch,
                                 r,
                                 "No information for this time",
@@ -995,6 +960,7 @@ impl GuideScreen {
                                     activated = Some((ri, None));
                                 }
                                 if f {
+                                    focused_paint = Some(FocusedPaint::Placeholder { rect: r });
                                     newly_focused = Some((
                                         Focused {
                                             row: ri,
@@ -1024,27 +990,27 @@ impl GuideScreen {
                                 r,
                                 FocusOpts::default().autofocus_if(autofocus),
                             );
-                            paint_cell(
-                                &cell_painter,
-                                &ring_painter,
-                                r,
-                                body,
-                                p,
-                                now,
-                                f.focused,
-                                &axis,
-                                cx.prefs,
-                            );
-                            // Phase 7 C: reminder bell / recording dot.
-                            crate::services::reminders::paint_cell_marks(
-                                &cell_painter,
-                                &cx.alerts.reminders,
-                                &ch.key,
-                                p,
-                                r.intersect(body),
-                                f.focused,
-                                now,
-                            );
+                            if f.focused {
+                                // Painted last, over its neighbours.
+                                focused_paint = Some(FocusedPaint::Cell {
+                                    rect: r,
+                                    programme: p.clone(),
+                                    anim: f.anim,
+                                    key: ch.key.clone(),
+                                });
+                            } else {
+                                paint_cell(&cell_painter, r, body, p, now, false, &axis, cx.prefs);
+                                // Phase 7 C: reminder bell / recording dot.
+                                crate::services::reminders::paint_cell_marks(
+                                    &cell_painter,
+                                    &cx.alerts.reminders,
+                                    &ch.key,
+                                    p,
+                                    r.intersect(body),
+                                    false,
+                                    now,
+                                );
+                            }
                             if f.focused {
                                 newly_focused = Some((
                                     Focused {
@@ -1077,7 +1043,6 @@ impl GuideScreen {
                         if let Some((f, act)) = placeholder_cell(
                             ui,
                             &cell_painter,
-                            &ring_painter,
                             ch,
                             r,
                             if loading {
@@ -1092,6 +1057,7 @@ impl GuideScreen {
                                 activated = Some((ri, None));
                             }
                             if f {
+                                focused_paint = Some(FocusedPaint::Placeholder { rect: r });
                                 newly_focused = Some((
                                     Focused {
                                         row: ri,
@@ -1109,11 +1075,54 @@ impl GuideScreen {
         if let Some((row, key, start)) = retarget {
             self.focus_cell(cx, row, &key, start);
         }
+        // The focused cell over its neighbours: glow → cell → now-line → ring (the ring
+        // is the brightest thing on screen and must not be cut by the next row).
+        let ring_rect = match &focused_paint {
+            Some(FocusedPaint::Cell {
+                rect: r,
+                programme,
+                anim,
+                key,
+            }) => {
+                let visible = r.intersect(body);
+                if *anim > 0.0 && visible.is_positive() {
+                    paint::focus_glow(&cell_painter, visible, radius::SM, *anim);
+                }
+                paint_cell(
+                    &cell_painter,
+                    *r,
+                    body,
+                    programme,
+                    now,
+                    true,
+                    &axis,
+                    cx.prefs,
+                );
+                // Phase 7 C: reminder bell / recording dot.
+                crate::services::reminders::paint_cell_marks(
+                    &cell_painter,
+                    &cx.alerts.reminders,
+                    key,
+                    programme,
+                    visible,
+                    true,
+                    now,
+                );
+                Some(visible)
+            }
+            Some(FocusedPaint::Placeholder { rect: r }) => Some(r.intersect(body)),
+            None => None,
+        };
         // Now-line.
         let nx = axis.x(now);
         if body.x_range().contains(nx) {
             painter.vline(nx, body.y_range(), Stroke::new(2.0, color::LIVE));
             painter.circle_filled(pos2(nx, ruler.bottom() - 3.0), 3.0, color::LIVE);
+        }
+        if let Some(r) = ring_rect.filter(|r| r.is_positive()) {
+            // 6 pt of ring outside the cell may cross the ruler or the channel column.
+            let ring_painter = painter.with_clip_rect(body.expand(6.0));
+            paint::focus_ring(&ring_painter, r, radius::SM, 1.0);
         }
         if let Some((f, p)) = newly_focused {
             if self.focus.as_ref() != Some(&f) {
@@ -1339,45 +1348,29 @@ impl GuideScreen {
                 self.play_live(cx, session, d.index);
             }
         }
-        if let Some(p) = &mut self.pin {
-            let title = format!("\u{201c}{}\u{201d} is locked", text::cap(&p.name, 40));
-            let mut submitted = None;
-            let mut cancel = false;
-            Dialog::new(Id::unique("guide.pin.dialog"), "")
-                .width(440.0)
-                .show_custom(ui.ctx(), |ui| {
-                    ui.vertical_centered(|ui| {
-                        let painter = ui.painter().clone();
-                        let (ir, _) = ui.allocate_exact_size(vec2(96.0, 96.0), Sense::hover());
-                        assets::paint_contain(
-                            ui,
-                            &painter,
-                            Asset::Illustration(Illustration::ParentalLock),
-                            ir,
-                            Color32::WHITE,
-                        );
-                        ui.add_space(8.0);
-                        if let PinPadEvent::Submitted(pin) = p.pad.show(ui, &title) {
-                            submitted = Some(pin);
-                        }
-                        ui.add_space(12.0);
-                        if Button::ghost("Cancel")
-                            .id(Id::unique("guide.pin.cancel"))
-                            .show(ui)
-                            .activated
-                        {
-                            cancel = true;
-                        }
-                    });
-                });
-            if let Some(pin) = submitted {
-                let store = cx.services.store.clone();
-                p.verify.start_blocking(cx.rt(), &cx.egui, move || {
-                    store.parental().verify_pin(&pin).map_err(AppError::from)
-                });
-            }
-            if cancel {
-                self.pin = None;
+        if let Some(g) = &mut self.pin {
+            let title = format!("\u{201c}{}\u{201d} is locked", text::cap(&g.name, 40));
+            match g.prompt.show_dialog(
+                ui.ctx(),
+                cx.services,
+                &title,
+                Some("Its channels stay unlocked until you close opensmarters."),
+            ) {
+                PinPromptResult::Verified(_) => {
+                    if let CategorySelection::Category(id) = &g.selection {
+                        session.unlock_category(ContentKind::Live, id);
+                    }
+                    let sel = g.selection.clone();
+                    focus::request(&cx.egui, chip_id(&sel));
+                    self.selection = sel;
+                    self.pin = None;
+                    self.list_key = None;
+                }
+                PinPromptResult::Cancelled | PinPromptResult::Forgot => {
+                    focus::request(&cx.egui, chip_id(&g.selection));
+                    self.pin = None;
+                }
+                PinPromptResult::Pending => {}
             }
         }
     }
@@ -1492,12 +1485,11 @@ fn weekday(w: opensmarters_core::chrono::Weekday) -> &'static str {
     }
 }
 
-/// A row-wide placeholder cell (loading / no guide). Returns `(focused, activated)`.
-#[allow(clippy::too_many_arguments)]
+/// A row-wide placeholder cell (loading / no guide). Returns `(focused, activated)`; the
+/// caller paints the ring last.
 fn placeholder_cell(
     ui: &mut Ui,
     painter: &egui::Painter,
-    ring: &egui::Painter,
     ch: &LiveChannel,
     r: Rect,
     label: &str,
@@ -1529,16 +1521,13 @@ fn placeholder_cell(
         font::caption(),
         color::TEXT_3,
     );
-    if f.focused {
-        paint::focus_ring(ring, r.intersect(painter.clip_rect()), radius::SM, 1.0);
-    }
     Some((f.focused, f.activated))
 }
 
+/// Paints a programme cell (the caller paints the focus glow before and the ring after).
 #[allow(clippy::too_many_arguments)]
 fn paint_cell(
     painter: &egui::Painter,
-    ring: &egui::Painter,
     r: Rect,
     body: Rect,
     p: &Programme,
@@ -1626,10 +1615,4 @@ fn paint_cell(
             );
         }
     }
-    if focused {
-        paint::focus_ring(ring, visible, radius::SM, 1.0);
-    }
 }
-
-#[allow(dead_code)]
-fn _row_types(_: &EpgRow, _: &CategoryId) {}

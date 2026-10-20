@@ -9,18 +9,34 @@
 //!   [`lockout_text`]).
 //! - "Forgot PIN": [`verify_account_secret`] checks that the person knows the password of
 //!   one of this computer's Xtream accounts (or the address of an M3U playlist), compared
-//!   in constant time against the keychain, rate-limited in memory by [`ResetLimiter`].
-//!   Only then may the app call `force_remove_pin`. This stops a child at the keyboard;
-//!   like any local control, it does not stop someone who can delete the app's data.
+//!   in constant time against the keychain, rate-limited by [`ResetLimiter`]. Only then
+//!   may the app call `force_remove_pin`. [`forgot_pin_attempt`] does all of it in one
+//!   blocking call with the limiter **persisted in the store** ([`RESET_LIMITER`], SR-14),
+//!   so restarting the app gives no new tries. This stops a child at the keyboard; like
+//!   any local control, it does not stop someone who can delete the app's data.
 
 use std::time::{Duration, Instant};
 
 use opensmarters_core::secrecy::{ExposeSecret, SecretString};
 use opensmarters_store::settings::Setting;
 use opensmarters_store::{ProfileSource, Store, StoreError, Timestamp};
+use serde::{Deserialize, Serialize};
 
 /// Number of digits of the current PIN (4–8). Default 4 (older databases, the demo PIN).
 pub const PIN_LENGTH: Setting<u8> = Setting::new("app.parental.pin_length", || 4);
+
+/// The persisted "forgot PIN" limiter (machine-local: never exported, ignored on import).
+pub const RESET_LIMITER: Setting<ResetLimiterState> =
+    Setting::new("app.parental.reset_limiter", ResetLimiterState::default);
+
+/// What [`RESET_LIMITER`] stores.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResetLimiterState {
+    /// Failed tries since the last success.
+    pub failures: u32,
+    /// No try before this wall-clock time (Unix ms); 0 = no wait.
+    pub locked_until_ms: i64,
+}
 
 /// Shortest PIN.
 pub const MIN_PIN: usize = 4;
@@ -146,8 +162,10 @@ pub fn verify_account_secret(
     })
 }
 
-/// In-memory rate limit for "forgot PIN" attempts: [`ResetLimiter::MAX_TRIES`] tries,
-/// then a wait that doubles each time (60 s, 120 s, … up to 1 h).
+/// Rate limit for "forgot PIN" attempts: [`ResetLimiter::MAX_TRIES`] tries, then a wait
+/// that doubles each time (60 s, 120 s, … up to 1 h). The screen keeps one in memory for
+/// the countdown; [`forgot_pin_attempt`] loads and saves the authoritative copy from the
+/// store ([`ResetLimiter::load`] / [`ResetLimiter::save`]).
 #[derive(Debug, Default)]
 pub struct ResetLimiter {
     failures: u32,
@@ -157,6 +175,64 @@ pub struct ResetLimiter {
 impl ResetLimiter {
     /// Free tries before the first wait.
     pub const MAX_TRIES: u32 = 3;
+    /// Longest wait.
+    pub const MAX_WAIT: Duration = Duration::from_secs(3600);
+
+    /// The limiter as persisted, converted to this process's clock. A wait never comes
+    /// back longer than [`ResetLimiter::MAX_WAIT`] (moving the clock backwards cannot
+    /// lengthen it).
+    pub fn from_state(state: ResetLimiterState, now_wall: Timestamp, now: Instant) -> Self {
+        let until = Timestamp::from_unix_millis(state.locked_until_ms);
+        let left = remaining_until(until, now_wall).min(Self::MAX_WAIT);
+        Self {
+            failures: state.failures,
+            locked_until: (!left.is_zero()).then(|| now + left),
+        }
+    }
+
+    /// What to persist.
+    pub fn to_state(&self, now_wall: Timestamp, now: Instant) -> ResetLimiterState {
+        let left = self
+            .locked_until
+            .and_then(|t| t.checked_duration_since(now))
+            .unwrap_or_default();
+        ResetLimiterState {
+            failures: self.failures,
+            locked_until_ms: if left.is_zero() {
+                0
+            } else {
+                now_wall.saturating_add(left).as_unix_millis()
+            },
+        }
+    }
+
+    /// Reads the persisted limiter.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
+    pub fn load(store: &Store) -> Result<Self, StoreError> {
+        let state = store.settings().get(&RESET_LIMITER)?;
+        Ok(Self::from_state(state, store.clock().now(), Instant::now()))
+    }
+
+    /// Persists the limiter.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
+    pub fn save(&self, store: &Store) -> Result<(), StoreError> {
+        store.settings().set(
+            &RESET_LIMITER,
+            &self.to_state(store.clock().now(), Instant::now()),
+        )
+    }
+
+    /// Mirrors a wait reported by [`forgot_pin_attempt`] (for the countdown).
+    pub fn wait_for(&mut self, wait: Duration, now: Instant) {
+        self.failures = self.failures.max(Self::MAX_TRIES);
+        self.locked_until = Some(now + wait.min(Self::MAX_WAIT));
+    }
 
     /// Time left before the next try is allowed.
     pub fn wait(&self, now: Instant) -> Option<Duration> {
@@ -179,6 +255,55 @@ impl ResetLimiter {
     pub fn succeeded(&mut self) {
         *self = Self::default();
     }
+}
+
+/// Result of [`forgot_pin_attempt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForgotPinResult {
+    /// The text was checked ([`ResetProof::Matched`]: the PIN is removed).
+    Checked(ResetProof),
+    /// Too many tries: nothing was checked; try again after this long.
+    Wait(Duration),
+}
+
+/// "Forgot PIN" in one blocking call (off the UI thread): refuses while the persisted
+/// limiter says wait; otherwise checks `attempt` ([`verify_account_secret`]), removes the
+/// PIN when it matches, and records the failure or success in the store — so the limit
+/// survives restarts (SR-14).
+///
+/// # Errors
+///
+/// Database or keychain errors.
+pub fn forgot_pin_attempt(
+    store: &Store,
+    attempt: &SecretString,
+) -> Result<ForgotPinResult, StoreError> {
+    let now = Instant::now();
+    let mut limiter = ResetLimiter::load(store)?;
+    if let Some(wait) = limiter.wait(now) {
+        return Ok(ForgotPinResult::Wait(wait));
+    }
+    let proof = verify_account_secret(store, attempt)?;
+    match proof {
+        ResetProof::Matched => {
+            limiter.succeeded();
+            store.parental().force_remove_pin()?;
+            set_pin_length(store, None)?;
+        }
+        ResetProof::NoMatch => limiter.failed(now),
+        ResetProof::NothingToCheck => {}
+    }
+    limiter.save(store)?;
+    Ok(ForgotPinResult::Checked(proof))
+}
+
+/// The persisted "forgot PIN" wait, if any (to show the countdown when the dialog opens).
+///
+/// # Errors
+///
+/// Database errors.
+pub fn forgot_pin_wait(store: &Store) -> Result<Option<Duration>, StoreError> {
+    Ok(ResetLimiter::load(store)?.wait(Instant::now()))
 }
 
 #[cfg(test)]
@@ -301,6 +426,77 @@ mod tests {
         assert_eq!(l.wait(t0), Some(Duration::from_secs(120)));
         l.succeeded();
         assert!(l.wait(t0).is_none());
+    }
+
+    #[test]
+    fn forgot_pin_limit_survives_a_restart() {
+        let clock = Arc::new(opensmarters_store::ManualClock::new(
+            Timestamp::from_unix_millis(1_000_000),
+        ));
+        let s = Store::open(
+            StoreOptions::in_memory()
+                .with_clock(clock.clone())
+                .with_pin_hash(opensmarters_store::PinHashParams {
+                    m_cost_kib: 64,
+                    t_cost: 1,
+                    p_cost: 1,
+                }),
+            Arc::new(MemorySecretStore::new()),
+        )
+        .unwrap();
+        s.profiles()
+            .create(NewProfile {
+                name: "Home".into(),
+                source: NewProfileSource::Xtream {
+                    server_url: "http://panel.example.invalid".into(),
+                    username: "demo".into(),
+                    password: SecretString::from("synthetic-pass-2"),
+                },
+                settings: ProfileSettings::default(),
+            })
+            .unwrap();
+        s.parental().set_pin(&SecretString::from("1234")).unwrap();
+        let wrong = SecretString::from("nope");
+        for _ in 0..ResetLimiter::MAX_TRIES {
+            assert_eq!(
+                forgot_pin_attempt(&s, &wrong).unwrap(),
+                ForgotPinResult::Checked(ResetProof::NoMatch)
+            );
+        }
+        // "Restart": nothing in memory, the wait comes from the store.
+        let wait = forgot_pin_wait(&s).unwrap().unwrap();
+        assert!(wait > Duration::from_secs(55) && wait <= Duration::from_secs(60));
+        let right = SecretString::from("synthetic-pass-2");
+        assert!(matches!(
+            forgot_pin_attempt(&s, &right).unwrap(),
+            ForgotPinResult::Wait(_)
+        ));
+        assert!(s.parental().is_pin_set().unwrap(), "refused while waiting");
+        clock.advance(Duration::from_secs(61));
+        assert_eq!(
+            forgot_pin_attempt(&s, &right).unwrap(),
+            ForgotPinResult::Checked(ResetProof::Matched)
+        );
+        assert!(!s.parental().is_pin_set().unwrap());
+        assert_eq!(forgot_pin_wait(&s).unwrap(), None);
+        assert_eq!(
+            s.settings().get(&RESET_LIMITER).unwrap(),
+            ResetLimiterState::default()
+        );
+    }
+
+    #[test]
+    fn persisted_wait_is_capped_when_the_clock_goes_back() {
+        let now = Instant::now();
+        let state = ResetLimiterState {
+            failures: 9,
+            locked_until_ms: 10_000_000_000,
+        };
+        let l = ResetLimiter::from_state(state, Timestamp::from_unix_millis(0), now);
+        assert_eq!(l.wait(now), Some(ResetLimiter::MAX_WAIT));
+        let back = l.to_state(Timestamp::from_unix_millis(5_000), now);
+        assert_eq!(back.failures, 9);
+        assert_eq!(back.locked_until_ms, 5_000 + 3_600_000);
     }
 
     #[test]

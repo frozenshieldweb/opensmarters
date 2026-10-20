@@ -2,13 +2,14 @@
 //! The controller's per-stream tuning state and its hooks (kept out of `mod.rs` so the
 //! controller's state machine stays small): the buffering each load gets
 //! ([`super::tuning`]), extra buffering for live channels that starve, the live rewind
-//! position ([`super::timeshift`]), the last picture held during zaps and reconnects,
-//! counters for the stream details overlay and one-shot messages for toasts.
+//! position ([`super::timeshift`]), counters for the stream details overlay and one-shot
+//! messages for toasts. (Holding the last picture during zaps and reconnects is the
+//! controller's own: `VideoView::set_hold_last_frame` + the screens' scrim.)
 //!
-//! Call sites in `mod.rs`: `start` (load the remembered channels, [`StreamState::new`]),
-//! `load_current` ([`PlaybackController::before_load`], [`prepare_load`]), `update`
-//! ([`PlaybackController::update_stream`]) and `paint_video`
-//! ([`PlaybackController::hold_frame`]).
+//! Call sites in `mod.rs`: `start` (load the remembered channels, a default
+//! [`StreamState`]),
+//! `open_stream` ([`PlaybackController::before_load`], [`prepare_load`]) and `update`
+//! ([`PlaybackController::update_stream`]).
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -18,7 +19,7 @@ use opensmarters_store::ProfileId;
 
 use super::timeshift::{self, Timeshift};
 use super::tuning::{self, Buffering, ChannelBoosts, PlayerTuning};
-use super::{Active, MediaKind, PlaybackController, PlaybackItem};
+use super::{Active, PlaybackController, PlaybackItem};
 use crate::services::prefs::CHANNEL_BUFFERING;
 use crate::services::{Services, Session};
 
@@ -45,8 +46,6 @@ pub struct StreamState {
     pub(super) tuning: StreamTuning,
     /// The channel's extra buffering level used for the current load.
     pub(super) level: u8,
-    /// Started by zapping from another live channel: hold its last picture.
-    hold_from_zap: bool,
     /// Reconnects of this item.
     reconnects: u32,
     /// Extra buffering was raised for this item already.
@@ -62,17 +61,6 @@ pub struct StreamState {
     /// Live: paused past the rewind window; say so on resume.
     past_window: bool,
     was_paused: bool,
-}
-
-impl StreamState {
-    /// State for a new item. `previous`: the kind of what played before (live to live is
-    /// a zap: the last picture stays until the next one arrives).
-    pub fn new(previous: Option<MediaKind>, next: MediaKind) -> Self {
-        Self {
-            hold_from_zap: next.is_live() && previous.is_some_and(MediaKind::is_live),
-            ..Self::default()
-        }
-    }
 }
 
 /// Counters and settings for the stream details overlay.
@@ -207,19 +195,6 @@ impl PlaybackController {
         self.ctx.request_repaint();
     }
 
-    /// Whether the last picture is held (live zap or reconnect): the video view keeps it
-    /// until the next stream shows one.
-    pub(super) fn hold_frame(&self) -> bool {
-        self.active.as_ref().is_some_and(|a| {
-            a.req.kind.is_live() && a.failed.is_none() && (a.stream.hold_from_zap || a.loaded_once)
-        })
-    }
-
-    /// Whether a held picture is on screen now (screens dim it under their status).
-    pub fn holding_frame(&self) -> bool {
-        self.hold_frame() && !self.state().has_video()
-    }
-
     /// Loads the channels with extra buffering once per controller (background).
     pub(super) fn load_boosts(&mut self, session: &Session) {
         if self.tune.boosts_requested {
@@ -245,7 +220,7 @@ impl PlaybackController {
     /// behind live (the rewind buffer goes with the old stream).
     pub(super) fn before_load(&mut self, from_resume: bool) {
         let Some(a) = &mut self.active else { return };
-        if from_resume || a.retries == 0 {
+        if from_resume || a.reconnect.attempts() == 0 {
             return;
         }
         a.stream.reconnects += 1;
@@ -358,18 +333,5 @@ impl PlaybackController {
                     s.settings().set(&CHANNEL_BUFFERING, &m)
                 });
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_live_to_live_holds_the_picture() {
-        assert!(StreamState::new(Some(MediaKind::Live), MediaKind::Live).hold_from_zap);
-        assert!(!StreamState::new(Some(MediaKind::Movie), MediaKind::Live).hold_from_zap);
-        assert!(!StreamState::new(None, MediaKind::Live).hold_from_zap);
-        assert!(!StreamState::new(Some(MediaKind::Live), MediaKind::Episode).hold_from_zap);
     }
 }

@@ -18,7 +18,7 @@ quick-xml = "0.42"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
+serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
 thiserror = "2"
 tracing = "0.1"
 unicode-normalization = "0.1"

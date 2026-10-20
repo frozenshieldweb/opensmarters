@@ -271,6 +271,30 @@ impl Route {
         })
     }
 
+    /// What a back button on the page above this one says ("‹ Movies", "‹ Home"):
+    /// the section's name, or "Back" for pages without one.
+    pub fn back_label(&self) -> &'static str {
+        match self {
+            Route::Home => "Home",
+            Route::Live { .. } => "Live TV",
+            Route::Guide => "Guide",
+            Route::Movies { .. } => "Movies",
+            Route::Series { .. } => "Series",
+            Route::Catchup { .. } => "Catch-up",
+            Route::Search { .. } => "Search",
+            Route::Favourites => "Favourites",
+            Route::Recordings { .. } => "Recordings",
+            Route::Multiscreen => "Multiscreen",
+            Route::Settings { .. } => "Settings",
+            Route::Welcome
+            | Route::Profiles
+            | Route::Onboarding { .. }
+            | Route::MovieDetail { .. }
+            | Route::SeriesDetail { .. }
+            | Route::Player(_) => "Back",
+        }
+    }
+
     /// True if the route needs an open session (everything but profiles/onboarding).
     pub fn needs_session(&self) -> bool {
         !matches!(
@@ -478,5 +502,14 @@ mod tests {
         assert!(!p.same_page(&p.clone()));
         assert_eq!(Route::Guide.section(), Some(Section::Guide));
         assert_eq!(Route::Profiles.section(), None);
+    }
+
+    #[test]
+    fn back_labels_name_the_page_below() {
+        assert_eq!(Route::Movies { category: None }.back_label(), "Movies");
+        assert_eq!(Route::Series { category: None }.back_label(), "Series");
+        assert_eq!(Route::Home.back_label(), "Home");
+        assert_eq!(Route::live().back_label(), "Live TV");
+        assert_eq!(Route::MovieDetail { stream_id: 1 }.back_label(), "Back");
     }
 }

@@ -2,16 +2,24 @@
 //! Search: one field across live channels, films, series and (cached) programme titles
 //! of the active profile.
 //!
-//! - **Off the UI thread:** the corpus (pre-normalised names) is built in a loader, and
-//!   each query (debounced 200 ms) runs on the blocking pool; a query that extends the
+//! - **Off the UI thread:** the sources are gathered in a loader and the corpus
+//!   (pre-normalised names) is built on the blocking pool **only when they changed**
+//!   (a content fingerprint, [`Sources::id`]); coming back from a detail page reuses it.
+//!   Each query (debounced 200 ms) runs on the blocking pool; a query that extends the
 //!   previous one only re-checks the previous matches ([`engine::Corpus::search`]).
+//!   Results carry the sources they index into ([`Results`]), so a rebuild can never
+//!   make old hits point into new lists.
 //! - **Plain text:** case- and diacritics-insensitive substring search, never a regex.
 //! - **Large catalogues:** films/series are searched in what is already cached (the
 //!   "All" list, or the categories opened before). The 35 000-film "All" list is only
-//!   fetched when the user asks ("Load all films to search").
+//!   fetched when the user asks ("Search all films").
 //! - **Keyboard first:** typing anywhere goes to the field; ↓ (or Enter) from the field
-//!   jumps to the first result. Recent searches (per profile, `services::search_history`; Settings › Storage clears them) show as chips.
-//! - Parental locks apply: items of locked categories are never listed.
+//!   jumps to the first result. Recent searches (per profile, `services::search_history`;
+//!   Settings › Storage clears them) show as chips while the field is empty.
+//! - **Parental locks:** items of locked categories are never listed. Every category of
+//!   an item counts (not just the primary one), and while parental control is on the
+//!   film/series category lists are loaded first (keyword locks match their names); if
+//!   they can't be, films and series are left out.
 //! - **Programmes (Phase 7):** Enter on one on air or coming up opens the Guide's actions
 //!   (Watch, Record, Remind me, Switch to it when it starts); rows show a bell for a
 //!   reminder and a red dot for a recording.
@@ -19,6 +27,7 @@
 mod engine;
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,7 +37,9 @@ use eframe::egui::{
 use opensmarters_core::chrono::{Duration as ChronoDuration, Local, Utc};
 use opensmarters_core::{Category, CategoryId, Series, VodStream};
 use opensmarters_store::ContentKind;
+use serde::de::DeserializeOwned;
 
+use super::common::{channel_list, locks};
 use super::{AppCtx, Screen, shell};
 use crate::error::AppError;
 use crate::focus::{self, FocusOpts};
@@ -76,145 +87,226 @@ pub struct ProgrammeHit {
 /// Everything searchable for the session, with the corpus.
 #[derive(Debug, Default)]
 pub struct Sources {
+    /// Fingerprint of the content: equal ids mean equal lists (and corpus).
+    id: u64,
     channels: Arc<Vec<LiveChannel>>,
     movies: Vec<VodStream>,
     series: Vec<Series>,
     programmes: Vec<ProgrammeHit>,
     movies_complete: bool,
     series_complete: bool,
-    movie_cats: (usize, usize),
-    series_cats: (usize, usize),
+    /// Parental control is on but the film/series categories couldn't be loaded: films
+    /// and series are left out rather than listed unchecked.
+    vod_withheld: bool,
     corpus: Corpus,
 }
 
-async fn gather_vod(session: &Arc<Session>) -> (Vec<VodStream>, bool, (usize, usize)) {
-    let cats = session
-        .peek_cached::<Vec<Category>>("xt:vod_categories")
-        .await;
-    let locked = |id: Option<&CategoryId>| {
-        id.is_some_and(|id| {
-            let name = cats
-                .as_ref()
-                .and_then(|c| c.iter().find(|c| &c.id == id))
-                .map_or("", |c| c.name.as_str());
-            session.is_category_locked(ContentKind::Movie, id, name)
-        })
-    };
-    if let Some(all) = session
-        .peek_cached::<Vec<VodStream>>(&vod_streams_key(None))
+impl Sources {
+    /// The content fingerprint ([`Sources::id`]).
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+/// Search results, with the sources their indices point into.
+#[derive(Debug)]
+pub struct Results {
+    sources: Arc<Sources>,
+    hits: Hits,
+}
+
+/// What a film or series list entry needs for gathering.
+trait VodItem: Clone + DeserializeOwned + Send + Sync + 'static {
+    const KIND: ContentKind;
+    const CATEGORIES_KEY: &'static str;
+    fn list_key(category: Option<&CategoryId>) -> String;
+    fn item_id(&self) -> u64;
+    fn categories(&self) -> Vec<&CategoryId>;
+}
+
+impl VodItem for VodStream {
+    const KIND: ContentKind = ContentKind::Movie;
+    const CATEGORIES_KEY: &'static str = "xt:vod_categories";
+    fn list_key(category: Option<&CategoryId>) -> String {
+        vod_streams_key(category)
+    }
+    fn item_id(&self) -> u64 {
+        self.stream_id
+    }
+    fn categories(&self) -> Vec<&CategoryId> {
+        locks::item_categories(self.category_id.as_ref(), &self.category_ids)
+    }
+}
+
+impl VodItem for Series {
+    const KIND: ContentKind = ContentKind::Series;
+    const CATEGORIES_KEY: &'static str = "xt:series_categories";
+    fn list_key(category: Option<&CategoryId>) -> String {
+        series_key(category)
+    }
+    fn item_id(&self) -> u64 {
+        self.series_id
+    }
+    fn categories(&self) -> Vec<&CategoryId> {
+        locks::item_categories(self.category_id.as_ref(), &self.category_ids)
+    }
+}
+
+/// Films or series gathered from the cache.
+#[derive(Debug)]
+struct Gathered<T> {
+    items: Vec<T>,
+    /// The "All" list was cached (everything was searched).
+    complete: bool,
+    /// Categories searched / categories known.
+    cats: (usize, usize),
+    /// Left out because the locks couldn't be checked.
+    withheld: bool,
+}
+
+impl<T> Gathered<T> {
+    /// Nothing (M3U profiles have no films/series lists).
+    fn none() -> Self {
+        Self {
+            items: Vec::new(),
+            complete: true,
+            cats: (0, 0),
+            withheld: false,
+        }
+    }
+}
+
+/// The category list of `T` for the lock check: cached, else (parental control on)
+/// loaded from the provider, because keyword locks need the names.
+async fn categories_for_locks<T: VodItem>(session: &Arc<Session>) -> Option<Arc<Vec<Category>>> {
+    if let Some(c) = session
+        .peek_cached::<Vec<Category>>(T::CATEGORIES_KEY)
         .await
     {
-        let list = all
-            .iter()
-            .filter(|v| !locked(v.category_id.as_ref()))
-            .cloned()
-            .collect();
-        return (list, true, (0, 0));
+        return Some(c);
     }
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    let mut loaded = 0;
-    let total = cats.as_ref().map_or(0, |c| c.len());
-    if let Some(cats) = &cats {
-        for c in cats.iter() {
-            if session.is_category_locked(ContentKind::Movie, &c.id, &c.name) {
-                continue;
-            }
-            if let Some(list) = session
-                .peek_cached::<Vec<VodStream>>(&vod_streams_key(Some(&c.id)))
-                .await
-            {
-                loaded += 1;
-                for v in list.iter() {
-                    if seen.insert(v.stream_id) {
-                        out.push(v.clone());
-                    }
-                }
-            }
-        }
+    if !session.parental_enabled() {
+        return None;
     }
-    (out, false, (loaded, total))
+    match T::KIND {
+        ContentKind::Series => session.series_categories().await.ok(),
+        _ => session.vod_categories().await.ok(),
+    }
 }
 
-async fn gather_series(session: &Arc<Session>) -> (Vec<Series>, bool, (usize, usize)) {
-    let cats = session
-        .peek_cached::<Vec<Category>>("xt:series_categories")
-        .await;
-    let locked = |id: Option<&CategoryId>| {
-        id.is_some_and(|id| {
-            let name = cats
-                .as_ref()
-                .and_then(|c| c.iter().find(|c| &c.id == id))
-                .map_or("", |c| c.name.as_str());
-            session.is_category_locked(ContentKind::Series, id, name)
-        })
-    };
-    if let Some(all) = session.peek_cached::<Vec<Series>>(&series_key(None)).await {
-        let list = all
-            .iter()
-            .filter(|s| !locked(s.category_id.as_ref()))
-            .cloned()
-            .collect();
-        return (list, true, (0, 0));
+async fn gather<T: VodItem>(session: &Arc<Session>) -> Gathered<T> {
+    let cats = categories_for_locks::<T>(session).await;
+    if session.parental_enabled() && cats.is_none() {
+        return Gathered {
+            items: Vec::new(),
+            complete: true,
+            cats: (0, 0),
+            withheld: true,
+        };
     }
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    let mut loaded = 0;
-    let total = cats.as_ref().map_or(0, |c| c.len());
-    if let Some(cats) = &cats {
-        for c in cats.iter() {
-            if session.is_category_locked(ContentKind::Series, &c.id, &c.name) {
-                continue;
-            }
-            if let Some(list) = session
-                .peek_cached::<Vec<Series>>(&series_key(Some(&c.id)))
-                .await
-            {
-                loaded += 1;
-                for s in list.iter() {
-                    if seen.insert(s.series_id) {
-                        out.push(s.clone());
-                    }
-                }
-            }
-        }
-    }
-    (out, false, (loaded, total))
-}
-
-/// Collects everything searchable (cache only, except the live catalogue) and builds the
-/// corpus on the blocking pool.
-async fn build_sources(session: Arc<Session>) -> Result<Arc<Sources>, AppError> {
-    let cat = session.live_catalog().await.ok();
-    let parental = session.parental_enabled();
-    let channels: Vec<LiveChannel> = cat
-        .as_ref()
-        .map(|cat| {
-            cat.channels
-                .iter()
-                .filter(|c| {
-                    !parental
-                        || !c.categories.iter().any(|id| {
-                            session.is_category_locked(
-                                ContentKind::Live,
-                                id,
-                                cat.category_name(id).unwrap_or(""),
-                            )
-                        })
-                })
-                .cloned()
-                .collect()
-        })
+    let names = cats
+        .as_deref()
+        .map(|c| locks::CategoryNames::new(c.iter()))
         .unwrap_or_default();
-    let (movies, movies_complete, movie_cats) = if session.is_xtream() {
-        gather_vod(&session).await
-    } else {
-        (Vec::new(), true, (0, 0))
+    let locked = |item: &T| locks::is_item_locked(session, T::KIND, &item.categories(), &names);
+    if let Some(all) = session.peek_cached::<Vec<T>>(&T::list_key(None)).await {
+        return Gathered {
+            items: all.iter().filter(|i| !locked(i)).cloned().collect(),
+            complete: true,
+            cats: (0, 0),
+            withheld: false,
+        };
+    }
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    let mut loaded = 0;
+    let total = cats.as_ref().map_or(0, |c| c.len());
+    if let Some(cats) = &cats {
+        for c in cats.iter() {
+            if session.is_category_locked(T::KIND, &c.id, &c.name) {
+                continue;
+            }
+            if let Some(list) = session
+                .peek_cached::<Vec<T>>(&T::list_key(Some(&c.id)))
+                .await
+            {
+                loaded += 1;
+                for i in list.iter() {
+                    // Also in a locked category: left out.
+                    if seen.insert(i.item_id()) && !locked(i) {
+                        items.push(i.clone());
+                    }
+                }
+            }
+        }
+    }
+    Gathered {
+        items,
+        complete: false,
+        cats: (loaded, total),
+        withheld: false,
+    }
+}
+
+/// The content fingerprint of the lists a corpus is built from.
+fn fingerprint(
+    channels: &[LiveChannel],
+    movies: &Gathered<VodStream>,
+    series: &Gathered<Series>,
+    programmes: &[ProgrammeHit],
+) -> u64 {
+    let mut h = DefaultHasher::new();
+    channels.len().hash(&mut h);
+    for c in channels {
+        c.key.hash(&mut h);
+        c.name.hash(&mut h);
+    }
+    for g in [
+        (movies.complete, movies.cats, movies.withheld),
+        (series.complete, series.cats, series.withheld),
+    ] {
+        g.hash(&mut h);
+    }
+    movies.items.len().hash(&mut h);
+    for m in &movies.items {
+        m.stream_id.hash(&mut h);
+        m.name.hash(&mut h);
+    }
+    series.items.len().hash(&mut h);
+    for s in &series.items {
+        s.series_id.hash(&mut h);
+        s.name.hash(&mut h);
+    }
+    programmes.len().hash(&mut h);
+    for p in programmes {
+        p.channel.hash(&mut h);
+        p.programme.start.timestamp().hash(&mut h);
+        p.programme.stop.timestamp().hash(&mut h);
+        p.programme.title.hash(&mut h);
+        p.programme.has_archive.hash(&mut h);
+    }
+    // Never 0 (the id of empty default sources).
+    h.finish().max(1)
+}
+
+/// Collects everything searchable (cache only, except the live catalogue and, with
+/// parental control on, the category lists) and builds the corpus on the blocking pool,
+/// unless `previous` already has exactly this content.
+async fn build_sources(
+    session: Arc<Session>,
+    previous: Option<Arc<Sources>>,
+) -> Result<Arc<Sources>, AppError> {
+    let channels: Vec<LiveChannel> = match session.live_catalog().await {
+        Ok(cat) => channel_list::unlocked_in_session(&session, &cat, &cat.channels),
+        Err(_) => Vec::new(),
     };
-    let (series, series_complete, series_cats) = if session.is_xtream() {
-        gather_series(&session).await
+    let (movies, series) = if session.is_xtream() {
+        (
+            gather::<VodStream>(&session).await,
+            gather::<Series>(&session).await,
+        )
     } else {
-        (Vec::new(), true, (0, 0))
+        (Gathered::none(), Gathered::none())
     };
     let rows = session.cached_guide_rows();
     let xmltv = session.loaded_xmltv();
@@ -258,23 +350,28 @@ async fn build_sources(session: Arc<Session>) -> Result<Arc<Sources>, AppError> 
             }
         }
         programmes.sort_by_key(|h| (h.programme.start, h.channel));
+        let id = fingerprint(&channels, &movies, &series, &programmes);
+        if let Some(prev) = previous.filter(|p| p.id == id) {
+            // Same content: keep the corpus (and the results that index into it).
+            return Ok(prev);
+        }
         let mut corpus = Corpus::default();
         corpus.add(Kind::Channels, channels.iter().map(|c| c.name.as_str()));
-        corpus.add(Kind::Movies, movies.iter().map(|m| m.name.as_str()));
-        corpus.add(Kind::Series, series.iter().map(|s| s.name.as_str()));
+        corpus.add(Kind::Movies, movies.items.iter().map(|m| m.name.as_str()));
+        corpus.add(Kind::Series, series.items.iter().map(|s| s.name.as_str()));
         corpus.add(
             Kind::Programmes,
             programmes.iter().map(|h| h.programme.title.as_str()),
         );
         Ok(Arc::new(Sources {
+            id,
             channels: Arc::new(channels),
-            movies,
-            series,
+            movies: movies.items,
+            series: series.items,
             programmes,
-            movies_complete,
-            series_complete,
-            movie_cats,
-            series_cats,
+            movies_complete: movies.complete,
+            series_complete: series.complete,
+            vod_withheld: movies.withheld || series.withheld,
             corpus,
         }))
     })
@@ -282,21 +379,83 @@ async fn build_sources(session: Arc<Session>) -> Result<Arc<Sources>, AppError> 
     .map_err(|_| AppError::Cancelled)?
 }
 
+/// "a", "a and b", "a, b and c".
+fn natural_list(parts: &[String]) -> String {
+    match parts {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{} {}", thousands(n), if n == 1 { one } else { many })
+}
+
+/// The quiet line under the results: what was searched, in plain words.
+fn scope_caption(src: &Sources, xtream: bool) -> String {
+    let mut parts = vec![plural(src.channels.len(), "channel", "channels")];
+    if xtream && !src.vod_withheld {
+        parts.push(plural(src.movies.len(), "film", "films"));
+        parts.push(plural(src.series.len(), "series", "series"));
+    }
+    if !src.programmes.is_empty() {
+        parts.push(plural(
+            src.programmes.len(),
+            "programme in the guide",
+            "programmes in the guide",
+        ));
+    }
+    let mut s = format!("Searched {}.", natural_list(&parts));
+    if xtream && !src.vod_withheld && (!src.movies_complete || !src.series_complete) {
+        s.push_str(" Films and series come from the categories you've opened.");
+    }
+    if src.vod_withheld {
+        s.push_str(" Films and series are hidden while their categories can't be checked for parental locks.");
+    }
+    s
+}
+
+/// What "Search all …" loads.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LoadAll {
+    Movies,
+    Series,
+    Both,
+}
+
+impl LoadAll {
+    fn of(kind: Kind) -> Self {
+        if kind == Kind::Movies {
+            LoadAll::Movies
+        } else {
+            LoadAll::Series
+        }
+    }
+
+    fn covers(self, kind: Kind) -> bool {
+        matches!(
+            (self, kind),
+            (LoadAll::Both, _) | (LoadAll::Movies, Kind::Movies) | (LoadAll::Series, Kind::Series)
+        )
+    }
+}
+
 /// The Search screen.
 #[derive(Debug)]
 pub struct SearchScreen {
     query: String,
     sources: Loader<Arc<Sources>>,
-    hits: Loader<Arc<Hits>>,
+    hits: Loader<Arc<Results>>,
     searched: Option<(String, u64)>,
     last_edit: Instant,
     filter: Option<Kind>,
     recent: Loader<Vec<String>>,
     load_all: Loader<()>,
-    load_all_kind: Option<Kind>,
+    load_all_kind: Option<LoadAll>,
     first_result: Option<Id>,
     focus_first: bool,
-    details: Option<ProgrammeHit>,
+    details: Option<(Arc<Sources>, ProgrammeHit)>,
 }
 
 impl SearchScreen {
@@ -318,11 +477,12 @@ impl SearchScreen {
         }
     }
 
+    /// Gathers the sources again; the corpus is rebuilt only if they changed.
     fn load_sources(&mut self, cx: &AppCtx<'_>) {
         let Some(session) = cx.session() else { return };
+        let previous = self.sources.value().cloned();
         self.sources
-            .start(cx.rt(), &cx.egui, move |_| build_sources(session));
-        self.searched = None;
+            .start(cx.rt(), &cx.egui, move |_| build_sources(session, previous));
     }
 
     fn remember(&mut self, cx: &AppCtx<'_>) {
@@ -342,12 +502,12 @@ impl SearchScreen {
         });
     }
 
-    /// Runs the (debounced) search when the query or the corpus changed.
+    /// Runs the (debounced) search when the query or the sources changed.
     fn maybe_search(&mut self, cx: &AppCtx<'_>) {
         let Some(src) = self.sources.value().cloned() else {
             return;
         };
-        let key = (self.query.trim().to_owned(), self.sources.generation());
+        let key = (self.query.trim().to_owned(), src.id);
         if self.searched.as_ref() == Some(&key) {
             return;
         }
@@ -356,47 +516,56 @@ impl SearchScreen {
                 .request_repaint_after(DEBOUNCE.saturating_sub(self.last_edit.elapsed()));
             return;
         }
+        // Narrow the previous results only when they index into these very sources.
         let previous = self
             .hits
             .value()
-            .cloned()
-            .filter(|_| self.searched.as_ref().is_some_and(|(_, g)| *g == key.1));
+            .filter(|r| r.sources.id == src.id)
+            .cloned();
         let q = key.0.clone();
         self.searched = Some(key);
         self.hits.start_blocking(cx.rt(), &cx.egui, move || {
-            Ok(Arc::new(src.corpus.search(&q, previous.as_deref())))
+            let hits = src.corpus.search(&q, previous.as_ref().map(|r| &r.hits));
+            Ok(Arc::new(Results { sources: src, hits }))
         });
     }
 
-    fn start_load_all(&mut self, cx: &AppCtx<'_>, kind: Kind) {
+    fn start_load_all(&mut self, cx: &AppCtx<'_>, what: LoadAll) {
         let Some(session) = cx.session() else { return };
-        self.load_all_kind = Some(kind);
+        self.load_all_kind = Some(what);
         self.load_all.start(cx.rt(), &cx.egui, move |_| async move {
-            match kind {
-                Kind::Movies => session.vod_streams(None).await.map(|_| ()),
-                _ => session.series_list(None).await.map(|_| ()),
+            if what != LoadAll::Series {
+                session.vod_streams(None).await?;
             }
+            if what != LoadAll::Movies {
+                session.series_list(None).await?;
+            }
+            Ok(())
         });
     }
 
-    fn activate(&mut self, cx: &mut AppCtx<'_>, kind: Kind, idx: usize) {
+    fn loading_all(&self) -> Option<LoadAll> {
+        self.load_all
+            .is_loading()
+            .then_some(self.load_all_kind)
+            .flatten()
+    }
+
+    fn activate(&mut self, cx: &mut AppCtx<'_>, res: &Results, kind: Kind, idx: usize) {
         let Some(session) = cx.session() else { return };
-        let Some(src) = self.sources.value().cloned() else {
-            return;
-        };
+        let src = &res.sources;
         self.remember(cx);
         match kind {
             Kind::Channels => {
-                let Some(hits) = self.hits.value().cloned() else {
-                    return;
-                };
                 // Zap through the channel results, in result order.
-                let list: Vec<LiveChannel> = hits
+                let list: Vec<LiveChannel> = res
+                    .hits
                     .of(Kind::Channels)
                     .iter()
                     .filter_map(|&i| src.channels.get(i as usize).cloned())
                     .collect();
-                let Some(pos) = hits
+                let Some(pos) = res
+                    .hits
                     .of(Kind::Channels)
                     .iter()
                     .position(|&i| i as usize == idx)
@@ -442,37 +611,33 @@ impl SearchScreen {
                 let now = cx.now;
                 // Phase 7 C: on air → the actions menu (Watch / Record until it ends).
                 if p.start <= now && now < p.stop {
-                    self.details = Some(h);
+                    self.details = Some((Arc::clone(src), h));
                     return;
                 }
-                if p.start <= now && now < p.stop {
-                    let channels = Arc::clone(&src.channels);
-                    match session.live_request(
-                        &ch,
-                        Some(ZapContext {
-                            channels,
-                            index: h.channel,
-                        }),
-                    ) {
-                        Ok(req) => cx.play(req, true),
-                        Err(e) => cx.toasts.error(e.user_message()),
-                    }
-                } else if p.stop <= now
+                if p.stop <= now
                     && p.has_archive
                     && let Some(sid) = ch.stream_id()
                 {
                     super::catchup::open(cx, sid, Some(p.start.timestamp()), true);
                 } else {
-                    self.details = Some(h);
+                    self.details = Some((Arc::clone(src), h));
                 }
             }
         }
+    }
+
+    fn clear_query(&mut self, cx: &AppCtx<'_>) {
+        self.query.clear();
+        self.filter = None;
+        self.last_edit = Instant::now() - DEBOUNCE;
+        focus::request(&cx.egui, field_id());
     }
 }
 
 impl Screen for SearchScreen {
     fn on_enter(&mut self, cx: &mut AppCtx<'_>) {
-        // Rebuild every time: the user may have opened categories or loaded guides.
+        // The user may have opened categories or loaded guides meanwhile: gather again
+        // (the corpus is only rebuilt when something changed).
         self.load_sources(cx);
         // Re-read every time: Settings › Storage may have cleared it.
         if let Some(session) = cx.session() {
@@ -592,49 +757,11 @@ impl Screen for SearchScreen {
         }
         self.maybe_search(cx);
 
-        let mut y = field_rect.bottom() + 16.0;
         let query_empty = self.query.trim().is_empty();
         let painter = ui.painter().clone();
-
-        // What is searched (and what isn't).
-        if let Some(src) = self.sources.value().cloned() {
-            let mut parts = vec![format!("{} channels", thousands(src.channels.len()))];
-            if session.is_xtream() {
-                parts.push(if src.movies_complete {
-                    format!("{} films", thousands(src.movies.len()))
-                } else {
-                    format!(
-                        "{} films from {} of {} categories",
-                        thousands(src.movies.len()),
-                        src.movie_cats.0,
-                        src.movie_cats.1
-                    )
-                });
-                parts.push(if src.series_complete {
-                    format!("{} series", thousands(src.series.len()))
-                } else {
-                    format!(
-                        "{} series from {} of {} categories",
-                        thousands(src.series.len()),
-                        src.series_cats.0,
-                        src.series_cats.1
-                    )
-                });
-            }
-            parts.push(format!(
-                "{} programmes from the guide",
-                thousands(src.programmes.len())
-            ));
-            text::line(
-                &painter,
-                pos2(field_rect.left() + 8.0, y + 8.0),
-                Align2::LEFT_CENTER,
-                &format!("Searching {}", parts.join(" · ")),
-                font::caption(),
-                color::TEXT_3,
-                content.width() - 2.0 * m,
-            );
-        } else if self.sources.show_skeleton() {
+        let mut y = field_rect.bottom() + 20.0;
+        let preparing = self.sources.value().is_none() && self.sources.show_skeleton();
+        if preparing {
             paint::spinner(
                 &painter,
                 pos2(field_rect.left() + 16.0, y + 8.0),
@@ -645,13 +772,13 @@ impl Screen for SearchScreen {
             painter.text(
                 pos2(field_rect.left() + 32.0, y + 8.0),
                 Align2::LEFT_CENTER,
-                "Preparing search…",
+                "Getting search ready…",
                 font::caption(),
                 color::TEXT_3,
             );
             ui.ctx().request_repaint();
+            y += 28.0;
         }
-        y += 28.0;
 
         let area = Rect::from_min_max(
             pos2(content.left(), y),
@@ -659,6 +786,8 @@ impl Screen for SearchScreen {
         );
         if query_empty {
             self.first_result = None;
+            // A pending "focus the first result" belongs to a query that is gone.
+            self.focus_first = false;
             self.recents(
                 cx,
                 ui,
@@ -669,12 +798,28 @@ impl Screen for SearchScreen {
             );
             return;
         }
-        let (Some(src), Some(hits)) = (self.sources.value().cloned(), self.hits.value().cloned())
-        else {
+        let Some(res) = self.hits.value().cloned() else {
             return;
         };
+        let hits = &res.hits;
+        // A group filter whose group came up empty: back to All.
+        if self.filter.is_some_and(|k| hits.of(k).is_empty()) {
+            self.filter = None;
+        }
 
-        // Type chips.
+        if hits.total() == 0 {
+            // ↓/Enter from the field lands on "Clear search" (the first thing below).
+            let clear = Id::unique("search.none").with("action");
+            self.first_result = Some(clear);
+            if std::mem::take(&mut self.focus_first) {
+                focus::request(&cx.egui, clear);
+            }
+            self.no_matches(cx, ui, &session, &res.sources, area);
+            self.overlays(cx, ui, &session);
+            return;
+        }
+
+        // Type chips: only groups with results.
         let chips = Rect::from_min_size(
             pos2(area.left() + m - 8.0, area.top()),
             vec2(area.width() - 2.0 * m + 16.0, 52.0),
@@ -696,10 +841,7 @@ impl Screen for SearchScreen {
                 }
                 for kind in Kind::ALL {
                     let n = hits.of(kind).len();
-                    if n == 0 && !matches!(kind, Kind::Movies | Kind::Series) {
-                        continue;
-                    }
-                    if n == 0 && !session.is_xtream() {
+                    if n == 0 {
                         continue;
                     }
                     if Chip::new(kind.title())
@@ -718,27 +860,9 @@ impl Screen for SearchScreen {
             self.filter = p;
         }
         let results = Rect::from_min_max(pos2(area.left(), chips.bottom() + 8.0), area.max);
-        if hits.total() == 0 && src.movies_complete && src.series_complete {
-            self.first_result = None;
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(results));
-            let f = EmptyState::new(
-                Id::unique("search.none"),
-                Illustration::EmptySearch,
-                "No matches",
-                "Try a shorter word, or check the spelling.",
-            )
-            .action("Clear search", false)
-            .illustration_size(160.0)
-            .show(&mut child);
-            if f.is_some_and(|f| f.activated) {
-                self.query.clear();
-                focus::request(&cx.egui, field_id());
-            }
-            return;
-        }
         match self.filter {
-            None => self.all_results(cx, ui, &session, &src, &hits, results),
-            Some(kind) => self.group_results(cx, ui, &session, &src, &hits, kind, results),
+            None => self.all_results(cx, ui, &session, &res, results),
+            Some(kind) => self.group_results(cx, ui, &session, &res, kind, results),
         }
         if self.focus_first
             && let Some(id) = self.first_result
@@ -751,14 +875,16 @@ impl Screen for SearchScreen {
 }
 
 impl SearchScreen {
+    /// The idle state: recent searches as chips, and what can be searched.
     fn recents(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui, rect: Rect) {
         let list = self.recent.value().cloned().unwrap_or_default();
         let painter = ui.painter().clone();
+        let hint = "Find channels, films, series and programmes by name. Accents and capitals don't matter.";
         if list.is_empty() {
             text::block(
                 &painter,
-                rect.min + vec2(8.0, 16.0),
-                "Find channels, films, series and programmes by name. Just start typing — accents and capitals don't matter.",
+                rect.min + vec2(8.0, 12.0),
+                hint,
                 font::body(),
                 color::TEXT_2,
                 rect.width().min(640.0),
@@ -773,13 +899,18 @@ impl SearchScreen {
             "Recent searches",
             color::TEXT_3,
         );
-        let chips = Rect::from_min_size(rect.min + vec2(0.0, 32.0), vec2(rect.width(), 52.0));
+        let chips = Rect::from_min_size(
+            rect.min + vec2(0.0, 32.0),
+            vec2(rect.width().min(960.0), 112.0),
+        );
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(chips));
         let mut picked: Option<String> = None;
         let mut clear = false;
         focus::scope(&mut child, Id::unique("search.recent"), |ui| {
+            ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                ui.spacing_mut().item_spacing = vec2(8.0, 12.0);
+                ui.add_space(8.0);
                 for (i, q) in list.iter().enumerate() {
                     if Chip::new(q.clone())
                         .id(Id::unique(("search.recent", i)))
@@ -797,6 +928,16 @@ impl SearchScreen {
                     .activated;
             });
         });
+        let used = child.min_rect().bottom();
+        text::block(
+            &painter,
+            pos2(rect.left() + 8.0, used + 24.0),
+            hint,
+            font::caption(),
+            color::TEXT_3,
+            rect.width().min(640.0),
+            2,
+        );
         if let Some(q) = picked {
             self.query = q;
             self.last_edit = Instant::now() - DEBOUNCE;
@@ -814,55 +955,99 @@ impl SearchScreen {
         }
     }
 
+    /// Nothing matched: the empty-search state ("No matches", Clear search) and, when
+    /// films/series were only partly searched, a way to search them all.
+    fn no_matches(
+        &mut self,
+        cx: &mut AppCtx<'_>,
+        ui: &mut Ui,
+        session: &Arc<Session>,
+        src: &Sources,
+        area: Rect,
+    ) {
+        let partial = session.is_xtream()
+            && !src.vod_withheld
+            && (!src.movies_complete || !src.series_complete);
+        let loading = self.loading_all();
+        let what = match (src.movies_complete, src.series_complete) {
+            (false, true) => LoadAll::Movies,
+            (true, false) => LoadAll::Series,
+            _ => LoadAll::Both,
+        };
+        let body = if loading.is_some() {
+            "Loading every film and series from your provider. This can take a while on large catalogues."
+        } else if partial {
+            "Try a shorter word. Films and series were only searched in the categories you've opened."
+        } else {
+            "Try a shorter word, or search in another category."
+        };
+        let second = match what {
+            LoadAll::Movies => "Search all films",
+            LoadAll::Series => "Search all series",
+            LoadAll::Both => "Search all films and series",
+        };
+        // Optically centred a little above the middle of the page.
+        let rect = Rect::from_min_max(
+            area.min,
+            pos2(area.right(), area.bottom() - area.height() * 0.1),
+        );
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+        let mut state = EmptyState::new(
+            Id::unique("search.none"),
+            Illustration::EmptySearch,
+            "No matches",
+            body,
+        )
+        .action("Clear search", false)
+        .illustration_size(if cx.layout.tv { 140.0 } else { 160.0 });
+        if partial && loading.is_none() {
+            state = state.second_action(second, Some(icons::LIST_MAGNIFYING_GLASS));
+        }
+        let r = state.show_both(&mut child);
+        if loading.is_some() {
+            paint::spinner(
+                ui.painter(),
+                pos2(rect.center().x, rect.bottom() - 8.0),
+                9.0,
+                ui.input(|i| i.time),
+                2.0,
+            );
+            ui.ctx().request_repaint();
+        }
+        if r.action.is_some_and(|f| f.activated) {
+            self.clear_query(cx);
+        }
+        if r.second.is_some_and(|f| f.activated) {
+            self.start_load_all(cx, what);
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn all_results(
         &mut self,
         cx: &mut AppCtx<'_>,
         ui: &mut Ui,
         session: &Arc<Session>,
-        src: &Arc<Sources>,
-        hits: &Arc<Hits>,
+        res: &Arc<Results>,
         rect: Rect,
     ) {
         let m = cx.layout.margin;
+        let src = &res.sources;
+        let hits = &res.hits;
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
         let images = cx.services.images.clone();
         let mut first: Option<Id> = None;
         let mut act: Option<(Kind, usize)> = None;
         let mut see_all: Option<Kind> = None;
-        let mut load_all: Option<Kind> = None;
+        let mut load_all: Option<LoadAll> = None;
         let mut deferred: Vec<Kind> = Vec::new();
-        let loading_all = self
-            .load_all
-            .is_loading()
-            .then_some(self.load_all_kind)
-            .flatten();
+        let loading_all = self.loading_all();
         egui::ScrollArea::vertical()
             .id_salt("search.results")
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .show(&mut child, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                if hits.total() == 0 {
-                    // Nothing in what is loaded; the load hints follow.
-                    let (r, _) =
-                        ui.allocate_exact_size(vec2(ui.available_width(), 72.0), Sense::hover());
-                    let painter = ui.painter().clone();
-                    painter.text(
-                        pos2(r.left() + m, r.top() + 24.0),
-                        Align2::LEFT_CENTER,
-                        "No matches yet",
-                        font::title(),
-                        color::TEXT,
-                    );
-                    painter.text(
-                        pos2(r.left() + m, r.top() + 54.0),
-                        Align2::LEFT_CENTER,
-                        "Try a shorter word, or search the whole catalogue below.",
-                        font::body(),
-                        color::TEXT_2,
-                    );
-                }
                 // Channels.
                 let ch = hits.of(Kind::Channels);
                 if !ch.is_empty() {
@@ -901,7 +1086,7 @@ impl SearchScreen {
                 }
                 // Films / series.
                 for kind in [Kind::Movies, Kind::Series] {
-                    if !session.is_xtream() {
+                    if !session.is_xtream() || src.vod_withheld {
                         continue;
                     }
                     let list = hits.of(kind);
@@ -950,8 +1135,8 @@ impl SearchScreen {
                     if !complete {
                         if list.is_empty() {
                             deferred.push(kind);
-                        } else if load_hint(ui, kind, loading_all, m) {
-                            load_all = Some(kind);
+                        } else if load_hint(ui, kind, true, loading_all, m) {
+                            load_all = Some(LoadAll::of(kind));
                         }
                     }
                     if !list.is_empty() {
@@ -1021,15 +1206,30 @@ impl SearchScreen {
                         ui.add_space(52.0);
                     }
                 }
-                // Groups with no match in an incomplete catalogue: offer the full list.
+                // Groups with no match in a partly searched catalogue: offer the rest.
                 if !deferred.is_empty() {
                     ui.add_space(8.0);
                     for kind in deferred {
-                        if load_hint(ui, kind, loading_all, m) {
-                            load_all = Some(kind);
+                        if load_hint(ui, kind, false, loading_all, m) {
+                            load_all = Some(LoadAll::of(kind));
                         }
                     }
                 }
+                // What was searched (quiet, at the end).
+                ui.add_space(16.0);
+                let caption = scope_caption(src, session.is_xtream());
+                let w = (ui.available_width() - 2.0 * m).max(200.0);
+                let (r, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
+                text::block(
+                    ui.painter(),
+                    pos2(r.left() + m, r.top()),
+                    &caption,
+                    font::caption(),
+                    color::TEXT_3,
+                    w.min(880.0),
+                    2,
+                );
                 ui.add_space(48.0);
             });
         focus::forward_scroll(&child);
@@ -1041,7 +1241,7 @@ impl SearchScreen {
             self.start_load_all(cx, k);
         }
         if let Some((k, i)) = act {
-            self.activate(cx, k, i);
+            self.activate(cx, res, k, i);
         }
     }
 
@@ -1051,13 +1251,13 @@ impl SearchScreen {
         cx: &mut AppCtx<'_>,
         ui: &mut Ui,
         session: &Arc<Session>,
-        src: &Arc<Sources>,
-        hits: &Arc<Hits>,
+        res: &Arc<Results>,
         kind: Kind,
         rect: Rect,
     ) {
         let m = cx.layout.margin;
-        let list: Vec<u32> = hits.of(kind).to_vec();
+        let src = &res.sources;
+        let list: Vec<u32> = res.hits.of(kind).to_vec();
         let inner = Rect::from_min_max(
             pos2(rect.left() + m - 8.0, rect.top()),
             pos2(rect.right() - m + 8.0, rect.bottom() - 8.0),
@@ -1066,18 +1266,6 @@ impl SearchScreen {
         let images = cx.services.images.clone();
         let mut act: Option<usize> = None;
         self.first_result = list.first().map(|&i| item_id(src, kind, i as usize));
-        if list.is_empty() {
-            text::block(
-                ui.painter(),
-                inner.min + vec2(8.0, 16.0),
-                "No matches here. Try All, or load the full catalogue from the All view.",
-                font::body(),
-                color::TEXT_2,
-                inner.width(),
-                2,
-            );
-            return;
-        }
         match kind {
             Kind::Channels | Kind::Programmes => {
                 VirtualList::new(Id::unique(("search.list", kind.title())), ROW_H, list.len())
@@ -1141,15 +1329,12 @@ impl SearchScreen {
             }
         }
         if let Some(i) = act {
-            self.activate(cx, kind, i);
+            self.activate(cx, res, kind, i);
         }
     }
 
     fn overlays(&mut self, cx: &mut AppCtx<'_>, ui: &mut Ui, session: &Arc<Session>) {
-        let Some(h) = self.details.clone() else {
-            return;
-        };
-        let Some(src) = self.sources.value().cloned() else {
+        let Some((src, h)) = self.details.clone() else {
             return;
         };
         let Some(ch) = src.channels.get(h.channel).cloned() else {
@@ -1192,9 +1377,10 @@ fn count_label(n: usize) -> String {
     }
 }
 
-/// The "only categories you've opened were searched" row with its Load-all button (or
-/// the progress while loading). Returns true when the button is activated.
-fn load_hint(ui: &mut Ui, kind: Kind, loading: Option<Kind>, margin: f32) -> bool {
+/// The "only categories you've opened were searched" row with its button (or the
+/// progress while loading); `found` = the group has results above it. Returns true when
+/// the button is activated.
+fn load_hint(ui: &mut Ui, kind: Kind, found: bool, loading: Option<LoadAll>, margin: f32) -> bool {
     let what = if kind == Kind::Movies {
         "films"
     } else {
@@ -1204,7 +1390,7 @@ fn load_hint(ui: &mut Ui, kind: Kind, loading: Option<Kind>, margin: f32) -> boo
     let painter = ui.painter().clone();
     let x = rect.left() + margin;
     let cy = rect.center().y;
-    if loading == Some(kind) {
+    if loading.is_some_and(|l| l.covers(kind)) {
         paint::spinner(&painter, pos2(x + 10.0, cy), 8.0, ui.input(|i| i.time), 2.0);
         text::line(
             &painter,
@@ -1232,14 +1418,18 @@ fn load_hint(ui: &mut Ui, kind: Kind, loading: Option<Kind>, margin: f32) -> boo
         &painter,
         pos2(x + 30.0, cy),
         Align2::LEFT_CENTER,
-        &format!("Only {what} from categories you've opened were searched."),
+        &if found {
+            format!("Showing {what} from the categories you've opened.")
+        } else {
+            format!("No {what} found in the categories you've opened.")
+        },
         font::body(),
         color::TEXT_2,
         (rect.width() - 2.0 * margin - 300.0).max(200.0),
     );
-    let b = Button::secondary(format!("Load all {what}"))
+    let b = Button::secondary(format!("Search all {what}"))
         .small()
-        .icon(icons::ARROW_DOWN)
+        .icon(icons::LIST_MAGNIFYING_GLASS)
         .id(Id::unique(("search.load-all", what)));
     let sz = b.size(ui);
     let br = Rect::from_min_size(pos2(tr.right() + 16.0, cy - sz.y / 2.0), sz);
@@ -1430,4 +1620,68 @@ fn programme_row(
         paint::focus_ring(&painter, r, radius::MD, 1.0);
     }
     f.activated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_lists() {
+        let s = |v: &[&str]| v.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
+        assert_eq!(natural_list(&s(&[])), "");
+        assert_eq!(natural_list(&s(&["a"])), "a");
+        assert_eq!(natural_list(&s(&["a", "b"])), "a and b");
+        assert_eq!(natural_list(&s(&["a", "b", "c"])), "a, b and c");
+    }
+
+    #[test]
+    fn scope_caption_is_plain_language() {
+        let src = Sources {
+            channels: Arc::new(Vec::new()),
+            movies_complete: false,
+            series_complete: true,
+            ..Sources::default()
+        };
+        assert_eq!(
+            scope_caption(&src, true),
+            "Searched 0 channels, 0 films and 0 series. Films and series come from the categories you've opened."
+        );
+        assert_eq!(scope_caption(&src, false), "Searched 0 channels.");
+        let withheld = Sources {
+            vod_withheld: true,
+            movies_complete: true,
+            series_complete: true,
+            ..Sources::default()
+        };
+        assert!(scope_caption(&withheld, true).contains("hidden"));
+    }
+
+    #[test]
+    fn fingerprint_follows_content() {
+        let g = |ids: &[u64]| Gathered {
+            items: ids
+                .iter()
+                .map(|&id| {
+                    serde_json::from_value::<VodStream>(serde_json::json!({
+                        "stream_id": id, "name": format!("Film {id}")
+                    }))
+                    .unwrap_or_else(|e| panic!("{e}"))
+                })
+                .collect::<Vec<_>>(),
+            complete: true,
+            cats: (0, 0),
+            withheld: false,
+        };
+        let s = || Gathered::<Series> {
+            items: Vec::new(),
+            complete: true,
+            cats: (0, 0),
+            withheld: false,
+        };
+        let a = fingerprint(&[], &g(&[1, 2]), &s(), &[]);
+        assert_eq!(a, fingerprint(&[], &g(&[1, 2]), &s(), &[]), "stable");
+        assert_ne!(a, fingerprint(&[], &g(&[1, 3]), &s(), &[]));
+        assert_ne!(a, 0);
+    }
 }

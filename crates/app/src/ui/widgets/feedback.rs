@@ -45,15 +45,110 @@ pub fn skeleton_line(ctx: &Context, painter: &Painter, pos: egui::Pos2, width: f
     skeleton(ctx, painter, Rect::from_min_size(pos, vec2(width, 12.0)), 4);
 }
 
-/// An empty/error state: illustration, Fraunces headline, body, one action.
+/// The card shape a [`skeleton_rail`] repeats.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SkeletonCard {
+    /// A 2:3 poster `width` wide, with the title and meta lines below it.
+    Poster(f32),
+    /// A 16:9 backdrop card or channel tile of this size (text inside).
+    Tile(egui::Vec2),
+}
+
+impl SkeletonCard {
+    /// Height of the card including any text below it (matches `PosterCard::height`).
+    pub fn height(self) -> f32 {
+        match self {
+            SkeletonCard::Poster(w) => (w * 1.5).round() + 10.0 + 22.0 + 20.0,
+            SkeletonCard::Tile(s) => s.y,
+        }
+    }
+
+    fn width(self) -> f32 {
+        match self {
+            SkeletonCard::Poster(w) => w,
+            SkeletonCard::Tile(s) => s.x,
+        }
+    }
+}
+
+/// Height of a content rail (§6.2, `widgets::Rail`) of `card`: the 40 pt heading row,
+/// 12 pt to the cards, 16 pt of paint allowance below them.
+pub fn rail_height(card: SkeletonCard) -> f32 {
+    40.0 + 12.0 + card.height() + 16.0
+}
+
+/// A loading content rail with exactly the real rail's geometry (§6.16): a heading bar
+/// and as many card skeletons as fit `slot` (first card at `margin`, 16 pt gaps; the last
+/// one is cut like the real rail's peek). `slot` is the rail's full rect
+/// ([`rail_height`] tall).
+pub fn skeleton_rail(
+    ctx: &Context,
+    painter: &Painter,
+    slot: Rect,
+    margin: f32,
+    card: SkeletonCard,
+    heading_width: f32,
+) {
+    let head_y = slot.top() + 20.0;
+    skeleton(
+        ctx,
+        painter,
+        Rect::from_min_size(
+            pos2(slot.left() + margin, head_y - 9.0),
+            vec2(heading_width, 18.0),
+        ),
+        4,
+    );
+    let p = painter.with_clip_rect(painter.clip_rect().intersect(slot));
+    let top = slot.top() + 52.0;
+    let w = card.width();
+    let mut x = slot.left() + margin;
+    while x < slot.right() {
+        match card {
+            SkeletonCard::Poster(_) => {
+                let img = Rect::from_min_size(pos2(x, top), vec2(w, (w * 1.5).round()));
+                skeleton(ctx, &p, img, 12);
+                skeleton(
+                    ctx,
+                    &p,
+                    Rect::from_min_size(pos2(x, img.bottom() + 14.0), vec2(w * 0.78, 12.0)),
+                    4,
+                );
+                skeleton(
+                    ctx,
+                    &p,
+                    Rect::from_min_size(pos2(x, img.bottom() + 36.0), vec2(w * 0.42, 10.0)),
+                    4,
+                );
+            }
+            SkeletonCard::Tile(s) => {
+                skeleton(ctx, &p, Rect::from_min_size(pos2(x, top), s), 12);
+            }
+        }
+        x += w + 16.0;
+    }
+}
+
+/// An empty/error state: illustration, Fraunces headline, body, one action (plus an
+/// optional second, quieter one next to it).
 #[derive(Debug)]
 pub struct EmptyState<'a> {
     illustration: Illustration,
     headline: &'a str,
     body: &'a str,
     action: Option<(&'a str, bool)>,
+    second: Option<(&'a str, Option<&'static str>)>,
     id: Id,
     size: f32,
+}
+
+/// What [`EmptyState::show_both`] reports.
+#[derive(Debug, Default)]
+pub struct EmptyStateResponse {
+    /// The action's focus.
+    pub action: Option<Focus>,
+    /// The second action's focus.
+    pub second: Option<Focus>,
 }
 
 impl<'a> EmptyState<'a> {
@@ -64,6 +159,7 @@ impl<'a> EmptyState<'a> {
             headline,
             body,
             action: None,
+            second: None,
             id,
             size: 200.0,
         }
@@ -76,6 +172,14 @@ impl<'a> EmptyState<'a> {
         self
     }
 
+    /// A second, quieter action (ghost button with an optional icon) to the right of the
+    /// first. Read it with [`EmptyState::show_both`].
+    #[must_use]
+    pub fn second_action(mut self, label: &'a str, icon: Option<&'static str>) -> Self {
+        self.second = Some((label, icon));
+        self
+    }
+
     /// Illustration size (200 desktop).
     #[must_use]
     pub fn illustration_size(mut self, s: f32) -> Self {
@@ -85,6 +189,11 @@ impl<'a> EmptyState<'a> {
 
     /// Adds the state centred in the available rect. Returns the action's focus.
     pub fn show(self, ui: &mut Ui) -> Option<Focus> {
+        self.show_both(ui).action
+    }
+
+    /// Adds the state centred in the available rect. Returns both actions' focus.
+    pub fn show_both(self, ui: &mut Ui) -> EmptyStateResponse {
         let avail = ui.available_rect_before_wrap();
         let body_g = {
             let mut job = text::job(self.body, font::body(), color::TEXT_2, 480.0, 2);
@@ -96,7 +205,7 @@ impl<'a> EmptyState<'a> {
             + 34.0
             + 8.0
             + body_g.size().y
-            + if self.action.is_some() {
+            + if self.action.is_some() || self.second.is_some() {
                 24.0 + 44.0
             } else {
                 0.0
@@ -125,19 +234,42 @@ impl<'a> EmptyState<'a> {
         );
         let by = hy + 34.0 + 8.0;
         painter.galley(pos2(cx, by), body_g.clone(), color::TEXT_2);
-        let mut out = None;
-        if let Some((label, primary)) = self.action {
+        let mut out = EmptyStateResponse::default();
+        let first = self.action.map(|(label, primary)| {
             let b = if primary {
                 Button::primary(label)
             } else {
                 Button::secondary(label)
             };
-            let b = b.id(self.id.with("action")).autofocus();
-            let size = b.size(ui);
-            let rect =
-                Rect::from_min_size(pos2(cx - size.x / 2.0, by + body_g.size().y + 24.0), size);
+            b.id(self.id.with("action")).autofocus()
+        });
+        let second = self.second.map(|(label, icon)| {
+            let b = Button::ghost(label).id(self.id.with("second"));
+            match icon {
+                Some(g) => b.icon(g),
+                None => b,
+            }
+        });
+        // Centre the button row (12 pt between the two).
+        let w1 = first.as_ref().map_or(0.0, |b| b.size(ui).x);
+        let w2 = second.as_ref().map_or(0.0, |b| b.size(ui).x);
+        let gap = if first.is_some() && second.is_some() {
+            12.0
+        } else {
+            0.0
+        };
+        let mut x = cx - (w1 + gap + w2) / 2.0;
+        let y = by + body_g.size().y + 24.0;
+        if let Some(b) = first {
+            let rect = Rect::from_min_size(pos2(x, y), b.size(ui));
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-            out = Some(b.show(&mut child));
+            out.action = Some(b.show(&mut child));
+            x += w1 + gap;
+        }
+        if let Some(b) = second {
+            let rect = Rect::from_min_size(pos2(x, y), b.size(ui));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+            out.second = Some(b.show(&mut child));
         }
         ui.allocate_rect(avail, Sense::hover());
         out

@@ -18,6 +18,7 @@
 //!   [`AppCtx::play`].
 
 pub mod catchup;
+pub mod common;
 pub mod detail;
 pub mod favourites;
 pub mod guide;

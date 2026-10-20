@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! An episode row (§8.4 series detail): a 200×112 still with the watch progress, the
-//! number and title (`body-strong`), a caption meta line, a two-line synopsis, and a
-//! "Mark watched" / "Watched" toggle on the right.
+//! An episode row (§8.4 series detail): a 200×112 still with the watch progress (and a
+//! "✓ Watched" pill once watched), the number and title (`body-strong`), a caption meta
+//! line, a two-line synopsis, and a "Mark watched" / "Watched" toggle on the right.
 //!
 //! Two focus targets: the row itself (Enter plays) and the toggle (Right from the row).
+//! The play glyph and the toggle appear on the focused row only, so the list stays calm.
 //! Rows don't scale on focus; they brighten to `surface-3` with the ring (§5).
 
 use eframe::egui::{
@@ -135,6 +136,14 @@ impl<'a> EpisodeRow<'a> {
             tsize,
         );
         let row_rect = Rect::from_min_max(rect.min, pos2(toggle_rect.left() - 16.0, rect.max.y));
+        // The play glyph and the watched toggle belong to the focused row only (a column
+        // of identical buttons on every row was noise). The toggle stays reachable: it
+        // registers while its row (or itself) has the focus, so Right from the row lands
+        // on it.
+        let toggle_id = self.id.with("watched");
+        let ctx = ui.ctx().clone();
+        let active =
+            focus::is_focused(&ctx, Self::row_id(self.id)) || focus::is_focused(&ctx, toggle_id);
         let (_, f) = focus::focusable(
             ui,
             Self::row_id(self.id),
@@ -206,17 +215,27 @@ impl<'a> EpisodeRow<'a> {
             );
             paint::progress_bar(&painter, bar, p, color::ACCENT, color::PROGRESS_TRACK);
         }
-        if self.watched {
-            let c = pos2(thumb.right() - 16.0, thumb.top() + 16.0);
-            painter.circle_filled(c, 12.0, Color32::from_black_alpha(170));
+        if f.focused {
+            // Enter plays: a play glyph on the focused row's still.
+            let c = thumb.center();
+            let a = f.anim.max(0.35);
+            painter.circle_filled(c, 22.0, Color32::from_black_alpha((150.0 * a) as u8));
+            painter.circle_stroke(
+                c,
+                22.0,
+                Stroke::new(1.5, Color32::from_white_alpha((90.0 * a) as u8)),
+            );
             icons::paint(
                 &painter,
-                c,
-                icons::CHECK_CIRCLE,
-                20.0,
+                c + vec2(1.5, 0.0),
+                icons::PLAY,
+                22.0,
                 Style::Fill,
-                color::SAGE,
+                color::TEXT.gamma_multiply(a),
             );
+        }
+        if self.watched {
+            watched_badge(&painter, pos2(thumb.left() + 8.0, thumb.top() + 8.0));
         }
         // Text column.
         let tx = thumb.right() + 20.0;
@@ -263,13 +282,44 @@ impl<'a> EpisodeRow<'a> {
         if f.focused {
             paint::focus_ring(&painter, row_rect, radius::MD, 1.0);
         }
-        // Watched toggle.
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(toggle_rect));
-        let tf = toggle.show(&mut child);
+        // Watched toggle (focused row only).
+        let toggled = if active || f.focused {
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(toggle_rect));
+            toggle.show(&mut child).activated
+        } else {
+            false
+        };
         EpisodeRowResponse {
             play: f.activated,
-            toggle_watched: tf.activated,
+            toggle_watched: toggled,
             focused: f.focused,
         }
     }
+}
+
+/// The "✓ Watched" pill on a watched episode's still (top-left).
+fn watched_badge(painter: &egui::Painter, at: egui::Pos2) {
+    let label = "Watched";
+    let tw = text::width(painter, label, font::caption_strong());
+    let r = Rect::from_min_size(at, vec2(8.0 + 14.0 + 5.0 + tw + 10.0, 22.0));
+    painter.rect_filled(
+        r,
+        CornerRadius::same(radius::FULL),
+        Color32::from_black_alpha(178),
+    );
+    icons::paint(
+        painter,
+        pos2(r.left() + 8.0 + 7.0, r.center().y),
+        icons::CHECK,
+        14.0,
+        Style::Regular,
+        color::SAGE,
+    );
+    painter.text(
+        pos2(r.left() + 8.0 + 14.0 + 5.0, r.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        font::caption_strong(),
+        color::TEXT,
+    );
 }

@@ -268,7 +268,7 @@ Provider logos are untrusted, inconsistent and often transparent black-on-transp
 Height 44 pt, padding 20 pt horizontal, radius r-sm (8), icon 20 + 8 gap. Large variant (hero/detail): height 52, padding 28. Focus: ring + glow; primary also brightens to `accent-hover`.
 
 ### 6.6 Chips, segmented controls, tabs
-- **Chip** (category filter): height 36, r-full, padding 16, `button` text. Rest `surface-2` + `text-2`; selected `cream` + `text-on-accent`; focus ring.
+- **Chip** (category filter): height 36, r-full, padding 16, `button` text. Rest `surface-2` + `text-2`; selected `cream` + `text-on-accent`; focus ring. **Chip rows** scroll sideways without a scroll bar; an edge where more chips hide fades into the page colour over 56 pt (`widgets::chip::ChipRow`), and nothing else (time controls, sort button) sits under the row.
 - **Segmented control** (Xtream | M3U): `surface-2` track, r-full, 4 pt inset; the selected segment is a `cream` pill that slides (160 ms).
 - **Tabs** (seasons): text tabs `button` in `text-2`; selected `text` + 3 pt `accent` underline (r-full) 6 pt below the baseline.
 
@@ -285,7 +285,7 @@ States: rest transparent; **playing in preview** = 3 pt `accent` bar on the left
 - Layout: channel column 240 pt (sticky left: number + logo plate 48×30 + name), time ruler 40 pt (sticky top: `caption` `text-3` labels every 30 min, tick lines `stroke-subtle`), body scrolls both ways.
 - Scale **6 pt per minute** (30 min = 180 pt); row height 64; cells r-sm with a 2 pt gap; title `body-strong` (truncate), time `caption` `text-3`; cells narrower than 48 pt show nothing.
 - Now-line: `epg-now-line`. Past cells: `surface-1`, `text-3`. Current cell: `epg-cell-now`. Catch-up available: `sage` icon top-right.
-- Focus: ring around the cell; the info panel above the grid (height 120) shows title (`title`), time, synopsis (2 lines) for the focused cell. Left/right moves by programme, up/down by channel keeping the time position.
+- Focus: glow + ring around the cell, painted after every other cell and the now-line so the next row never covers it; the info panel above the grid (height 120) shows title (`title`), time, synopsis (2 lines) for the focused cell. Left/right moves by programme, up/down by channel keeping the time position.
 
 ### 6.10 Player OSD
 - **Auto-hide** after 3 s without input; any key or pointer move shows it (fade 200 ms). Esc first hides the OSD, then exits the player.
@@ -382,7 +382,7 @@ Launch state (focus on Resume). Scrolled state with a focused poster: [`concepts
 - Video full-bleed on `video` black, OSD per §6.10. Idle (no stream): `player-idle.jpg` + centred mono symbol + status.
 
 ### 8.6 Settings
-- Two panes on `bg`: section list 280 pt (`surface-1`, rows 48 pt: Account, Profiles, Playback, Parental control, Appearance (TV mode, Size, Motion), Language & region (Time format), Storage & data, Privacy & security, About) and the detail pane (max width 760). Rows 64 pt: label `body-strong` + description `caption` `text-3` on the left, control on the right (toggle, value + `CARET_RIGHT`, segmented control). **Toggle:** 52×30 pill; off `surface-4` with a `text-2` knob, on `accent` with a `text-on-accent` knob; 160 ms knob slide.
+- Two panes on `bg`: section list 280 pt (`surface-1`, rows 48 pt: Account, Profiles, Playback, Parental control, Appearance (TV mode, Size, Motion), Language & region (Time format), Storage & data, Privacy & security, About) and the detail pane (max width 760; 880 on wide windows). Rows 56-68 pt and more: label `body-strong` + description `caption` `text-3` on the left (the text takes what the control leaves, at least 40%; the description wraps to 3 lines and the row grows), control on the right (toggle, value + `CARET_RIGHT`, segmented control). **Toggle:** 52×30 pill; off `surface-4` with a `text-2` knob, on `accent` with a `text-on-accent` knob; 160 ms knob slide.
 - About: lockup, version, licence (GPL-3.0-or-later), font licences (OFL), "No telemetry" statement.
 
 ---

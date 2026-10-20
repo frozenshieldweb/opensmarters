@@ -18,7 +18,39 @@ use opensmarters_store::{
     DbLocation, KeyringSecretStore, MemorySecretStore, SecretStore, Store, StoreOptions, settings,
 };
 
+/// Routes panics through `tracing` (the redacting writer) instead of the default hook,
+/// which prints the raw message to stderr. Unwinding and the exit code are unchanged: a
+/// panic on the main thread still ends the process (code 101), a panic in a worker task
+/// still only ends that task.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "(non-text panic payload)".to_owned());
+        let location = info
+            .location()
+            .map_or_else(String::new, |l| format!("{}:{}", l.file(), l.line()));
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("<unnamed>")
+            .to_owned();
+        let backtrace = std::backtrace::Backtrace::capture();
+        tracing::error!(
+            target: "panic",
+            %thread,
+            %location,
+            "panic: {message}\n{backtrace}"
+        );
+    }));
+}
+
 fn main() -> anyhow::Result<()> {
+    // First of all: DLLs loaded by name later (libmpv's dependencies, GPU drivers, the
+    // window system) must never come from the working directory or PATH (SR-06).
+    let _ = opensmarters_player::harden_dll_search_path();
     let cli = Cli::parse();
     if cli.demo && !cfg!(feature = "demo") {
         anyhow::bail!("--demo needs a build with `--features demo`");
@@ -37,6 +69,8 @@ fn main() -> anyhow::Result<()> {
         paths.log_dir().as_deref(),
         cfg!(debug_assertions) || cli.log_stderr,
     )?;
+    // Panic text can carry provider data: log it through the redacting writer (SR-16).
+    install_panic_hook();
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         ephemeral = cli.ephemeral,

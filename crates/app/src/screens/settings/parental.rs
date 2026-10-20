@@ -41,8 +41,8 @@ use crate::error::AppError;
 use crate::focus;
 use crate::screens::AppCtx;
 use crate::services::parental::{
-    MAX_PIN, MIN_PIN, ResetLimiter, ResetProof, lockout_text, pin_length, set_pin_length,
-    verify_account_secret,
+    ForgotPinResult, MAX_PIN, MIN_PIN, ResetLimiter, ResetProof, forgot_pin_attempt, lockout_text,
+    pin_length, set_pin_length,
 };
 use crate::services::{Services, Session};
 use crate::task::Loader;
@@ -89,7 +89,7 @@ impl Setup {
 struct Forgot {
     text: String,
     error: Option<String>,
-    check: Loader<ResetProof>,
+    check: Loader<ForgotPinResult>,
     nothing_to_check: bool,
 }
 
@@ -816,7 +816,9 @@ impl ParentalPage {
         // Result of a check.
         if f.check.poll() {
             match f.check.take() {
-                Some(ResetProof::Matched) => {
+                // The persisted limiter (survives restarts) says wait: mirror it.
+                Some(ForgotPinResult::Wait(d)) => self.limiter.wait_for(d, Instant::now()),
+                Some(ForgotPinResult::Checked(ResetProof::Matched)) => {
                     self.limiter.succeeded();
                     self.forgot = None;
                     self.unlocked = Some(None);
@@ -826,7 +828,7 @@ impl ParentalPage {
                     self.after_change(cx);
                     return;
                 }
-                Some(ResetProof::NoMatch) => {
+                Some(ForgotPinResult::Checked(ResetProof::NoMatch)) => {
                     self.limiter.failed(Instant::now());
                     f.error = Some(
                         "That doesn't match any account password or playlist address on this \
@@ -834,7 +836,9 @@ impl ParentalPage {
                             .into(),
                     );
                 }
-                Some(ResetProof::NothingToCheck) => f.nothing_to_check = true,
+                Some(ForgotPinResult::Checked(ResetProof::NothingToCheck)) => {
+                    f.nothing_to_check = true;
+                }
                 None => {}
             }
         } else if let Some(e) = f.check.error().cloned() {
@@ -941,13 +945,10 @@ impl ParentalPage {
         if submit && !busy && wait.is_none() && !f.text.is_empty() {
             let attempt = SecretString::from(std::mem::take(&mut f.text));
             let store = cx.services.store.clone();
+            // Checks, removes the PIN on a match and records the try in the store (the
+            // limit survives restarts, SR-14).
             f.check.start_blocking(cx.rt(), &cx.egui, move || {
-                let proof = verify_account_secret(&store, &attempt)?;
-                if proof == ResetProof::Matched {
-                    store.parental().force_remove_pin()?;
-                    set_pin_length(&store, None)?;
-                }
-                Ok(proof)
+                Ok(forgot_pin_attempt(&store, &attempt)?)
             });
         }
     }

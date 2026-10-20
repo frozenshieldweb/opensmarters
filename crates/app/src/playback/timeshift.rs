@@ -235,7 +235,7 @@ impl PlaybackController {
     /// The live rewind state for the OSD (live items with a buffered range only).
     pub fn live_view(&self) -> Option<LiveView> {
         let a = self.active.as_ref()?;
-        if !a.req.kind.is_live() || a.retry_at.is_some() || a.load_at.is_some() {
+        if !a.req.kind.is_live() || a.reconnect.pending().is_some() || a.load_at.is_some() {
             return None;
         }
         let window = self.tuning.rewind_window().map(|w| w.as_secs_f64());
@@ -252,7 +252,7 @@ impl PlaybackController {
         let (Some(e), Some(a)) = (&self.engine, &mut self.active) else {
             return LiveSeek::Unavailable;
         };
-        if !a.req.kind.is_live() || a.retry_at.is_some() || a.load_at.is_some() {
+        if !a.req.kind.is_live() || a.reconnect.pending().is_some() || a.load_at.is_some() {
             return LiveSeek::Unavailable;
         }
         let st = e.player.state();

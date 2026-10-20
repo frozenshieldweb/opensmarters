@@ -5,6 +5,11 @@
 //!
 //! The provider-specific part lives in [`session::Session`] (one per active profile,
 //! `cx.session()`).
+//!
+//! **Store access:** reads run on the blocking pool (`Loader::start_blocking`, or the
+//! session's own helpers); **writes** go through one FIFO writer thread
+//! ([`Services::blocking`] to fire and forget, [`Services::write`] to await the result),
+//! so they are applied in the order they were made (see [`writer`]).
 
 pub mod alerts;
 pub mod backup;
@@ -13,6 +18,7 @@ pub mod connections;
 #[cfg(feature = "demo")]
 pub mod demo;
 pub mod epg;
+pub mod fetch_queue;
 pub mod images;
 pub mod parental;
 pub mod prefs;
@@ -20,6 +26,7 @@ pub mod reminders;
 pub mod search_history;
 pub mod session;
 pub mod vod;
+pub mod writer;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,7 +38,14 @@ use tokio::runtime::Handle;
 
 pub use images::{ImageService, ImageSize, ImageSlot};
 pub use prefs::Prefs;
-pub use session::{AccountSummary, OpenFailure, Session};
+pub use session::{AccountSummary, InsecureReason, OpenFailure, Session};
+pub use writer::WriteHandle;
+
+use crate::error::{AppError, AppResult};
+
+/// The background-error "what" used for a background task that panicked (the toast then
+/// says something went wrong instead of blaming the disk).
+pub const INTERNAL_FAILURE: &str = "finish a background task";
 
 /// Where the app keeps its files.
 #[derive(Debug, Clone, Default)]
@@ -77,6 +91,7 @@ pub struct Services {
     pub ephemeral: bool,
     egui: egui::Context,
     errors: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    writer: writer::StoreWriter,
 }
 
 impl std::fmt::Debug for Services {
@@ -104,6 +119,7 @@ impl Services {
             redactor.clone(),
             paths.image_cache_dir(),
         );
+        let writer = writer::StoreWriter::start(Arc::clone(&store));
         Self {
             rt,
             store,
@@ -113,6 +129,7 @@ impl Services {
             ephemeral,
             egui,
             errors: Arc::default(),
+            writer,
         }
     }
 
@@ -126,40 +143,91 @@ impl Services {
         &self.egui
     }
 
-    /// Runs a blocking closure (store/keychain) on the runtime's blocking pool and
-    /// forgets the result. Errors are logged and reported to the app, which shows a toast
+    /// Queues a store write (or any store/keychain job whose result nobody waits for) on
+    /// the FIFO writer thread: jobs run one at a time, **in the order they were
+    /// submitted** (a later progress save never lands before an earlier one; two
+    /// read-modify-write updates of one settings map never interleave). Errors — and a
+    /// job that panics — are logged and reported to the app, which shows a toast
     /// ([`Services::take_background_errors`]). Requests a repaint when done.
     pub fn blocking<F>(&self, what: &'static str, f: F)
     where
         F: FnOnce(&Store) -> Result<(), opensmarters_store::StoreError> + Send + 'static,
     {
-        let store = Arc::clone(&self.store);
         let ctx = self.egui.clone();
         let errors = Arc::clone(&self.errors);
-        self.rt.spawn_blocking(move || {
-            if let Err(e) = f(&store) {
-                tracing::warn!(error = %e, "{what} failed");
-                let mut q = errors
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if !q.contains(&what) && q.len() < 16 {
-                    q.push(what);
+        self.writer.submit(Box::new(move |store: &Store| {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || f(store)));
+            let failed = match result {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "{what} failed");
+                    Some(what)
                 }
+                Err(_) => {
+                    tracing::error!("{what} panicked");
+                    Some(what)
+                }
+            };
+            if let Some(what) = failed {
+                push_error(&errors, what);
             }
             ctx.request_repaint();
-        });
+        }));
+    }
+
+    /// Queues a store write on the FIFO writer thread (see [`Services::blocking`]) and
+    /// returns a handle to await its result. Dropping the handle does not cancel the
+    /// write. A panicking job yields [`AppError::Internal`].
+    pub fn write<T, F>(&self, what: &'static str, f: F) -> WriteHandle<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Store) -> Result<T, opensmarters_store::StoreError> + Send + 'static,
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.writer.submit(Box::new(move |store: &Store| {
+            let result =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || f(store))) {
+                    Ok(r) => r.map_err(AppError::from),
+                    Err(_) => {
+                        tracing::error!("{what} panicked");
+                        Err(AppError::Internal)
+                    }
+                };
+            if let Err(e) = &result {
+                tracing::debug!(error = %e, "{what} failed");
+            }
+            let _ = tx.send(result);
+        }));
+        WriteHandle::new(rx)
+    }
+
+    /// Runs a store **read** on the blocking pool (reads may run in parallel; use
+    /// [`Services::write`] for anything that changes the store). A panic becomes
+    /// [`AppError::Internal`].
+    ///
+    /// # Errors
+    ///
+    /// Store errors, or [`AppError::Internal`].
+    pub async fn read<T, F>(&self, f: F) -> AppResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Store) -> Result<T, opensmarters_store::StoreError> + Send + 'static,
+    {
+        let store = Arc::clone(&self.store);
+        match self.rt.spawn_blocking(move || f(&store)).await {
+            Ok(r) => r.map_err(AppError::from),
+            Err(e) if e.is_panic() => {
+                tracing::error!("a store read panicked");
+                Err(AppError::Internal)
+            }
+            Err(_) => Err(AppError::Cancelled),
+        }
     }
 
     /// Reports a failed background job by its short description (e.g. `"save progress"`);
     /// the app shows it as a toast.
     pub fn report_background_error(&self, what: &'static str) {
-        let mut q = self
-            .errors
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !q.contains(&what) && q.len() < 16 {
-            q.push(what);
-        }
+        push_error(&self.errors, what);
         self.egui.request_repaint();
     }
 
@@ -173,19 +241,41 @@ impl Services {
         )
     }
 
-    /// Spawns a future on the runtime.
+    /// Spawns a future on the runtime. If it panics, the panic is logged and reported as
+    /// a background error (toast) before it reaches the `JoinHandle` as usual.
     pub fn spawn<F>(&self, fut: F) -> tokio::task::JoinHandle<F::Output>
     where
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        self.rt.spawn(fut)
+        let errors = Arc::clone(&self.errors);
+        let ctx = self.egui.clone();
+        self.rt.spawn(writer::ReportPanic::new(
+            fut,
+            Box::new(move || {
+                tracing::error!("a background task panicked");
+                push_error(&errors, INTERNAL_FAILURE);
+                ctx.request_repaint();
+            }),
+        ))
+    }
+}
+
+fn push_error(errors: &std::sync::Mutex<Vec<&'static str>>, what: &'static str) {
+    let mut q = errors
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !q.contains(&what) && q.len() < 16 {
+        q.push(what);
     }
 }
 
 /// The toast text for a failed background job (`what` as given to
 /// [`Services::blocking`]). Plain language, no error details (those are in the log).
 pub fn background_error_message(what: &str) -> String {
+    if what == INTERNAL_FAILURE {
+        return "Something went wrong in the background. Details are in the log.".to_owned();
+    }
     let what = what.trim();
     let what = if what.is_empty() {
         "save a change"

@@ -22,9 +22,50 @@ pub enum AppError {
     /// Input validation or another user-facing problem (already plain language).
     #[error("{0}")]
     Message(String),
+    /// A user-facing problem with its own headline ("Channel not found").
+    #[error("{title}: {message}")]
+    Titled {
+        /// The headline.
+        title: &'static str,
+        /// The explanation (plain language).
+        message: String,
+    },
     /// The task was superseded or cancelled.
     #[error("cancelled")]
     Cancelled,
+    /// Parental control: the item is in a locked category (or its categories could not
+    /// be checked yet). Ask for the PIN, then `Session::unlock_category` (or
+    /// `Session::unlock_item` when no category is known) and retry; when
+    /// [`LockedItem::category`] is `None`, first try `Session::verify_item`.
+    #[error("locked by parental control")]
+    Locked(LockedItem),
+    /// A background job failed unexpectedly (it panicked or its worker went away). The
+    /// details are in the log.
+    #[error("internal error")]
+    Internal,
+}
+
+/// What [`AppError::Locked`] refers to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockedItem {
+    /// Live, movies or series (the section whose locks apply).
+    pub kind: opensmarters_store::ContentKind,
+    /// The item: Xtream stream id / series id as a string, or a live channel key.
+    pub item: String,
+    /// The locked category to unlock with `Session::unlock_category`. `None` when the
+    /// item's categories are not known yet: `Session::verify_item` looks them up (one
+    /// cached request), then retry; if it still can't tell, unlock the item itself with
+    /// `Session::unlock_item` after the PIN.
+    pub category: Option<opensmarters_core::CategoryId>,
+    /// The category's display name, when known (for the PIN prompt's subtitle).
+    pub category_name: Option<String>,
+}
+
+impl LockedItem {
+    /// True when the categories of the item could not be checked yet.
+    pub fn is_unverified(&self) -> bool {
+        self.category.is_none()
+    }
 }
 
 impl From<opensmarters_store::StoreError> for AppError {
@@ -57,6 +98,14 @@ impl AppError {
         AppError::Message(s.into())
     }
 
+    /// A plain message with its own headline.
+    pub fn titled(title: &'static str, message: impl Into<String>) -> Self {
+        AppError::Titled {
+            title,
+            message: message.into(),
+        }
+    }
+
     /// True for connection problems (show the offline state, retry later).
     pub fn is_network(&self) -> bool {
         matches!(
@@ -65,6 +114,14 @@ impl AppError {
                 opensmarters_core::Error::Network { .. } | opensmarters_core::Error::Timeout
             )
         )
+    }
+
+    /// The parental lock that refused a request, if that is what happened.
+    pub fn locked(&self) -> Option<&LockedItem> {
+        match self {
+            AppError::Locked(l) => Some(l),
+            _ => None,
+        }
     }
 
     /// True if the provider refused the credentials or the account state.
@@ -89,7 +146,10 @@ impl AppError {
             AppError::Store(_) => "Storage problem",
             AppError::Player(_) => "Playback problem",
             AppError::Message(_) => "Check the details",
+            AppError::Titled { title, .. } => title,
             AppError::Cancelled => "Cancelled",
+            AppError::Locked(_) => "Locked by parental control",
+            AppError::Internal => "Something went wrong",
         }
     }
 
@@ -143,7 +203,23 @@ impl AppError {
             AppError::Store(e) => format!("Local storage problem: {e}."),
             AppError::Player(e) => e.clone(),
             AppError::Message(m) => m.clone(),
+            AppError::Titled { message, .. } => message.clone(),
             AppError::Cancelled => "Cancelled.".into(),
+            AppError::Locked(l) if l.is_unverified() => {
+                "Checking parental control for this title. Try again in a moment, or enter \
+                 the PIN."
+                    .into()
+            }
+            AppError::Locked(l) => match &l.category_name {
+                Some(name) => format!(
+                    "\u{201c}{}\u{201d} is locked. Enter the PIN to watch it.",
+                    crate::ui::text::cap(name, 60)
+                ),
+                None => "This is in a locked category. Enter the PIN to watch it.".into(),
+            },
+            AppError::Internal => {
+                "Something went wrong on our side. Try again; details are in the log.".into()
+            }
         }
     }
 }

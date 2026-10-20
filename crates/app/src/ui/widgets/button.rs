@@ -135,6 +135,14 @@ impl Button {
         self
     }
 
+    /// How much of the surroundings to bring into view with the button when it gets the
+    /// focus (default 16 pt), e.g. the whole hero band above Home's buttons.
+    #[must_use]
+    pub fn scroll_margin(mut self, margin: Vec2) -> Self {
+        self.opts = self.opts.scroll_margin2(margin);
+        self
+    }
+
     /// The size this button will take.
     pub fn size(&self, ui: &Ui) -> Vec2 {
         let (h, pad) = self.metrics();
@@ -348,7 +356,7 @@ impl IconButton {
         self
     }
 
-    /// Champagne filled circle (the OSD play/pause).
+    /// `accent`-filled circle (the OSD play/pause); focus adds the ring only.
     #[must_use]
     pub fn primary(mut self) -> Self {
         self.primary = true;
@@ -403,12 +411,11 @@ impl IconButton {
             paint::focus_glow(&painter, rect, radius::FULL, f.anim);
         }
         let fill = if self.primary {
+            // Always accent-filled; focus adds only the ring.
             if pressed {
                 color::ACCENT_PRESSED
-            } else if f.focused {
-                color::ACCENT_HOVER
             } else {
-                color::CREAM
+                color::ACCENT
             }
         } else if pressed {
             color::GHOST_PRESSED

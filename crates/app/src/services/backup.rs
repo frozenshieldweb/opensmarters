@@ -20,6 +20,8 @@ use crate::error::AppError;
 /// Settings that belong to this computer only (never exported, ignored on import).
 pub const LOCAL_ONLY_KEYS: &[&str] = &[
     "app.parental.pin_length",
+    // A backup must never reset (or impose) the "forgot PIN" wait.
+    "app.parental.reset_limiter",
     "app.window",
     "app.search_history",
     "last_profile",

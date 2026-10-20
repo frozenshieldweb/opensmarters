@@ -10,6 +10,11 @@
 //! Catch-up; on anything else it shows the details. The toolbar (↑ from the first row)
 //! has the category filter, Earlier/Later (2 h), ±1 day and Now.
 //!
+//! **Phase 7:** Enter on a programme on air or coming up opens its actions instead
+//! (Watch / Record until it ends; Remind me / Switch to it when it starts / Record / Watch
+//! the channel now: [`crate::services::reminders::programme_menu`], through
+//! [`details_dialog`]); cells show a bell for a reminder and a red dot for a recording.
+//!
 //! Data comes from [`Session::guide_row`], which fetches only the rows on screen (Xtream)
 //! or reads the session's bounded XMLTV guide (M3U / EPG URL override).
 
@@ -394,6 +399,14 @@ impl GuideScreen {
                 if let Some(sid) = ch.stream_id() {
                     super::catchup::open(cx, sid, Some(p.start.timestamp()), true);
                 }
+            }
+            // Phase 7 C: on air → the actions menu too (Watch / Record until it ends).
+            Some(p) if p.start <= now && now < p.stop => {
+                self.details = Some(Details {
+                    channel: ch,
+                    index: row,
+                    programme: p,
+                });
             }
             Some(p) if p.start > now || p.stop <= now => {
                 self.details = Some(Details {
@@ -1022,6 +1035,16 @@ impl GuideScreen {
                                 &axis,
                                 cx.prefs,
                             );
+                            // Phase 7 C: reminder bell / recording dot.
+                            crate::services::reminders::paint_cell_marks(
+                                &cell_painter,
+                                &cx.alerts.reminders,
+                                &ch.key,
+                                p,
+                                r.intersect(body),
+                                f.focused,
+                                now,
+                            );
                             if f.focused {
                                 newly_focused = Some((
                                     Focused {
@@ -1379,12 +1402,17 @@ pub(crate) fn relative_day(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
 /// The details dialog of a programme that can't be played as such (upcoming, or ended
 /// without an archive). Returns `(close, watch the channel)`. Also used by Search.
 pub(crate) fn details_dialog(
-    cx: &AppCtx<'_>,
+    cx: &mut AppCtx<'_>,
     ctx: &egui::Context,
     id: Id,
     channel: &LiveChannel,
     p: &Programme,
 ) -> (bool, bool) {
+    // Phase 7 C: on air or coming up → the actions menu (services/reminders.rs).
+    if p.stop > cx.now {
+        let o = crate::services::reminders::programme_menu(cx, id.with("actions"), channel, p);
+        return (o.close, o.watch);
+    }
     let when = format!(
         "{} · {}–{} · {}",
         relative_day(p.start, cx.now),

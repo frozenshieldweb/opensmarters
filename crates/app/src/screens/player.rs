@@ -21,6 +21,7 @@
 //! | M / F / I | mute / window fullscreen / show-hide OSD | same |
 //! | A / S | next audio track / next subtitle (off → tracks → off) | same |
 //! | + / − | volume ±5 | same |
+//! | Z | sleep timer: off → 15 → 30 → 45 → 60 → 90 min → end of this … → off | same |
 //! | Esc, Backspace | leave the player (closes stream details first) | hide the OSD (closes the track sheet first) |
 //!
 //! ## Live TV ([`timeshift`])
@@ -263,6 +264,10 @@ impl Screen for PlayerScreen {
     }
 
     fn on_input(&mut self, cx: &mut AppCtx<'_>, ctx: &egui::Context) {
+        // Sleep timer (Phase 7 C): Z cycles it (playback/sleep.rs).
+        if let Some(msg) = crate::playback::sleep::player_input(cx, ctx) {
+            self.flash(msg);
+        }
         // Esc/Backspace are "back", not activity: counting them would re-show the OSD
         // that `on_back` then hides, so the player could never be left while playing.
         let any_input = ctx.input(|i| {
@@ -970,6 +975,11 @@ impl PlayerScreen {
             //   if actions::osd_icon(ui, &mut rx, cy, icons::RECORD, "player.record", on) {
             //       crate::dvr::ui::toggle_record(cx);
             //   }
+            // Sleep timer (Phase 7 C): moon button + menu (playback/sleep.rs).
+            let r = Rect::from_center_size(pos2(rx, cy), vec2(48.0, 48.0));
+            if let Some(msg) = crate::playback::sleep::osd_button(cx, ui, r) {
+                self.flash(msg);
+            }
             // ----------------------------------------------------------------------------
         });
         if self.sheet {

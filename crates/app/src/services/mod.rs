@@ -16,6 +16,7 @@ pub mod epg;
 pub mod images;
 pub mod parental;
 pub mod prefs;
+pub mod reminders;
 pub mod search_history;
 pub mod session;
 pub mod vod;

@@ -277,29 +277,48 @@ match session.movie_request(id, ext.as_deref(), &title, Some(subtitle), poster, 
   and exceeding it gets HTTP 403 on *everything* for a while): the controller stops the
   previous stream before loading, zapping is debounced (`play_after`, 450 ms), never open a
   second player. Multiscreen (later) must stay within `max_connections`.
-- Live reconnect: 2, 5, 10, 30, 30 s, then give up with a message. After a stream failure on
+- Stream health is pure and unit-tested (`playback/tracker.rs`): a live stream whose
+  position stops advancing for 10 s (20 s before its first progress) is stopped and
+  reconnected ("Stream stalled — reconnecting…" via `cx.playback.reconnect_message()`);
+  reconnects back off 2, 5, 10, 30, 30 s, then give up with a message. One reconnect is
+  pending at a time; the counter resets after 30 s of continuous progress; a live stream
+  the server ends cleanly after ≥ 10 s of playback reconnects at the first delay. mpv
+  events are tied to their load (`LoadGuard`). After a stream failure on
   Xtream the controller checks `account_info()`; `cx.playback.notice()` then says
   "Connection limit reached (3/3)…". Catch-up failures say "Catch-up isn't available for
   this programme right now" (some panels answer 503 to every timeshift format).
-- VOD end of file = **finished** (store `mark_finished`). Progress is saved every 10 s and on
-  stop; `cx.playback.progress_epoch()` changes when a save lands (reload "continue
-  watching" when it does).
+- `open_stream` is the only place a provider stream is opened and `end_stream` the only
+  place an item's stream ends for good (finished, failed/gave up, stopped, replaced).
+- VOD end of file = **finished** only near the end (≥ 95 % or < 30 s left); earlier it is a
+  dropped connection and resumes from the last position. Progress is saved every 10 s, on
+  stop and synchronously at exit; `cx.playback.progress_epoch()` changes when a save lands
+  (reload "continue watching" when it does).
 - **Next episode** (`playback/next.rs`): when an episode starts, the controller looks up its
-  series (cached); once it finishes, `cx.playback.up_next()` offers the following episode
-  (store `next_episode` order) and `play_up_next()` plays it. The player shows
-  `widgets::UpNextPrompt` (10 s countdown; Esc stops it).
-- Subtitles are **off** by default (mpv auto-selects embedded CC otherwise); a language the
-  user picks in the track sheet is reused for later VOD (`choose_subtitle`).
+  series (cached); during its last 20 s `up_next_soon()` shows `UpNextCard` over the video
+  (the next episode starts when it ends unless the card is hidden); once it finishes,
+  `cx.playback.up_next()` offers the following episode (store `next_episode` order) and
+  `play_up_next()` plays it. The player shows `widgets::UpNextPrompt` (10 s countdown; Esc
+  stops it).
+- **Zap banner** (`widgets::zap_banner`): every live channel change raises
+  `cx.playback.banner()` for 3 s (also "First channel"/"Last channel": zapping stops at the
+  ends of the list); the last frame stays up under a scrim while the next channel or a
+  reconnect opens (`VideoView::set_hold_last_frame`).
+- Every load starts with automatic audio and subtitles off; the audio/subtitle language the
+  user picks (track sheet, A/S) is reused for later streams (`choose_audio`,
+  `choose_subtitle`).
 - Live OSD: LIVE badge + EPG programme progress, **never a scrubber** (mpv reports a
   growing duration on live TS). Always show the catalogue title, never mpv's `media-title`.
 - Aspect/zoom presets persist (prefs + mpv global options).
 
+Channel keys, one convention everywhere (`playback/keys.rs`, TV remotes): **PageUp /
+Ctrl+↑ / media "next" = channel +1**, **PageDown / Ctrl+↓ / media "previous" = channel −1**.
 Player keys (documented in `screens/player.rs`): Space play/pause; with the OSD hidden
-←/→ seek ∓10 s (Shift ∓60 s, the scrubber gets the focus) on VOD or zap on live, ↑/↓ zap on
-live; PageUp/PageDown zap; digits = channel number entry (zaps after 1.5 s or Enter);
-M mute, F window fullscreen, I show/hide OSD, A/S next audio/subtitle, +/− volume;
-Esc closes the track sheet, then hides the OSD, then leaves the player. Live TV has the
-same digits and PageUp/PageDown for the preview.
+←/→ seek ∓10 s (Shift ∓60 s, the scrubber gets the focus) on VOD or zap −/+ on live, ↑/↓
+zap +/− on live; the channel keys above; digits = channel number entry (zaps after 1.5 s or
+Enter; the current list, else All); M mute, F window fullscreen, I show/hide OSD, A/S next
+audio/subtitle, +/− volume; Esc closes the track sheet, then hides the OSD, then leaves
+the player. Live TV: PageUp/PageDown **page the list**; Ctrl+↑/↓ and the media keys zap the
+preview; the same digits; M mute, F fullscreen, I channel banner.
 
 ## 8. The focus system
 
@@ -390,7 +409,7 @@ Dev-only environment switches for `--demo`:
 
 | Variable | Effect |
 |---|---|
-| `OPENSMARTERS_DEMO_QUIRKS=huge,timeshift-smarters-only` | fake-panel quirks (`slow` = 0–3 s per request, to see loading skeletons; `huge` = 50 000 channels; `timeshift-503` = every catch-up stream fails like the real panel; `timeshift-smarters-only` = only the Smarters start format plays, to exercise the fallback) |
+| `OPENSMARTERS_DEMO_QUIRKS=huge,timeshift-smarters-only` | fake-panel quirks (`slow` = 0–3 s per request, to see loading skeletons; `huge` = 50 000 channels; `timeshift-503` = every catch-up stream fails like the real panel; `timeshift-smarters-only` = only the Smarters start format plays, to exercise the fallback; `stall` = live `.ts` streams send 40 % of the clip then hang open, to exercise stall detection) |
 | `OPENSMARTERS_DEMO_FAVOURITES=1` | seeds a few synthetic favourites (live, films, series) |
 | `OPENSMARTERS_DEMO_XMLTV=1` | sets the demo profile's EPG URL override to the panel's `xmltv.xml.gz` (guide on the XMLTV path) |
 

@@ -12,4 +12,12 @@ pub struct MultiView {
 impl MultiView {
     /// Frees the tiles' render contexts. Call with the GL context current (app exit).
     pub fn destroy(&mut self, _gl: &eframe::glow::Context) {}
+
+    /// Whether any tile is playing (or opening) a stream.
+    pub fn is_active(&self) -> bool {
+        false
+    }
+
+    /// Stops every tile and frees their connections (sleep timer, profile switch).
+    pub fn stop_all(&mut self) {}
 }

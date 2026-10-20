@@ -1607,6 +1607,7 @@ dependencies = [
  "chrono",
  "clap",
  "flate2",
+ "futures-util",
  "image",
  "percent-encoding",
  "reqwest",
@@ -3342,6 +3343,7 @@ name = "opensmarters-core"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "bytes",
  "chrono",
  "chrono-tz",
  "flate2",

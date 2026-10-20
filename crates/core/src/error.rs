@@ -71,6 +71,18 @@ pub enum Error {
         /// Why authentication failed.
         status: AuthFailure,
     },
+    /// A resumed download got a different part of the file than it asked for (its
+    /// `Content-Range` doesn't start where the file stopped), so nothing was appended
+    /// ([`crate::download`]).
+    #[error("the server sent a different part of the file than was asked for")]
+    RangeMismatch,
+    /// The server has nothing from the requested position on (HTTP 416). `total` is the
+    /// file's size if the server said: equal to the position, the file is complete.
+    #[error("the server has nothing after the requested position")]
+    RangeNotSatisfiable {
+        /// Size of the whole file, if known.
+        total: Option<u64>,
+    },
 }
 
 impl Error {

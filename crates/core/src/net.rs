@@ -84,6 +84,18 @@ impl std::error::Error for DowngradeRefused {}
 #[derive(Debug)]
 struct TooManyRedirects;
 
+/// A redirect to something other than `http`/`https`.
+#[derive(Debug)]
+struct NotWebRedirect;
+
+impl std::fmt::Display for NotWebRedirect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("refused a redirect to an address that isn't http or https")
+    }
+}
+
+impl std::error::Error for NotWebRedirect {}
+
 impl std::fmt::Display for TooManyRedirects {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("too many redirects")
@@ -97,10 +109,15 @@ fn is_downgrade(original: &Url, next: &Url) -> bool {
     original.scheme() == "https" && next.scheme() != "https"
 }
 
-fn redirect_policy(max: usize, allow_downgrade: bool) -> reqwest::redirect::Policy {
+/// At most `max` redirects, only to `http`/`https`, and (unless `allow_downgrade`) never
+/// from an `https` start to `http`. Shared with [`crate::download::Downloader`].
+pub(crate) fn redirect_policy(max: usize, allow_downgrade: bool) -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() > max {
             return attempt.error(TooManyRedirects);
+        }
+        if !matches!(attempt.url().scheme(), "http" | "https") {
+            return attempt.error(NotWebRedirect);
         }
         let downgrade = attempt
             .previous()
@@ -193,7 +210,7 @@ impl HttpClient {
             .get(url.clone())
             .send()
             .await
-            .map_err(|e| map_reqwest_error(&e, &self.redactor))?;
+            .map_err(|e| request_error(&e, &self.redactor))?;
         let status = response.status();
         if !status.is_success() {
             return Err(Error::Http {
@@ -213,7 +230,7 @@ impl HttpClient {
         while let Some(chunk) = response
             .chunk()
             .await
-            .map_err(|e| map_reqwest_error(&e, &self.redactor))?
+            .map_err(|e| request_error(&e, &self.redactor))?
         {
             if body.len() as u64 + chunk.len() as u64 > limit {
                 return Err(Error::TooLarge { limit });
@@ -224,7 +241,9 @@ impl HttpClient {
     }
 }
 
-fn map_reqwest_error(e: &reqwest::Error, redactor: &Redactor) -> Error {
+/// Maps a request/transfer error: timeouts, refused downgrades, else a redacted network
+/// error without the URL.
+pub(crate) fn request_error(e: &reqwest::Error, redactor: &Redactor) -> Error {
     if e.is_timeout() || source_chain_has_timeout(e) {
         Error::Timeout
     } else if source_chain_has::<DowngradeRefused>(e) {
@@ -260,7 +279,7 @@ fn source_chain_has_timeout(e: &(dyn std::error::Error + 'static)) -> bool {
 }
 
 /// Describes a `reqwest` error without its URL, redacted.
-fn network_error(e: &reqwest::Error, redactor: &Redactor) -> Error {
+pub(crate) fn network_error(e: &reqwest::Error, redactor: &Redactor) -> Error {
     let mut parts: Vec<String> = Vec::new();
     // `without_url` needs ownership; render the top level ourselves instead.
     let top = e.to_string();

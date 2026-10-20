@@ -148,20 +148,21 @@ impl PlaybackController {
         let Some(session) = self.session().cloned() else {
             return false;
         };
-        let (series_id, name, artwork) = {
+        let (series_id, name) = {
             let guard = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
             match guard.as_ref() {
-                Some(q) => (q.series_id, q.series_name.clone(), q.artwork.clone()),
+                Some(q) => (q.series_id, q.series_name.clone()),
                 None => return false,
             }
         };
+        // `next.artwork` is the episode still, else the series cover.
         match session.series_episode_request(
             series_id,
             &name,
             &next.episode,
             next.season,
             next.number,
-            artwork.as_deref(),
+            next.artwork.as_deref(),
             None,
         ) {
             Ok(req) => {

@@ -361,13 +361,15 @@ impl DetailScreen {
         };
         let name = series_name(&info);
         let artwork = self.header.as_ref().and_then(|h| h.poster.clone());
+        // The episode still suits Continue watching's 16:9 cards better than the poster.
+        let still = ep.info.movie_image.clone().or_else(|| artwork.clone());
         match session.series_episode_request(
             series_id,
             &name,
             ep,
             season,
             number,
-            artwork.as_deref(),
+            still.as_deref(),
             resume,
         ) {
             Ok(req) => {

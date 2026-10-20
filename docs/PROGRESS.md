@@ -44,4 +44,13 @@ This tracks the phases in [BUILD_PROMPT.md](BUILD_PROMPT.md#7-how-to-work).
 - Phosphor icons: `egui-phosphor` 0.14 targets egui 0.36, so the app loads the official Phosphor TTFs from `assets/fonts/` (MIT) with generated glyph constants (`crates/app/src/ui/icons/glyphs.rs`).
 - App (3a) follow-ups: Home backdrop crossfade on focus; M3U EPG uses the first `url-tvg` only; compact breakpoint (< 960 pt) keeps the collapsed rail instead of a top bar.
 - 4C follow-ups: Movies/Series PIN prompts must use `session.pin_length()` (or `PinPrompt`); Search should record queries via `services::search_history`; TMDB is only a setting + key so far (no detail-page enrichment); hardware decoding and the buffer apply at the next launch (the player crate has no runtime setter); third-party licence *texts* for release packages are still to be generated (Phase 5).
+- 7C (sleep timer, reminders) follow-ups: the multiscreen tiles' sound isn't faded (the
+  sleep timer fades the main player only; `cx.multi` has no volume API yet); the Guide's
+  info-panel hint still says "Enter  Watch" / "Enter  Details" (now Enter opens the actions
+  menu); `alerts::settings_rows` still has to be placed on Settings › Recordings &
+  downloads; Recordings › Scheduled doesn't list reminders yet; "Cancel recording" isn't
+  offered for a running recording (it opens Recordings); whether eframe keeps running the
+  frame loop while the window is **minimised** (needed for reminders to fire then) wasn't
+  verified; a prompt that needs an answer can't be reached from a focused text field until
+  the field loses the focus (by design: typing is never interrupted).
 - Real-provider findings already handled in the app: one stream at a time (stop before load, debounced zapping), live reconnect 2/5/10/30/30 s, connection-limit message from `account_info()` after a stream failure, subtitles off by default, live OSD without scrubber, catalogue titles (never mpv's media title), catch-up failure message, Home never fetches the VOD/series "All" lists, decorative symbols mapped (★ ➤) and CJK/Arabic/superscripts via the OS font fallback.

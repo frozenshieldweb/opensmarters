@@ -25,11 +25,11 @@ cargo fmt; cargo clippy -p opensmarters --all-targets --all-features -- -D warni
 | `src/nav/` | `Route` (typed routes, `--route` syntax), `Router` (back stack), `Navigator` (`cx.nav`) |
 | `src/focus/` | The spatial focus engine (`engine.rs`, pure + unit-tested) and its egui glue (`mod.rs`) |
 | `src/ui/` | Design system: `theme` (tokens, fonts, visuals), `icons` (Phosphor), `paint` (focus ring/glow, scrims, cover-fit), `text` (capping, truncation, timecodes), `motion`, `layout` (breakpoints), `assets` (bundled art), `widgets/` |
-| `src/services/` | `Services` (runtime, store, redactor, images, paths, background-error queue), `Session` (provider: catalogue, EPG, favourites, parental, playback requests; Phase-4 additions in child modules `session/*.rs`), `catalog` (`LiveChannel`, `LiveCatalog`, `Programme`), `images`, `epg`, `prefs` (app-wide preferences), `parental` (PIN length, lockout/wrong-PIN texts, "forgot PIN" check), `backup` (export/import without secrets or machine-local settings), `search_history` (recent searches per profile), `demo` |
+| `src/services/` | `Services` (runtime, store, redactor, images, paths, background-error queue), `Session` (provider: catalogue, EPG, favourites, parental, playback requests; Phase-4 additions in child modules `session/*.rs`), `catalog` (`LiveChannel`, `LiveCatalog`, `Programme`), `images`, `epg`, `prefs` (app-wide preferences), `parental` (PIN length, lockout/wrong-PIN texts, "forgot PIN" check), `backup` (export/import without secrets or machine-local settings), `search_history` (recent searches per profile), `alerts` (app-wide prompts, §7.2), `reminders` (programme reminders and actions, §7.3), `demo` |
 | `src/platform.rs` | Safe OS queries: Windows *Animation effects* (`UISettings.AnimationsEnabled` via the `windows` crate's WinRT projection) for reduced motion; "open folder" |
 | `src/window_state.rs` | Window size/position/maximised remembered between runs (store setting `app.window`, physical px, debounced; never for `--ephemeral`/`--window-size`) |
 | `src/playback/tracks.rs` | Preferred audio/subtitle languages (ISO 639 normalisation, track choice), network buffer presets, `PlayerTuning` (hwdec + buffer at player start) |
-| `src/playback/` | `PlaybackController` (the one mpv player + video view, reconnect, progress), `PlaybackRequest` and header plumbing (`request.rs`) |
+| `src/playback/` | `PlaybackController` (the one mpv player + video view, reconnect, progress), `PlaybackRequest` and header plumbing (`request.rs`), the sleep timer (`sleep.rs`, §7.1) |
 | `src/sessions.rs` | `SessionManager` (`cx.sessions`): open/switch profiles |
 | `src/task.rs` | `Loader<T>`: background work with staleness protection |
 | `src/logging.rs` | Redacted `tracing` (stderr + rotating log file) |
@@ -94,6 +94,8 @@ back. `ui` receives a `Ui` whose max rect is `cx.layout.content` (right of the r
 | `cx.layout` | breakpoint, `screen`, `content`, `margin`, `poster_width`, `tv`, card sizes, `safe_area()`, `grid_columns()` |
 | `cx.now` | `DateTime<Utc>` for EPG progress |
 | `cx.egui` | the `egui::Context` |
+| `cx.sleep` | the sleep timer (§7.1): `choice()`, `is_set()`, `left()`, `player_on_top(ctx)` |
+| `cx.alerts` | app-wide prompts (§7.2): `push`, `update`, `dismiss`, `take_answer`; `cx.alerts.reminders` (§7.3): `mark(stream_id, start)` |
 
 ### Adding a screen (checklist)
 
@@ -286,9 +288,77 @@ match session.movie_request(id, ext.as_deref(), &title, Some(subtitle), poster, 
 Player keys (documented in `screens/player.rs`): Space play/pause; with the OSD hidden
 ←/→ seek ∓10 s (Shift ∓60 s, the scrubber gets the focus) on VOD or zap on live, ↑/↓ zap on
 live; PageUp/PageDown zap; digits = channel number entry (zaps after 1.5 s or Enter);
-M mute, F window fullscreen, I show/hide OSD, A/S next audio/subtitle, +/− volume;
-Esc closes the track sheet, then hides the OSD, then leaves the player. Live TV has the
-same digits and PageUp/PageDown for the preview.
+M mute, F window fullscreen, I show/hide OSD, A/S next audio/subtitle, +/− volume,
+Z sleep timer (§7.1); Esc closes the track sheet, then hides the OSD, then leaves the
+player. Live TV has the same digits and PageUp/PageDown for the preview.
+
+### 7.1 Sleep timer (`playback/sleep.rs`, Phase 7)
+
+- **Choices:** Off, 15/30/45/60/90 min, "End of this film/episode/recording" (VOD: the
+  player's end of file) and "End of this programme (21:30)" (live, from the session's EPG
+  now/next; hidden when unknown).
+- **Setting it:** the moon button in the player's OSD (`sleep::osd_button`, a small menu
+  with a focus trap; Esc closes it) or `Z` (`sleep::player_input`: cycles the choices and
+  flashes "Sleep in 30 min"). While it is set, the moon button is highlighted and shows
+  the time left ("28 min", "1 h 59").
+- **Counting:** wall-clock time, while something plays in the main player or in
+  multiscreen (`cx.multi.is_active()`). Nothing playing for 15 s (`IDLE_GRACE`, covers
+  zapping and the next-episode countdown) turns it off quietly.
+- **The last 30 s:** the mpv volume fades out (smoothstep; Settings: `SLEEP_FADE_OUT`,
+  default on; the volume saved in the preferences is never touched) and the "Still
+  watching?" prompt (§7.2) counts down with Stop now / **Keep watching**. Any other key,
+  Esc or Keep watching restores the volume and turns the timer off ("Sleep timer off");
+  that key is swallowed so it doesn't also zap or mute.
+- **At zero:** restores the volume, `cx.playback.stop()`, `cx.multi.stop_all()`, leaves
+  window fullscreen and goes back if the player screen is on top.
+- The timing is the pure `sleep::Machine` (time injected, unit-tested).
+
+### 7.2 App-wide prompts (`services/alerts.rs`, Phase 7)
+
+`cx.alerts` is a small queue of `Prompt`s (title, body, 1–3 actions, an optional visible
+`Countdown`, an optional expiry with its answer, a priority), keyed for de-duplication:
+pushing a key that is already queued updates it. The most important prompt is drawn by
+`alerts::show` (after the screen and the rail) as a card at the bottom right
+(`ui::widgets::alert::AlertCard`: `surface-1`, r-lg, `e3`; above the OSD controls in the
+player). Owners read what happened with `cx.alerts.take_answer(key)` on their next frame:
+the action id, the cancel action for Esc, or the expiry answer.
+
+Keyboard: a prompt that needs an answer (`.modal()`) takes the focus with `focus::trap`,
+never from a text field (it waits until the field loses the focus). While it holds the
+focus, `alerts::on_frame` (before the screen) routes ←/→/Tab, Enter/Space and
+Esc/Backspace to it, so screen shortcuts (the player's arrows with the OSD hidden) can't
+eat them. The focus goes back to where it was when the prompt closes, one frame later (a
+trap holds the focus until the end of the frame it was drawn in).
+
+### 7.3 Programme reminders and actions (`services/reminders.rs`, Phase 7)
+
+- **Guide and Search:** Enter on a programme that is **on now** opens Watch / Record until
+  it ends; on one **coming up**: Remind me / Switch to it when it starts / Record / Watch
+  the channel now, with "Cancel reminder" / "Cancel recording" when set
+  (`reminders::programme_menu`, a dialog reached through `guide::details_dialog`). *This
+  replaces the old Enter behaviours "play the channel" (on now) and "details" (coming
+  up)*; past programmes keep Catch-up or the details, and a row without a guide still
+  plays the channel. "Record" is `dvr::schedule_programme` off the UI thread; the
+  recording engine starts it. An active recording offers "Open Recordings" instead of
+  cancelling (stopping a running job is the engine's).
+- **Markers:** a bell (reminder) and a red dot (scheduled or recording) in Guide cells
+  and Search programme rows (`reminders::paint_cell_marks` / `paint_row_marks`), from one
+  list query per profile (reminders + live recordings not final), reloaded every 30 s and
+  after every write made here, and updated optimistically at once.
+- **Firing** (`alerts::on_frame` → `reminders::on_frame`, open profile only):
+  `REMINDER_LEAD_SECS` (0/60/300, default 60) before the start, "Starting in 1 min" with
+  "<title> on <channel>" and Dismiss / **Watch** (opens `PlayerRoute::LiveChannel`; replaces
+  the player if it is on top). A "switch" reminder appears 10 s before the start
+  ("Switching to <channel> in 10 s", Cancel / **Switch now**) so the switch lands on the
+  start. Fired reminders are marked in the store. When the window isn't focused the
+  taskbar button flashes (`ViewportCommand::RequestUserAttention`); the focus is never taken
+  from another app. Nothing is shown when that channel already plays in the player.
+- **Missed:** a reminder found more than 90 s late (the profile or the app was closed)
+  whose programme is still on shows once, "Started 5 min ago" (it never switches on its
+  own); reminders whose programme ended are pruned at every load. The decision is the pure
+  `reminders::due` (unit-tested).
+- **Settings:** `alerts::settings_rows(cx, ui)` (reminder lead time, sleep fade-out) for
+  Settings › Recordings & downloads.
 
 ## 8. The focus system
 
@@ -375,6 +445,8 @@ Dev-only environment switches for `--demo`:
 | `OPENSMARTERS_DEMO_QUIRKS=huge,timeshift-smarters-only` | fake-panel quirks (`huge` = 50 000 channels; `timeshift-503` = every catch-up stream fails like the real panel; `timeshift-smarters-only` = only the Smarters start format plays, to exercise the fallback) |
 | `OPENSMARTERS_DEMO_FAVOURITES=1` | seeds a few synthetic favourites (live, films, series) |
 | `OPENSMARTERS_DEMO_XMLTV=1` | sets the demo profile's EPG URL override to the panel's `xmltv.xml.gz` (guide on the XMLTV path) |
+| `OPENSMARTERS_DEMO_REMINDERS=notify:70,switch:25,missed:300` | sets synthetic reminders on the first demo channels, starting that many seconds from now (`missed:` = started that long ago), to see the prompts fire |
+| `OPENSMARTERS_DEMO_SLEEP_SECS_PER_MIN=2` | a sleep-timer "minute" lasts 2 s (15 min = 30 s) |
 
 ## 10. UI kit catalogue (`src/ui`)
 

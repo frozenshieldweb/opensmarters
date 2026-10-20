@@ -334,12 +334,19 @@ impl<'a> MenuRow<'a> {
     }
 }
 
-/// A 64 pt settings row: label + description on the left, a control on the right.
+/// A settings row: label + description on the left, a control on the right (§8.6).
+///
+/// The text column takes what the control leaves (the control's width is remembered from
+/// the previous frame); the description wraps to up to three lines and the row grows
+/// with it (56 pt minimum, 68 with a description), so nothing is cut off in TV mode.
 #[derive(Debug)]
 pub struct SettingRow<'a> {
     label: &'a str,
     description: Option<&'a str>,
 }
+
+/// Vertical padding above and below the text of a [`SettingRow`].
+const SETTING_ROW_PAD: f32 = 12.0;
 
 impl<'a> SettingRow<'a> {
     /// A row.
@@ -357,47 +364,42 @@ impl<'a> SettingRow<'a> {
         self
     }
 
+    /// The width of the text column for a row `w` wide whose control is `control_w`
+    /// wide: what the control leaves (24 pt apart), but never under 40 % of the row.
+    pub fn text_width(w: f32, control_w: f32) -> f32 {
+        (w - control_w - 24.0).clamp((w * 0.4).min(w), w.max(0.0))
+    }
+
     /// Adds the row; `control` is laid out right-aligned in the row.
     pub fn show<R>(self, ui: &mut Ui, control: impl FnOnce(&mut Ui) -> R) -> R {
         let w = ui.available_width();
-        let h = if self.description.is_some() {
-            68.0
-        } else {
-            56.0
-        };
-        let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+        let mem = ui.scope_id().with(("setting-row.control-w", self.label));
+        let control_w: f32 = ui
+            .ctx()
+            .data(|d| d.get_temp(mem))
+            .unwrap_or(w * 0.45 - 24.0);
+        let text_w = Self::text_width(w, control_w);
         let painter = ui.painter().clone();
-        let cy = rect.center().y;
-        let text_w = w * 0.55;
-        if let Some(d) = self.description {
-            text::line(
-                &painter,
-                pos2(rect.left(), cy - 2.0),
-                Align2::LEFT_BOTTOM,
-                self.label,
-                font::body_strong(),
-                color::TEXT,
-                text_w,
-            );
-            text::line(
-                &painter,
-                pos2(rect.left(), cy + 2.0),
-                Align2::LEFT_TOP,
-                d,
-                font::caption(),
-                color::TEXT_3,
-                text_w,
-            );
-        } else {
-            text::line(
-                &painter,
-                pos2(rect.left(), cy),
-                Align2::LEFT_CENTER,
-                self.label,
-                font::body_strong(),
-                color::TEXT,
-                text_w,
-            );
+        let label = text::galley(
+            &painter,
+            self.label,
+            font::body_strong(),
+            color::TEXT,
+            text_w,
+            2,
+        );
+        let desc = self
+            .description
+            .map(|d| text::galley(&painter, d, font::caption(), color::TEXT_3, text_w, 3));
+        let text_h = label.size().y + desc.as_ref().map_or(0.0, |g| 2.0 + g.size().y);
+        let min_h = if desc.is_some() { 68.0 } else { 56.0 };
+        let h = (text_h + 2.0 * SETTING_ROW_PAD).max(min_h).ceil();
+        let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+        let top = rect.center().y - text_h / 2.0;
+        let label_h = label.size().y;
+        painter.galley(pos2(rect.left(), top), label, color::TEXT);
+        if let Some(g) = desc {
+            painter.galley(pos2(rect.left(), top + label_h + 2.0), g, color::TEXT_3);
         }
         painter.hline(
             rect.x_range(),
@@ -413,7 +415,29 @@ impl<'a> SettingRow<'a> {
                 .max_rect(ctrl_rect)
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
+        let out = control(&mut child);
+        // Remember how wide the control is for the next frame's text column.
+        let used = child.min_rect().width().ceil();
+        if (used - control_w).abs() > 0.5 {
+            ui.ctx().data_mut(|d| d.insert_temp(mem, used));
+            ui.ctx().request_repaint();
+        }
         let _ = Color32::TRANSPARENT;
-        control(&mut child)
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setting_row_text_takes_what_the_control_leaves() {
+        // Wide row, small toggle: the text gets almost everything.
+        assert_eq!(SettingRow::text_width(700.0, 52.0), 624.0);
+        // A wide segmented control in TV mode: the text keeps 40 %.
+        assert_eq!(SettingRow::text_width(600.0, 500.0), 240.0);
+        // Degenerate widths never panic.
+        assert_eq!(SettingRow::text_width(0.0, 100.0), 0.0);
     }
 }

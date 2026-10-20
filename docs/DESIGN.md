@@ -382,7 +382,7 @@ Launch state (focus on Resume). Scrolled state with a focused poster: [`concepts
 - Video full-bleed on `video` black, OSD per §6.10. Idle (no stream): `player-idle.jpg` + centred mono symbol + status.
 
 ### 8.6 Settings
-- Two panes on `bg`: section list 280 pt (`surface-1`, rows 48 pt: Account, Profiles, Playback, Parental control, Appearance (TV mode, Size, Motion), Language & region (Time format), Storage & data, Privacy & security, About) and the detail pane (max width 760). Rows 64 pt: label `body-strong` + description `caption` `text-3` on the left, control on the right (toggle, value + `CARET_RIGHT`, segmented control). **Toggle:** 52×30 pill; off `surface-4` with a `text-2` knob, on `accent` with a `text-on-accent` knob; 160 ms knob slide.
+- Two panes on `bg`: section list 280 pt (`surface-1`, rows 48 pt: Account, Profiles, Playback, Parental control, Appearance (TV mode, Size, Motion), Language & region (Time format), Storage & data, Privacy & security, About) and the detail pane (max width 760; 880 on wide windows). Rows 56-68 pt and more: label `body-strong` + description `caption` `text-3` on the left (the text takes what the control leaves, at least 40%; the description wraps to 3 lines and the row grows), control on the right (toggle, value + `CARET_RIGHT`, segmented control). **Toggle:** 52×30 pill; off `surface-4` with a `text-2` knob, on `accent` with a `text-on-accent` knob; 160 ms knob slide.
 - About: lockup, version, licence (GPL-3.0-or-later), font licences (OFL), "No telemetry" statement.
 
 ---

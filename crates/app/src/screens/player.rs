@@ -219,11 +219,13 @@ impl Screen for PlayerScreen {
     }
 
     fn on_input(&mut self, cx: &mut AppCtx<'_>, ctx: &egui::Context) {
+        // Back keys don't count as activity: otherwise Esc would re-show the OSD it is
+        // about to hide, and the player could never be left with Esc while playing.
         let any_input = ctx.input(|i| {
-            i.events
-                .iter()
-                .any(|e| matches!(e, Event::Key { pressed: true, .. }))
-                || i.pointer.delta() != egui::Vec2::ZERO
+            i.events.iter().any(|e| {
+                matches!(e, Event::Key { pressed: true, key, .. }
+                    if !matches!(key, Key::Escape | Key::Backspace))
+            }) || i.pointer.delta() != egui::Vec2::ZERO
         });
         let osd = self.osd_visible(cx);
         let live = Self::is_live(cx);

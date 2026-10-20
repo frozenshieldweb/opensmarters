@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use opensmarters_core::{DEFAULT_USER_AGENT, Redactor};
 use opensmarters_player::{
-    EndReason, Hwdec, LoadOptions, LogLevel, Op, Player, PlayerConfig, PlayerEvent, PlayerState,
+    EndReason, Hwdec, LoadOptions, LogLevel, Player, PlayerConfig, PlayerEvent, PlayerState,
     TrackKind, TrackSelection, UserAgent, VideoFit, VideoView,
 };
 use opensmarters_store::{ItemSnapshot, PlaybackSnapshot};
@@ -195,8 +195,9 @@ impl PlaybackController {
                         Hwdec::Disabled
                     })
                     .cache_mib(tuning.buffer.forward_mib, tuning.buffer.back_mib)
-                    .network_timeout(Duration::from_secs(tuning.buffer.timeout_secs))
-                    .seekable_cache(true); // p7b: until stream A lands (clips need dump-cache)
+                    .network_timeout(Duration::from_secs(tuning.buffer.timeout_secs));
+                // p7b: until stream A lands (clips need dump-cache on live TS).
+                let config = config.seekable_cache(true);
                 let config = match UserAgent::new(DEFAULT_USER_AGENT) {
                     Ok(ua) => config.user_agent(ua),
                     Err(_) => config,
@@ -601,7 +602,10 @@ impl PlaybackController {
                 PlayerEvent::CommandFailed { op, error } => {
                     tracing::debug!(?op, %error, "mpv command failed");
                     // p7b: forwarded to the DVR (clips, recording through the player).
-                    if matches!(op, Op::DumpCache | Op::Record) {
+                    if matches!(
+                        op,
+                        opensmarters_player::Op::DumpCache | opensmarters_player::Op::Record
+                    ) {
                         self.dvr_events
                             .push(PlayerEvent::CommandFailed { op, error });
                     }

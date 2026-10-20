@@ -369,6 +369,101 @@ pub fn is_row_locked(session: &Session, r: &Recording) -> bool {
     }
 }
 
+/// Dev only (`--demo`, `OPENSMARTERS_DEMO_RECORDINGS=1`): a few synthetic rows to look
+/// at the Recordings screen without waiting for real jobs: two scheduled recordings
+/// tomorrow (one on an "Adult Night" channel, locked by the demo PIN), a reminder, and a
+/// finished clip of the adult channel (no file: Play asks for the PIN, then says the file
+/// is missing).
+///
+/// # Errors
+///
+/// Store errors.
+#[cfg(feature = "demo")]
+pub fn seed_demo(
+    store: &Store,
+    profile: ProfileId,
+    panel: &fake_panel::Handle,
+) -> Result<(), StoreError> {
+    use opensmarters_store::{NewReminder, ReminderAction};
+    let cat = panel.catalogue();
+    let base = panel.base_url().trim_end_matches('/').to_owned();
+    let logo = |id: u64| Some(format!("{base}/images/logo/{id}.png"));
+    let tomorrow = (Utc::now() + opensmarters_core::chrono::Duration::days(1))
+        .date_naive()
+        .and_hms_opt(19, 0, 0)
+        .map(|t| t.and_utc())
+        .unwrap_or_else(Utc::now);
+    let hour = opensmarters_core::chrono::Duration::hours(1);
+    let adult = cat.live.iter().find(|c| c.is_adult);
+    let plain: Vec<_> = cat.live.iter().filter(|c| !c.is_adult).take(3).collect();
+    for (i, ch) in plain.iter().take(1).chain(adult.iter()).enumerate() {
+        let start = tomorrow + hour * i32::try_from(i).unwrap_or(0);
+        schedule_programme(
+            store,
+            profile,
+            &ProgrammeToRecord {
+                stream_id: ch.stream_id.to_string(),
+                channel_name: ch.name.clone(),
+                channel_logo: logo(ch.stream_id),
+                title: if ch.is_adult {
+                    "Late Show".to_owned()
+                } else {
+                    "Evening Bulletin".to_owned()
+                },
+                start,
+                end: start + hour,
+            },
+        )?;
+    }
+    if let Some(ch) = plain.get(1) {
+        store.reminders().set(
+            profile,
+            &NewReminder {
+                stream_id: ch.stream_id.to_string(),
+                start_at: Timestamp::from_unix_millis((tomorrow + hour * 2).timestamp_millis()),
+                end_at: Timestamp::from_unix_millis((tomorrow + hour * 3).timestamp_millis()),
+                title: "Weather Watch".to_owned(),
+                channel_name: ch.name.clone(),
+                icon_url: logo(ch.stream_id),
+                action: ReminderAction::Notify,
+            },
+        )?;
+    }
+    if let Some(ch) = adult {
+        let now = Utc::now();
+        let r = store.recordings().add(
+            profile,
+            &NewRecording {
+                kind: RecordingKind::Clip,
+                state: RecordingState::Active,
+                item_id: ch.stream_id.to_string(),
+                series_id: None,
+                season: None,
+                episode: None,
+                container_extension: None,
+                title: "Late Show".to_owned(),
+                subtitle: Some(ch.name.clone()),
+                icon_url: logo(ch.stream_id),
+                start_at: Some(Timestamp::from_unix_millis(
+                    (now - opensmarters_core::chrono::Duration::minutes(5)).timestamp_millis(),
+                )),
+                end_at: Some(Timestamp::from_unix_millis(now.timestamp_millis())),
+            },
+        )?;
+        store
+            .recordings()
+            .set_file_name(r.id, &file_name("Late Show clip", now, "ts"))?;
+        store.recordings().set_duration(r.id, 300.0)?;
+        store
+            .recordings()
+            .set_progress(r.id, 4_200_000, Some(4_200_000))?;
+        store
+            .recordings()
+            .set_state(r.id, RecordingState::Done, None)?;
+    }
+    Ok(())
+}
+
 /// App-wide recording/download state (`cx.dvr`). See the [module docs](self).
 #[derive(Default)]
 pub struct Dvr {

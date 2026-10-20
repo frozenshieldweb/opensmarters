@@ -282,6 +282,15 @@ controls the bytes, the titles that become file names, the HTTP answers and the 
   the "keep free" setting (2 GB by default).
 - **HLS:** playlists are hostile input (capped, fuzzed, web URIs only, resolved against
   the playlist's own address); encrypted streams are refused rather than half-supported.
+- **Parental control (SR-02):** the lock gates *starting* a job (Download, Record: the
+  viewer must be allowed to use the item now, else the PIN) and *showing or playing* the
+  result (the Recordings screen shows a locked item as "Locked", without title or artwork,
+  and Play asks for the PIN; recordings and clips are locked by their channel, episodes
+  by their series; offline, the PIN is always needed). The transfer itself doesn't ask:
+  the engine builds its URLs with unchecked session helpers
+  (`services/session/dvr.rs`, used only by `crate::dvr`), so a job started by someone who
+  had the PIN still finishes after a restart or the 30-minute re-lock. Residual: the
+  recordings folder itself (Explorer, "Open folder") shows file names (titles).
 - **Connections:** every job holds a lease of the connection budget, so recording never
   pushes the account over `max_connections`; clips use the player's buffer (no extra
   connection).

@@ -59,6 +59,10 @@ pub fn start(rt: &tokio::runtime::Runtime, store: &Store, set_pin: bool) -> anyh
     if std::env::var_os("OPENSMARTERS_DEMO_FAVOURITES").is_some() {
         seed_favourites(store, profile.id, &panel)?;
     }
+    // Dev only (p7b): `OPENSMARTERS_DEMO_RECORDINGS=1` adds synthetic recordings rows.
+    if std::env::var_os("OPENSMARTERS_DEMO_RECORDINGS").is_some() {
+        crate::dvr::seed_demo(store, profile.id, &panel)?;
+    }
     // Dev only: `OPENSMARTERS_DEMO_XMLTV=1` sets the profile's EPG URL override to the
     // panel's gzipped XMLTV, so the guide runs on the XMLTV path.
     if std::env::var_os("OPENSMARTERS_DEMO_XMLTV").is_some() {

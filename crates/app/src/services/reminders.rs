@@ -184,6 +184,8 @@ pub struct Scheduler {
     writes: Arc<AtomicU64>,
     inflight: Arc<AtomicU64>,
     seen_writes: u64,
+    /// p7b: the DVR's epoch last seen (a recording started or ended elsewhere).
+    dvr_epoch: u64,
     shown: Vec<Shown>,
     /// Where the focus goes back to next frame after the programme menu closed (the
     /// menu's focus trap still holds it during the frame it closes).
@@ -440,6 +442,12 @@ pub(crate) fn on_frame(cx: &mut AppCtx<'_>, now: Instant) {
     let writes = s.writes.load(Ordering::Acquire);
     if writes != s.seen_writes {
         s.seen_writes = writes;
+        s.reload = true;
+    }
+    // p7b: a recording started or ended elsewhere (player, Recordings): show it at once.
+    let dvr_epoch = cx.dvr.epoch();
+    if dvr_epoch != s.dvr_epoch {
+        s.dvr_epoch = dvr_epoch;
         s.reload = true;
     }
     if s.load.poll() {

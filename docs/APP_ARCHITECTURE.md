@@ -738,8 +738,20 @@ Needs `PlayerConfig::seekable_cache(true)` (enabled in `PlaybackController::new`
 every frame: ● REC and the clip dialog), Live TV (`live_row_badge`). DVR dialogs close
 on Esc/Backspace in `dvr::on_frame`, before the screen sees the key.
 
+**Parental control.** Download (films, episodes, seasons) and Record go through
+`dvr::ui::gate`: `Session::check_unlocked` for the item, else `UnlockFlow` (look-up of
+unknown categories, then the PIN) and the action afterwards. Playing a saved file
+(`play_saved`) checks the original item (`dvr::lock_target`: film; episode → its series;
+recording/clip → its channel). The Recordings screen shows locked rows as "Locked" (no
+title, no artwork; `dvr::is_row_locked`). Jobs themselves never check: their URLs come
+from `Session::dvr_movie_url` / `dvr_episode_url` / `dvr_live_url`
+(`services/session/dvr.rs`, the request builders' URL logic minus `check_unlocked`,
+for `crate::dvr` only).
+
 **Dev/test.** fake-panel quirks `slow-media` (≈ 256 KiB/s, Range still works),
 `live-endless` (live `.ts` loops forever at its real bitrate), `media-html` /
 `media-playlist` (a `200 OK` that isn't video), e.g.
-`OPENSMARTERS_DEMO_QUIRKS=slow-media,live-endless`. Engine tests: `tests/dvr.rs`.
+`OPENSMARTERS_DEMO_QUIRKS=slow-media,live-endless`; `OPENSMARTERS_DEMO_RECORDINGS=1`
+seeds two scheduled recordings (one on a locked "Adult Night" channel), a reminder and a
+locked clip (`dvr::seed_demo`). Engine tests: `tests/dvr.rs`.
 Routes: `recordings[:tab=downloads|recordings|scheduled]`, `settings:recordings`.

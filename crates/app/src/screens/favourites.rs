@@ -675,7 +675,7 @@ impl Screen for FavouritesScreen {
         }
         // Footer hint.
         let hint = if cx.layout.tv {
-            "Enter to play · use \u{25b2} \u{25bc} to reorder, \u{2715} to remove"
+            "Enter to play · the arrow buttons reorder, the cross removes"
         } else {
             "Enter to play · Ctrl+\u{2191}/\u{2193} to reorder · Delete to remove"
         };

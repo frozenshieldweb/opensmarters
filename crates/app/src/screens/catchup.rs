@@ -607,10 +607,10 @@ impl Screen for CatchupScreen {
         }
 
         // Columns.
-        let chan_w = if wide { 320.0 } else { 264.0 };
+        let chan_w = if wide { 320.0 } else { 248.0 };
         let chan_rect = Rect::from_min_size(content.min, vec2(chan_w, content.height()));
         let right = Rect::from_min_max(pos2(chan_rect.right(), content.top()), content.max);
-        let preview_frac = if wide { 0.40 } else { 0.42 };
+        let preview_frac = if wide { 0.40 } else { 0.38 };
         let preview_w = ((right.width() - m * 2.0 - 32.0) * preview_frac).round();
         let list_rect = Rect::from_min_max(
             pos2(right.left() + m, content.top() + 96.0),
@@ -1092,7 +1092,18 @@ impl CatchupScreen {
                         color::TEXT_3,
                     );
                     let tx = rect.left() + 108.0;
-                    let right_w = 132.0;
+                    // Room for the status on the right only when there is one.
+                    let has_status = (p.stop > now && p.start <= now)
+                        || progress.get(pid.as_str()).is_some_and(|pp| {
+                            pp.finished || pp.ever_finished || pp.is_resumable(&thresholds)
+                        });
+                    let right_w = if has_status {
+                        132.0
+                    } else if f.focused {
+                        48.0
+                    } else {
+                        16.0
+                    };
                     let tw = (rect.right() - right_w - tx).max(60.0);
                     text::line(
                         &painter,

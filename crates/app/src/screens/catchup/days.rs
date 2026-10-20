@@ -1,23 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Catch-up day tabs: archived programmes grouped by the **server-local** date (what
-//! the panel's archive is organised by), newest first, labelled "Today", "Yesterday",
-//! then weekday + date.
+//! Catch-up day tabs: archived programmes grouped by the **viewer's** calendar date (the
+//! times on screen are the viewer's too), newest day first and, inside a day, newest
+//! programme first, labelled "Today", "Yesterday", then weekday + date.
+//!
+//! The server's wall clock only matters for the timeshift URL
+//! ([`ArchiveProgramme::start_local`]): grouping by it made "Today" start at 16:00
+//! yesterday for a viewer six hours behind a +01:00 panel.
 
 use opensmarters_core::ArchiveProgramme;
-use opensmarters_core::chrono::{DateTime, Datelike, NaiveDate, Utc, Weekday};
+use opensmarters_core::chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc, Weekday};
 use opensmarters_core::epg::ServerTimeZone;
-use opensmarters_core::model::group_by_server_date;
 
 use crate::services::session::guide::EpgRow;
 
 /// One day of archive.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Day {
-    /// Server-local date.
+    /// The viewer's calendar date.
     pub date: NaiveDate,
     /// Tab label.
     pub label: String,
-    /// Programmes of that day, oldest first.
+    /// Programmes of that day, newest first.
     pub programmes: Vec<ArchiveProgramme>,
 }
 
@@ -33,7 +36,7 @@ fn weekday_short(w: Weekday) -> &'static str {
     }
 }
 
-/// "Today", "Yesterday", else "Sun 18 Oct" (relative to the server-local `today`).
+/// "Today", "Yesterday", else "Sun 18 Oct" (relative to the viewer's `today`).
 pub fn day_label(date: NaiveDate, today: NaiveDate) -> String {
     match (today - date).num_days() {
         0 => "Today".to_owned(),
@@ -49,31 +52,41 @@ pub fn day_label(date: NaiveDate, today: NaiveDate) -> String {
 }
 
 /// Groups the replayable programmes of `row` (archive flag set, already started) into
-/// day tabs, newest day first.
-pub fn archive_days(row: &EpgRow, tz: &ServerTimeZone, now: DateTime<Utc>) -> Vec<Day> {
-    let archived: Vec<ArchiveProgramme> = (0..row.programmes.len())
-        .filter_map(|i| row.archive(i, tz, now))
+/// day tabs on the `viewer`'s clock (the app passes `Local`), newest day and newest
+/// programme first. `server` only fills in the timeshift start of each programme.
+pub fn archive_days<Z: TimeZone>(
+    row: &EpgRow,
+    server: &ServerTimeZone,
+    now: DateTime<Utc>,
+    viewer: &Z,
+) -> Vec<Day> {
+    let mut archived: Vec<ArchiveProgramme> = (0..row.programmes.len())
+        .filter_map(|i| row.archive(i, server, now))
         .collect();
-    let today = tz.to_local(now).date();
-    group_by_server_date(archived)
-        .into_iter()
-        .rev()
-        .map(|(date, mut programmes)| {
-            programmes.sort_by_key(|p| p.start);
-            Day {
+    archived.sort_by(|a, b| b.start.cmp(&a.start));
+    let today = now.with_timezone(viewer).date_naive();
+    let mut days: Vec<Day> = Vec::new();
+    for p in archived {
+        let date = p.start.with_timezone(viewer).date_naive();
+        match days.last_mut() {
+            Some(d) if d.date == date => d.programmes.push(p),
+            _ => days.push(Day {
                 date,
                 label: day_label(date, today),
-                programmes,
-            }
-        })
-        .collect()
+                programmes: vec![p],
+            }),
+        }
+    }
+    days
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::services::catalog::Programme;
-    use opensmarters_core::chrono::TimeZone;
+    use opensmarters_core::chrono::FixedOffset;
+    use opensmarters_core::chrono_tz::America;
 
     fn utc(d: u32, h: u32, m: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, d, h, m, 0)
@@ -91,6 +104,31 @@ mod tests {
         }
     }
 
+    fn hours(h: i32) -> FixedOffset {
+        FixedOffset::east_opt(h * 3600).expect("valid offset")
+    }
+
+    /// `(label, ["DD HH:MM" on the viewer's clock, …])` per day.
+    fn summary<Z: TimeZone>(days: &[Day], viewer: &Z) -> Vec<(String, Vec<String>)> {
+        days.iter()
+            .map(|d| {
+                (
+                    d.label.clone(),
+                    d.programmes
+                        .iter()
+                        .map(|p| {
+                            p.start
+                                .with_timezone(viewer)
+                                .naive_local()
+                                .format("%d %H:%M")
+                                .to_string()
+                        })
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn labels() {
         let today = NaiveDate::from_ymd_opt(2026, 10, 20).unwrap_or_default();
@@ -103,52 +141,110 @@ mod tests {
     }
 
     #[test]
-    fn grouped_by_server_date_newest_first() {
-        // Server in Paris (UTC+2 in October until the 25th). 22:30Z on the 19th is
-        // 00:30 on the 20th in Paris: it belongs to "Today" on the server.
-        let tz = ServerTimeZone::from_name("Europe/Paris").unwrap_or_default();
-        let now = utc(20, 12, 0);
+    fn utc_server_north_american_viewer() {
+        // The provider runs on UTC; the viewer is in Chicago (CDT, UTC−5 in October).
+        // Now: 15:00Z = 10:00 local on the 20th.
+        let server = ServerTimeZone::Utc;
+        let viewer = America::Chicago;
+        let now = utc(20, 15, 0);
         let row = EpgRow::from_programmes(vec![
-            prog(utc(18, 8, 0), utc(18, 9, 0), true),
-            prog(utc(19, 21, 0), utc(19, 22, 30), true),
-            prog(utc(19, 22, 30), utc(19, 23, 30), true),
-            prog(utc(20, 9, 0), utc(20, 10, 0), false), // no archive
-            prog(utc(20, 11, 30), utc(20, 12, 30), true), // on air: replayable from start
-            prog(utc(20, 13, 0), utc(20, 14, 0), true), // future
+            prog(utc(19, 3, 0), utc(19, 4, 0), true), // 18th 22:00 local
+            prog(utc(19, 23, 0), utc(20, 3, 0), true), // 19th 18:00 local
+            prog(utc(20, 3, 0), utc(20, 4, 30), true), // 19th 22:00 local, 20th on the server
+            prog(utc(20, 5, 0), utc(20, 6, 0), true), // 20th 00:00 local
+            prog(utc(20, 6, 0), utc(20, 7, 0), false), // no archive
+            prog(utc(20, 14, 30), utc(20, 15, 30), true), // on air
+            prog(utc(20, 16, 0), utc(20, 17, 0), true), // future
         ]);
-        let days = archive_days(&row, &tz, now);
-        let labels: Vec<&str> = days.iter().map(|d| d.label.as_str()).collect();
-        assert_eq!(labels, ["Today", "Yesterday", "Sun 18 Oct"]);
-        assert_eq!(days[0].programmes.len(), 2);
-        assert_eq!(days[0].programmes[0].start, utc(19, 22, 30));
+        let days = archive_days(&row, &server, now, &viewer);
+        let got = summary(&days, &viewer);
         assert_eq!(
-            days[0].programmes[0].start_local.to_string(),
-            "2026-10-20 00:30:00"
+            got,
+            vec![
+                (
+                    "Today".to_owned(),
+                    vec!["20 09:30".into(), "20 00:00".into()]
+                ),
+                (
+                    "Yesterday".to_owned(),
+                    vec!["19 22:00".into(), "19 18:00".into()]
+                ),
+                ("Sun 18 Oct".to_owned(), vec!["18 22:00".into()]),
+            ]
         );
-        assert_eq!(days[1].programmes.len(), 1);
+        // The timeshift start stays on the server's clock (UTC here): the 22:00 local
+        // programme of "Yesterday" starts on the 20th for the panel.
+        assert_eq!(
+            days[1].programmes[0].start_local.to_string(),
+            "2026-10-20 03:00:00"
+        );
     }
 
     #[test]
-    fn dst_change_keeps_server_dates() {
-        // Paris leaves summer time on 25 Oct 2026 at 01:00Z (03:00 CEST → 02:00 CET).
-        let tz = ServerTimeZone::from_name("Europe/Paris").unwrap_or_default();
-        let now = utc(26, 12, 0);
+    fn panel_ahead_of_the_viewer() {
+        // The case from the review: a +01:00 panel and a −06:00 viewer. Now: 20:00Z =
+        // 14:00 local. 16:00 local yesterday (22:00Z) is "Yesterday", not "Today".
+        let server = ServerTimeZone::Fixed(hours(1));
+        let viewer = hours(-6);
+        let now = utc(20, 20, 0);
         let row = EpgRow::from_programmes(vec![
-            // 23:30Z on the 24th = 01:30 CEST on the 25th.
-            prog(utc(24, 23, 30), utc(25, 0, 30), true),
-            // 23:30Z on the 25th = 00:30 CET on the 26th.
-            prog(utc(25, 23, 30), utc(26, 0, 30), true),
+            prog(utc(19, 22, 0), utc(19, 23, 0), true), // 19th 16:00 local, 19th 23:00 server
+            prog(utc(19, 23, 30), utc(20, 0, 30), true), // 19th 17:30 local, 20th 00:30 server
+            prog(utc(20, 6, 0), utc(20, 7, 0), true),   // 20th 00:00 local
+            prog(utc(20, 19, 0), utc(20, 19, 45), true), // 20th 13:00 local
         ]);
-        let days = archive_days(&row, &tz, now);
-        let dates: Vec<String> = days.iter().map(|d| d.date.to_string()).collect();
-        assert_eq!(dates, ["2026-10-26", "2026-10-25"]);
-        assert_eq!(days[0].label, "Today");
-        assert_eq!(days[1].label, "Yesterday");
-        // The timeshift start is the server wall clock, which moved back an hour.
+        let days = archive_days(&row, &server, now, &viewer);
+        let got = summary(&days, &viewer);
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "Today".to_owned(),
+                    vec!["20 13:00".into(), "20 00:00".into()]
+                ),
+                (
+                    "Yesterday".to_owned(),
+                    vec!["19 17:30".into(), "19 16:00".into()]
+                ),
+            ]
+        );
         assert_eq!(
             days[1].programmes[0].start_local.to_string(),
-            "2026-10-25 01:30:00"
+            "2026-10-20 00:30:00",
+            "server wall clock for the timeshift URL"
         );
-        assert_eq!(days[1].programmes[0].duration_minutes(), 60);
+    }
+
+    #[test]
+    fn viewer_dst_change_keeps_viewer_dates() {
+        // New York leaves summer time on 1 Nov 2026 at 06:00Z (02:00 EDT → 01:00 EST).
+        let server = ServerTimeZone::from_name("Europe/Paris").unwrap_or_default();
+        let viewer = America::New_York;
+        let now = Utc
+            .with_ymd_and_hms(2026, 11, 1, 18, 0, 0)
+            .single()
+            .unwrap_or_default();
+        // Minutes after midnight UTC on 1 Nov.
+        let t = |min: i64| {
+            Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0)
+                .single()
+                .unwrap_or_default()
+                + opensmarters_core::chrono::Duration::minutes(min)
+        };
+        let row = EpgRow::from_programmes(vec![
+            // 31 Oct 23:30 EDT = 1 Nov 03:30Z.
+            prog(t(210), t(240), true),
+            // 1 Nov 00:30 EDT = 04:30Z.
+            prog(t(270), t(300), true),
+            // 1 Nov 01:30 EST (the second 01:30 of the night) = 06:30Z.
+            prog(t(390), t(420), true),
+        ]);
+        let days = archive_days(&row, &server, now, &viewer);
+        let dates: Vec<String> = days.iter().map(|d| d.date.to_string()).collect();
+        assert_eq!(dates, ["2026-11-01", "2026-10-31"]);
+        assert_eq!(days[0].label, "Today");
+        assert_eq!(days[0].programmes.len(), 2);
+        assert_eq!(days[1].label, "Yesterday");
+        assert_eq!(days[0].programmes[0].duration_minutes(), 30);
     }
 }

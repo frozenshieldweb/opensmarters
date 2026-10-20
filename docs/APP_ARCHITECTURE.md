@@ -22,6 +22,7 @@ cargo fmt; cargo clippy -p opensmarters --all-targets --all-features -- -D warni
 | `src/app.rs` | `OpensmartersApp` (the `eframe::App`): frame loop, router, lifecycle hooks, zoom/TV mode, harness hook |
 | `src/screens/` | **One module per screen** + the [`Screen`](#3-the-screen-contract) trait and `AppCtx` (`screens/mod.rs`) |
 | `src/screens/shell.rs` | Side rail (§6.1), `status_cluster` (clock, offline, unencrypted), `page_title` |
+| `src/screens/common/` | Logic shared by screens: `locks` (an item is locked when any of its categories is), `channel_list` (unlocked + sorted channel lists), `profile_data::delete_profile` (also forgets the profile's recent searches and remembered categories; use it wherever a profile is deleted) |
 | `src/nav/` | `Route` (typed routes, `--route` syntax), `Router` (back stack), `Navigator` (`cx.nav`) |
 | `src/focus/` | The spatial focus engine (`engine.rs`, pure + unit-tested) and its egui glue (`mod.rs`) |
 | `src/ui/` | Design system: `theme` (tokens, fonts, visuals), `icons` (Phosphor), `paint` (focus ring/glow, scrims, cover-fit), `text` (capping, truncation, timecodes), `motion`, `layout` (breakpoints), `assets` (bundled art), `widgets/` |
@@ -392,14 +393,14 @@ Dev-only environment switches for `--demo`:
   (truncate with ellipsis to N rows), `overline`, `timecode`, `duration_short`, `remaining`.
 - **Widgets** (`ui::widgets`): `Button` (primary/secondary/ghost/danger, large/small, icon,
   trailing), `IconButton` (round; `.primary()` for the OSD play), `Chip`, `Segmented`,
-  `Toggle`, `Tabs`, `chip::tag`, `TextField` (label, password + reveal, error; it lays out
+  `Toggle`, `Tabs`, `chip::tag`, `chip::ChipRow` (sideways chip row with edge fades), `TextField` (label, password + reveal, error; it lays out
   label + field vertically, so wrap it in `ui.vertical` inside a horizontal row),
   `SearchField`, `Callout` (+ `Callout::unencrypted()`), `Badge::{live, live_dot, pill}`,
   `PosterCard`, `BackdropCard`, `ChannelTile`, `ChannelLogo` (plate / monogram / fallback),
   `Avatar`, `Rail` (heading + carousel, paint allowance, memory, See all), `VirtualList`,
   `VirtualGrid` (row-virtualised card grid; `columns_for(width)`),
   `MenuRow`, `SettingRow`, `Dialog` (modal, focus trap; actions right-to-left, primary
-  first), `Toasts`, `EmptyState`, `coming_soon`, `feedback::skeleton(_line)`, `PinPad`
+  first), `Toasts`, `EmptyState` (+ an optional ghost `second_action`, read with `show_both`), `coming_soon`, `feedback::skeleton(_line)`, `PinPad`
   (fixed length to check a PIN; `PinPad::variable` to choose one), `PinPrompt` (loads the
   PIN state first so a lockout shows at once, verifies off-thread; dialog or inline;
   passes immediately when no PIN is set), `clock::clock`.

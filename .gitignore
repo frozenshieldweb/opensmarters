@@ -20,3 +20,6 @@ _reference/
 
 # Agent worktrees
 .claude/
+
+# Release output
+/dist/

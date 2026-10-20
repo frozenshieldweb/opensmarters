@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Catch-up: channels that keep an archive → day tabs (server-local dates, newest first)
-//! → programmes (time, title, synopsis, duration, watched progress) → inline preview with
-//! the programme card.
+//! Catch-up: channels that keep an archive → day tabs (the viewer's dates, newest first)
+//! → programmes (newest first: time, title, synopsis, duration, watched progress) →
+//! inline preview with the programme card. Days and times are on the viewer's clock; the
+//! provider's clock is only used to build the timeshift link.
 //!
 //! Behaviour:
 //! - Moving the focus through the channel list selects the channel after a short pause
@@ -11,8 +12,8 @@
 //!   player's (`"<stream_id>@<start>"`).
 //! - If the provider refuses the timeshift stream, the card says "Catch-up isn't
 //!   available for this programme right now" and offers the **other** timeshift format
-//!   once ([`Attempt`]); when that one works, it is used for the rest of the session and
-//!   the card offers to save it to the profile.
+//!   once ("Try another way", [`Attempt`]); when that one works, it is used for the rest
+//!   of the session and the card offers to save it to the profile.
 //! - Other screens open a channel/programme with [`open`] (Guide, Home's Continue
 //!   watching).
 
@@ -28,8 +29,9 @@ use eframe::egui::{
 use opensmarters_core::ArchiveProgramme;
 use opensmarters_core::catalog::{SearchQuery, normalize_for_search};
 use opensmarters_core::chrono::Local;
-use opensmarters_store::{ContentKind, PlaybackKind, PlaybackProgress, TimeshiftFormat};
+use opensmarters_store::{PlaybackKind, PlaybackProgress, TimeshiftFormat};
 
+use super::common::channel_list;
 use super::{AppCtx, Screen, shell};
 use crate::error::AppError;
 use crate::focus::{self, FocusOpts};
@@ -195,23 +197,13 @@ impl CatchupScreen {
         if self.list_key.as_ref() == Some(&key) {
             return;
         }
-        let parental = key.parental;
-        let channels: Vec<LiveChannel> = cat
-            .channels
-            .iter()
-            .filter(|c| c.archive && c.stream_id().is_some())
-            .filter(|c| {
-                !parental
-                    || !c.categories.iter().any(|id| {
-                        session.is_category_locked(
-                            ContentKind::Live,
-                            id,
-                            cat.category_name(id).unwrap_or(""),
-                        )
-                    })
-            })
-            .cloned()
-            .collect();
+        let channels = channel_list::unlocked_in_session(
+            session,
+            cat,
+            cat.channels
+                .iter()
+                .filter(|c| c.archive && c.stream_id().is_some()),
+        );
         self.names = Arc::new(
             channels
                 .iter()
@@ -277,7 +269,7 @@ impl CatchupScreen {
             return;
         };
         let tz = session.server_time_zone();
-        self.days = archive_days(row, &tz, now);
+        self.days = archive_days(row, &tz, now, &Local);
         self.days_gen = self.table.generation();
         if self.day >= self.days.len() {
             self.day = 0;
@@ -918,26 +910,6 @@ impl CatchupScreen {
             list_top - 8.0,
             Stroke::new(1.0, color::STROKE_SUBTLE),
         );
-        // Days are the provider's; say so when its clock differs from ours.
-        if !self.days.is_empty() {
-            let server_off =
-                (session.server_time_zone().to_local(cx.now) - cx.now.naive_utc()).num_minutes();
-            let local_off = i64::from(
-                opensmarters_core::chrono::Offset::fix(cx.now.with_timezone(&Local).offset())
-                    .local_minus_utc(),
-            ) / 60;
-            if server_off != local_off && rect.width() > 560.0 {
-                text::line(
-                    &painter,
-                    pos2(rect.right(), tabs_rect.center().y),
-                    Align2::RIGHT_CENTER,
-                    "Days follow your provider's clock",
-                    font::caption(),
-                    color::TEXT_3,
-                    rect.width() * 0.4,
-                );
-            }
-        }
         let rows_rect = Rect::from_min_max(
             pos2(rect.left() - 8.0, list_top),
             pos2(rect.right() + 8.0, rect.bottom()),
@@ -1030,14 +1002,11 @@ impl CatchupScreen {
         };
         let progs = day.programmes;
         let pids: Vec<String> = progs.iter().map(|p| progress_id(sid, p)).collect();
-        // Focus a programme after a selection/hand-off (latest one for "Today").
+        // Focus a programme after a selection/hand-off (the newest one: lists are newest
+        // first).
         if let Some(want) = self.focus_programme.take() {
             let idx = if want.is_empty() {
-                if self.day == 0 {
-                    progs.len().saturating_sub(1)
-                } else {
-                    0
-                }
+                0
             } else {
                 pids.iter().position(|p| *p == want).unwrap_or(0)
             };
@@ -1308,11 +1277,11 @@ impl CatchupScreen {
                         (Some(n), _) => ("Playback stopped", n),
                         (None, Fallback::TryAlternate(_)) => (
                             unavailable_msg,
-                            "Some providers expect a different link format for catch-up. You can try the other one once.".to_owned(),
+                            "Some providers need catch-up links in another form. You can try once more that way.".to_owned(),
                         ),
                         (None, Fallback::GiveUp) => (
                             unavailable_msg,
-                            "Your provider didn't play it with either link format. It may not keep this archive, or it may be busy. Try again later.".to_owned(),
+                            "Your provider didn't play it either way. It may not keep this archive, or it may be busy. Try again later.".to_owned(),
                         ),
                         (None, _) => (unavailable_msg, msg.clone()),
                     };
@@ -1523,7 +1492,7 @@ impl CatchupScreen {
                 let mut dismiss = false;
                 child.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
-                    go = Button::primary("Try the other link format")
+                    go = Button::primary("Try another way")
                         .icon(icons::ARROW_CLOCKWISE)
                         .id(Id::unique("catchup.try-alt"))
                         .show(ui)
@@ -1544,9 +1513,9 @@ impl CatchupScreen {
             Fallback::OfferSave(fmt) => {
                 Callout::new(
                     CalloutKind::Success,
-                    "The other link format works.",
+                    "That worked.",
                     format!(
-                        "Your provider plays catch-up with the {} format. Use it for this account from now on?",
+                        "Your provider plays catch-up this way ({} link format). Use it for this account from now on?",
                         format_label(fmt)
                     ),
                 )
@@ -1569,7 +1538,7 @@ impl CatchupScreen {
                 if save {
                     session.set_timeshift_format(fmt, true);
                     cx.toasts
-                        .success("Saved. Catch-up will use this link format.");
+                        .success("Saved. Catch-up will play this way from now on.");
                     self.offer = Fallback::None;
                     focus::request(&cx.egui, Id::unique("catchup.fullscreen"));
                 }

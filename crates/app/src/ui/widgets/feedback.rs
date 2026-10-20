@@ -129,15 +129,26 @@ pub fn skeleton_rail(
     }
 }
 
-/// An empty/error state: illustration, Fraunces headline, body, one action.
+/// An empty/error state: illustration, Fraunces headline, body, one action (plus an
+/// optional second, quieter one next to it).
 #[derive(Debug)]
 pub struct EmptyState<'a> {
     illustration: Illustration,
     headline: &'a str,
     body: &'a str,
     action: Option<(&'a str, bool)>,
+    second: Option<(&'a str, Option<&'static str>)>,
     id: Id,
     size: f32,
+}
+
+/// What [`EmptyState::show_both`] reports.
+#[derive(Debug, Default)]
+pub struct EmptyStateResponse {
+    /// The action's focus.
+    pub action: Option<Focus>,
+    /// The second action's focus.
+    pub second: Option<Focus>,
 }
 
 impl<'a> EmptyState<'a> {
@@ -148,6 +159,7 @@ impl<'a> EmptyState<'a> {
             headline,
             body,
             action: None,
+            second: None,
             id,
             size: 200.0,
         }
@@ -160,6 +172,14 @@ impl<'a> EmptyState<'a> {
         self
     }
 
+    /// A second, quieter action (ghost button with an optional icon) to the right of the
+    /// first. Read it with [`EmptyState::show_both`].
+    #[must_use]
+    pub fn second_action(mut self, label: &'a str, icon: Option<&'static str>) -> Self {
+        self.second = Some((label, icon));
+        self
+    }
+
     /// Illustration size (200 desktop).
     #[must_use]
     pub fn illustration_size(mut self, s: f32) -> Self {
@@ -169,6 +189,11 @@ impl<'a> EmptyState<'a> {
 
     /// Adds the state centred in the available rect. Returns the action's focus.
     pub fn show(self, ui: &mut Ui) -> Option<Focus> {
+        self.show_both(ui).action
+    }
+
+    /// Adds the state centred in the available rect. Returns both actions' focus.
+    pub fn show_both(self, ui: &mut Ui) -> EmptyStateResponse {
         let avail = ui.available_rect_before_wrap();
         let body_g = {
             let mut job = text::job(self.body, font::body(), color::TEXT_2, 480.0, 2);
@@ -180,7 +205,7 @@ impl<'a> EmptyState<'a> {
             + 34.0
             + 8.0
             + body_g.size().y
-            + if self.action.is_some() {
+            + if self.action.is_some() || self.second.is_some() {
                 24.0 + 44.0
             } else {
                 0.0
@@ -209,19 +234,42 @@ impl<'a> EmptyState<'a> {
         );
         let by = hy + 34.0 + 8.0;
         painter.galley(pos2(cx, by), body_g.clone(), color::TEXT_2);
-        let mut out = None;
-        if let Some((label, primary)) = self.action {
+        let mut out = EmptyStateResponse::default();
+        let first = self.action.map(|(label, primary)| {
             let b = if primary {
                 Button::primary(label)
             } else {
                 Button::secondary(label)
             };
-            let b = b.id(self.id.with("action")).autofocus();
-            let size = b.size(ui);
-            let rect =
-                Rect::from_min_size(pos2(cx - size.x / 2.0, by + body_g.size().y + 24.0), size);
+            b.id(self.id.with("action")).autofocus()
+        });
+        let second = self.second.map(|(label, icon)| {
+            let b = Button::ghost(label).id(self.id.with("second"));
+            match icon {
+                Some(g) => b.icon(g),
+                None => b,
+            }
+        });
+        // Centre the button row (12 pt between the two).
+        let w1 = first.as_ref().map_or(0.0, |b| b.size(ui).x);
+        let w2 = second.as_ref().map_or(0.0, |b| b.size(ui).x);
+        let gap = if first.is_some() && second.is_some() {
+            12.0
+        } else {
+            0.0
+        };
+        let mut x = cx - (w1 + gap + w2) / 2.0;
+        let y = by + body_g.size().y + 24.0;
+        if let Some(b) = first {
+            let rect = Rect::from_min_size(pos2(x, y), b.size(ui));
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-            out = Some(b.show(&mut child));
+            out.action = Some(b.show(&mut child));
+            x += w1 + gap;
+        }
+        if let Some(b) = second {
+            let rect = Rect::from_min_size(pos2(x, y), b.size(ui));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+            out.second = Some(b.show(&mut child));
         }
         ui.allocate_rect(avail, Sense::hover());
         out

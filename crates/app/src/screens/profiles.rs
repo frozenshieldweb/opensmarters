@@ -437,7 +437,7 @@ impl Screen for ProfilesScreen {
                         if Button::danger("Delete").icon(icons::TRASH).show(ui).activated {
                             let store = cx.services.store.clone();
                             self.deleting.start_blocking(cx.rt(), &cx.egui, move || {
-                                store.profiles().delete(id)?;
+                                crate::screens::common::profile_data::delete_profile(&store, id)?;
                                 Ok(id)
                             });
                             close = true;

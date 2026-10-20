@@ -28,6 +28,7 @@ use opensmarters_core::catalog::{SortOrder, sorted_indices};
 use opensmarters_core::{Category, CategoryId, Series, SeriesInfo, VodInfo, VodStream};
 use opensmarters_store::{ContentKind, Favourite, PlaybackKind, PlaybackProgress, RecentChannel};
 
+use super::common::locks::{self, CategoryNames};
 use super::{AppCtx, Screen};
 use crate::error::AppError;
 use crate::focus;
@@ -237,27 +238,25 @@ fn unlocked<T>(
     session: &Session,
     kind: ContentKind,
     items: impl IntoIterator<Item = T>,
-    category: impl Fn(&T) -> Option<&CategoryId>,
-    names: &HashMap<CategoryId, String>,
+    categories: impl Fn(&T) -> Vec<&CategoryId>,
+    names: &CategoryNames,
 ) -> Vec<T> {
     if !session.parental_enabled() {
         return items.into_iter().collect();
     }
+    // Every category of an item counts (SR-15), not only the primary one.
     items
         .into_iter()
-        .filter(|it| {
-            category(it).is_none_or(|c| {
-                let name = names.get(c).map_or("", String::as_str);
-                !session.is_category_locked(kind, c, name)
-            })
-        })
+        .filter(|it| !locks::is_item_locked(session, kind, &categories(it), names))
         .collect()
 }
 
-fn names_of(cats: &[Category]) -> HashMap<CategoryId, String> {
-    cats.iter()
-        .map(|c| (c.id.clone(), c.name.clone()))
-        .collect()
+fn movie_categories(m: &VodStream) -> Vec<&CategoryId> {
+    locks::item_categories(m.category_id.as_ref(), &m.category_ids)
+}
+
+fn series_categories(s: &Series) -> Vec<&CategoryId> {
+    locks::item_categories(s.category_id.as_ref(), &s.category_ids)
 }
 
 impl HomeScreen {
@@ -309,23 +308,22 @@ impl HomeScreen {
                 // Most recently saved first.
                 favs.sort_by_key(|f| std::cmp::Reverse(f.added_at));
                 // Category names from the cache only (never wait for the network here).
-                let mut names = HashMap::new();
+                let mut cats: Vec<Category> = Vec::new();
                 if s.is_xtream() {
                     for key in ["xt:vod_categories", "xt:series_categories"] {
-                        if let Some(cats) = s.peek_cached::<Vec<Category>>(key).await {
-                            names.extend(names_of(&cats));
+                        if let Some(c) = s.peek_cached::<Vec<Category>>(key).await {
+                            cats.extend(c.iter().cloned());
                         }
                     }
                 }
-                // Items saved from a category that is locked now stay off Home.
-                // TODO(batch B): `Session::is_item_locked` once it lands.
+                let names = CategoryNames::new(&cats);
+                // Items saved from a category that is locked now stay off Home (the
+                // snapshot knows the primary category only).
                 if s.parental_enabled() {
                     favs.retain(|f| {
-                        f.snapshot.category_id.as_deref().is_none_or(|c| {
-                            let id = CategoryId::new(c);
-                            let name = names.get(&id).map_or("", String::as_str);
-                            !s.is_category_locked(f.kind, &id, name)
-                        })
+                        let id = f.snapshot.category_id.as_deref().map(CategoryId::new);
+                        let ids: Vec<&CategoryId> = id.iter().collect();
+                        !locks::is_item_locked(&s, f.kind, &ids, &names)
                     });
                 }
                 favs.truncate(RAIL_ITEMS);
@@ -356,7 +354,7 @@ impl HomeScreen {
             let s = Arc::clone(&session);
             self.movies.start(cx.rt(), &cx.egui, move |_| async move {
                 let cats = s.vod_categories().await?;
-                let names = names_of(&cats);
+                let names = CategoryNames::new(cats.iter());
                 if let Some(all) = s
                     .peek_cached::<Vec<VodStream>>(&vod_streams_key(None))
                     .await
@@ -365,7 +363,7 @@ impl HomeScreen {
                         &s,
                         ContentKind::Movie,
                         all.iter().cloned(),
-                        |m| m.category_id.as_ref(),
+                        movie_categories,
                         &names,
                     );
                     return Ok(Arc::new(kept));
@@ -374,7 +372,7 @@ impl HomeScreen {
                     &s,
                     ContentKind::Movie,
                     cats.iter().cloned(),
-                    |c| Some(&c.id),
+                    |c| vec![&c.id],
                     &names,
                 );
                 let mut out: Vec<VodStream> = Vec::new();
@@ -383,18 +381,25 @@ impl HomeScreen {
                         out.extend(v.iter().cloned());
                     }
                 }
-                Ok(Arc::new(out))
+                // An item of an open category can also sit in a locked one.
+                Ok(Arc::new(unlocked(
+                    &s,
+                    ContentKind::Movie,
+                    out,
+                    movie_categories,
+                    &names,
+                )))
             });
             let s = Arc::clone(&session);
             self.series.start(cx.rt(), &cx.egui, move |_| async move {
                 let cats = s.series_categories().await?;
-                let names = names_of(&cats);
+                let names = CategoryNames::new(cats.iter());
                 if let Some(all) = s.peek_cached::<Vec<Series>>(&series_key(None)).await {
                     let kept = unlocked(
                         &s,
                         ContentKind::Series,
                         all.iter().cloned(),
-                        |m| m.category_id.as_ref(),
+                        series_categories,
                         &names,
                     );
                     return Ok(Arc::new(kept));
@@ -403,7 +408,7 @@ impl HomeScreen {
                     &s,
                     ContentKind::Series,
                     cats.iter().cloned(),
-                    |c| Some(&c.id),
+                    |c| vec![&c.id],
                     &names,
                 );
                 let mut out: Vec<Series> = Vec::new();
@@ -412,7 +417,13 @@ impl HomeScreen {
                         out.extend(v.iter().cloned());
                     }
                 }
-                Ok(Arc::new(out))
+                Ok(Arc::new(unlocked(
+                    &s,
+                    ContentKind::Series,
+                    out,
+                    series_categories,
+                    &names,
+                )))
             });
         }
     }

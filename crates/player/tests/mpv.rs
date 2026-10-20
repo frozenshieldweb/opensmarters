@@ -554,3 +554,247 @@ fn loads_wait_for_a_render_context_when_video_is_enabled() {
     p.stop().unwrap();
     assert!(!p.has_pending_load());
 }
+
+// ---------------------------------------------------------------------------
+// Hostile provider content (security review, docs/SECURITY.md).
+
+/// A fresh scratch directory under the system temp dir.
+fn scratch_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "opensmarters-player-{tag}-{}-{}",
+        std::process::id(),
+        Instant::now().elapsed().as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Loads `url` and collects events for `secs` seconds (or until the core is
+/// idle again after at least one `EndFile`).
+fn run_for(p: &Player, url: &str, secs: u64) -> Vec<PlayerEvent> {
+    let url = PlayableUrl::parse(url).unwrap();
+    p.load(&url, &LoadOptions::default()).unwrap();
+    let mut ended = false;
+    let (_, events) = wait_for(p, Duration::from_secs(secs), |e, s| {
+        if matches!(
+            e,
+            Some(PlayerEvent::EndFile(EndReason::Error(_) | EndReason::Eof))
+        ) {
+            ended = true;
+        }
+        ended && s.idle
+    });
+    events
+}
+
+fn played(events: &[PlayerEvent]) -> bool {
+    events.iter().any(|e| matches!(e, PlayerEvent::FileLoaded))
+}
+
+fn log_text(events: &[PlayerEvent]) -> String {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            PlayerEvent::Log(l) => Some(format!("{}: {}\n", l.prefix, l.text.trim_end())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn remote_m3u_playlist_entries_cannot_be_local_or_special() {
+    let _serial = serial();
+    let Some(ts) = media("test.ts") else { return };
+    let dir = scratch_dir("m3u");
+    std::fs::copy(&ts, dir.join("test.ts")).unwrap();
+    let file_url = url_for_file(&ts);
+    let raw_path = ts.display().to_string();
+    let server = Server::start(dir.clone());
+    // mpv's `hex://`/`memory://` turn a URL into in-memory data: try to
+    // smuggle an EDL (which can reference local files and lavfi graphs) or a
+    // nested playlist through them.
+    let hex = |s: &str| s.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+    let edl_local = hex(&format!("# mpv EDL v0\n{raw_path}\n"));
+    let edl_lavfi = hex("# mpv EDL v0\nav://lavfi:sine\n");
+    let m3u_local = hex(&format!("#EXTM3U\n{file_url}\n"));
+    let entries = [
+        file_url.clone(),
+        raw_path.clone(),
+        format!("edl://{raw_path}"),
+        "av://lavfi:sine".to_owned(),
+        "lavfi://sine".to_owned(),
+        format!("hex://{edl_local}"),
+        format!("hex://{edl_lavfi}"),
+        format!("hex://{m3u_local}"),
+        format!("memory://{raw_path}"),
+        format!("archive://{raw_path}|/x"),
+        format!("slice://0-1000@{raw_path}"),
+        format!("appending://{raw_path}"),
+        format!("lavf://file:{raw_path}"),
+        "fd://0".to_owned(),
+        format!("mf://{raw_path}"),
+        "dvd://".to_owned(),
+        "bd://".to_owned(),
+        "cdda://".to_owned(),
+        "smb://127.0.0.1/share/x.ts".to_owned(),
+    ];
+    let mut evil = String::from("#EXTM3U\n");
+    for e in &entries {
+        evil.push_str("#EXTINF:-1,x\n");
+        evil.push_str(e);
+        evil.push('\n');
+    }
+    std::fs::write(dir.join("evil.m3u"), evil).unwrap();
+    std::fs::write(
+        dir.join("good.m3u"),
+        format!("#EXTM3U\n#EXTINF:-1,net\n{}\n", server.url("test.ts")),
+    )
+    .unwrap();
+    let Some(p) = player(PlayerConfig::default().log_level(LogLevel::Verbose)) else {
+        return;
+    };
+
+    // Control: a network playlist may point at other network URLs.
+    let events = run_for(&p, &server.url("good.m3u"), 15);
+    assert!(
+        played(&events),
+        "control playlist did not play: {events:#?}"
+    );
+    p.stop().unwrap();
+    let (ok, _) = wait_for(&p, Duration::from_secs(5), |_, s| s.idle);
+    assert!(ok);
+
+    let events = run_for(&p, &server.url("evil.m3u"), 20);
+    let logs = log_text(&events);
+    assert!(
+        !played(&events),
+        "a remote playlist opened a local/special entry:\n{logs}"
+    );
+    assert!(p.state().time_pos.is_none());
+    eprintln!(
+        "playlist entries refused: {} | opened: {}",
+        logs.matches("Opening failed or was aborted").count(),
+        logs.matches("Opening done").count()
+    );
+    for line in logs.lines().filter(|l| l.contains("Opening done")) {
+        eprintln!("  {line}");
+    }
+    if std::env::var_os("OPENSMARTERS_TEST_DUMP").is_some() {
+        eprintln!("{logs}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn remote_edl_cannot_reference_local_files() {
+    let _serial = serial();
+    let Some(ts) = media("test.ts") else { return };
+    let dir = scratch_dir("edl");
+    let server = Server::start(dir.clone());
+    std::fs::write(
+        dir.join("evil.ts"),
+        format!("# mpv EDL v0\n{}\n", ts.display()),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("evil2.ts"),
+        format!("# mpv EDL v0\n{}\n", url_for_file(&ts)),
+    )
+    .unwrap();
+    let Some(p) = player(PlayerConfig::default().log_level(LogLevel::Verbose)) else {
+        return;
+    };
+    for name in ["evil.ts", "evil2.ts"] {
+        let events = run_for(&p, &server.url(name), 15);
+        assert!(
+            !played(&events),
+            "{name}: a remote EDL file opened a local file:\n{}",
+            log_text(&events)
+        );
+        p.stop().unwrap();
+        let _ = wait_for(&p, Duration::from_secs(5), |_, s| s.idle);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn redirects_to_non_http_protocols_are_not_followed() {
+    let _serial = serial();
+    let Some(_) = media("test.ts") else { return };
+    let server = Server::start(media_dir());
+    // Something listening where the redirects point, counting connections.
+    let trap = TcpListener::bind("127.0.0.1:0").unwrap();
+    let trap_port = trap.local_addr().unwrap().port();
+    trap.set_nonblocking(true).unwrap();
+    let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let hits = Arc::clone(&hits);
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while Instant::now() < deadline {
+                match trap.accept() {
+                    Ok((mut s, _)) => {
+                        let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
+                        let mut buf = [0u8; 256];
+                        let n = s.read(&mut buf).unwrap_or(0);
+                        hits.lock()
+                            .unwrap()
+                            .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(20)),
+                }
+            }
+        });
+    }
+    let Some(p) = player(PlayerConfig::default().log_level(LogLevel::Verbose)) else {
+        return;
+    };
+    let mut report = String::new();
+    let mut followed = Vec::new();
+    // `ftp` is last: libcurl (mpv's HTTP backend in this build) follows
+    // redirects to ftp/ftps by default (documented in docs/SECURITY.md); every
+    // other scheme must be refused without a connection.
+    for scheme in [
+        "gopher", "dict", "telnet", "smb", "ldap", "tftp", "scp", "sftp", "imap", "smtp", "mqtt",
+        "rtsp", "rtmp", "ftp",
+    ] {
+        let before = hits.lock().unwrap().len();
+        let target = format!("{scheme}://127.0.0.1:{trap_port}/x.ts");
+        let events = run_for(&p, &server.url(&format!("redirect/{target}")), 10);
+        let after = hits.lock().unwrap().len();
+        report.push_str(&format!(
+            "{scheme}: connections={} played={}\n",
+            after - before,
+            played(&events)
+        ));
+        if after > before {
+            followed.push(scheme);
+        }
+        p.stop().unwrap();
+        let _ = wait_for(&p, Duration::from_secs(5), |_, s| s.idle);
+    }
+    eprintln!("{report}");
+    assert!(
+        !report.contains("played=true"),
+        "a redirect to another protocol played:\n{report}"
+    );
+    assert!(
+        followed.iter().all(|s| *s == "ftp"),
+        "mpv followed a redirect to a non-HTTP protocol:\n{report}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn dll_search_path_is_restricted() {
+    assert!(opensmarters_player::harden_dll_search_path());
+    // Idempotent.
+    assert!(opensmarters_player::harden_dll_search_path());
+    // Release builds never search PATH or the working directory.
+    let cwd = std::env::current_dir().unwrap();
+    for p in opensmarters_player::libmpv_search_paths(None) {
+        assert!(p.is_absolute(), "{}", p.display());
+        assert_ne!(p.parent(), Some(cwd.as_path()), "{}", p.display());
+    }
+}

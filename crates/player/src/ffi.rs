@@ -230,7 +230,10 @@ pub(crate) fn api(explicit: Option<&Path>) -> Result<&'static MpvApi, LoadError>
 }
 
 /// Candidate absolute paths, in search order. Never relative to the current
-/// working directory (classic DLL-planting vector).
+/// working directory (classic DLL-planting vector). `PATH` is searched only by
+/// debug builds: a release build ships `libmpv-2.dll` next to the executable, and
+/// a directory on `PATH` may be writable by other users (installers that create
+/// `C:\SomeTool\` inherit an ACL that lets any user add files).
 pub(crate) fn candidate_paths(explicit: Option<&Path>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(p) = explicit {
@@ -253,7 +256,7 @@ pub(crate) fn candidate_paths(explicit: Option<&Path>) -> Vec<PathBuf> {
             .join(LIBMPV_FILE_NAME);
         out.push(dev);
     }
-    #[cfg(windows)]
+    #[cfg(all(windows, debug_assertions))]
     if let Some(path) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path) {
             if dir.is_absolute() {
@@ -264,7 +267,44 @@ pub(crate) fn candidate_paths(explicit: Option<&Path>) -> Vec<PathBuf> {
     out
 }
 
+/// Restricts where the process looks for DLLs that are loaded **by name** later
+/// (by libmpv, ffmpeg, GPU drivers, …): the application directory, System32 and
+/// directories added with `AddDllDirectory`, but never the current working
+/// directory or `PATH`. Returns whether the stricter order is in effect.
+///
+/// Windows only (always `false` elsewhere). Idempotent. [`crate::Player::new`]
+/// calls it before loading libmpv; an app should call it first thing in `main`,
+/// before creating windows, so its own late-loaded DLLs are covered too.
+pub fn harden_dll_search_path() -> bool {
+    #[cfg(windows)]
+    {
+        const LOAD_LIBRARY_SEARCH_DEFAULT_DIRS: u32 = 0x0000_1000;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn SetDefaultDllDirectories(directory_flags: u32) -> i32;
+            fn SetDllDirectoryW(path_name: *const u16) -> i32;
+        }
+        // SAFETY: plain Win32 call with a documented flag value; it only changes
+        // the process's default DLL search order.
+        let ok = unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS) } != 0;
+        let empty: [u16; 1] = [0];
+        // SAFETY: `empty` is a valid NUL-terminated (empty) wide string that
+        // outlives the call. An empty string removes the current directory from
+        // the legacy search order used by callers that bypass the default dirs.
+        let _ = unsafe { SetDllDirectoryW(empty.as_ptr()) };
+        ok
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 fn load(explicit: Option<&Path>) -> Result<MpvApi, LoadError> {
+    #[cfg(windows)]
+    if !harden_dll_search_path() {
+        tracing::warn!("could not restrict the DLL search path");
+    }
     let mut tried = Vec::new();
     for path in candidate_paths(explicit) {
         if !path.is_file() {

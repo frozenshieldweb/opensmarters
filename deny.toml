@@ -5,7 +5,16 @@ all-features = false
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # Linux-only accessibility stack (eframe -> accesskit_unix -> atspi -> zbus).
+    # zbus_xml parses D-Bus introspection XML from the local session bus, never provider data.
+    # Our own XML parsing (XMLTV) uses quick-xml >= 0.42 (crates/core). Revisit when accesskit updates.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.38 only via zbus_xml (Linux a11y, local D-Bus data)" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.38 only via zbus_xml (Linux a11y, local D-Bus data)" },
+    { id = "RUSTSEC-2026-0370", reason = "zbus crates unmaintained; Linux-only transitive deps of egui/keyring, no fix available" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus crates unmaintained; Linux-only transitive deps of egui/keyring, no fix available" },
+    { id = "RUSTSEC-2026-0372", reason = "zbus crates unmaintained; Linux-only transitive deps of egui/keyring, no fix available" },
+]
 
 [licenses]
 version = 2
@@ -30,6 +39,10 @@ allow = [
     "LGPL-2.1-or-later",
 ]
 confidence-threshold = 0.9
+exceptions = [
+    # egui's bundled default fonts (Ubuntu-Light) — redistribution permitted.
+    { allow = ["Ubuntu-font-1.0"], crate = "epaint_default_fonts" },
+]
 
 [bans]
 multiple-versions = "warn"

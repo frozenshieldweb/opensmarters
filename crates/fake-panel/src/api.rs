@@ -434,7 +434,7 @@ fn series_info(st: &PanelState, s: &Series) -> Value {
             })
         })
         .collect();
-    let episodes = if st.quirks.episodes_array && s.series_id % 3 == 0 {
+    let episodes = if st.quirks.episodes_array && s.series_id.is_multiple_of(3) {
         Value::Array(
             s.seasons
                 .iter()

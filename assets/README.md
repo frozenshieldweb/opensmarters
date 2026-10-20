@@ -2,7 +2,7 @@
 
 Design assets for opensmarters, art direction **"Afterglow"**. How to use them is in [`docs/DESIGN.md`](../docs/DESIGN.md).
 
-- **Embedded** in the binary (via `include_bytes!` / `egui::include_image!`): `fonts/`, `icon/*.png`, `icon/*.ico`, `brand/*.png`, `backgrounds/`, `placeholders/`, `avatars/`, `illustrations/`. Total ≈ 2.1 MB, of which fonts are 0.98 MB. `icon/icon-1024.png` (82 KB) is for packaging and stores, so there's no need to embed it.
+- **Embedded** in the binary (via `include_bytes!` / `egui::include_image!`): `fonts/`, `icon/*.png`, `icon/*.ico`, `brand/*.png`, `backgrounds/`, `placeholders/`, `avatars/`, `illustrations/`. Total ≈ 3.0 MB, of which fonts are 1.9 MB (text fonts 0.98 MB, Phosphor icons 0.94 MB). `icon/icon-1024.png` (82 KB) is for packaging and stores, so there's no need to embed it.
 - **Not embedded** (sources and documentation): `*.svg`, `concepts/`, this README.
 
 All raster artwork was created for this project. **No** asset contains text except the wordmark/lockup (set from an OFL font, not AI-rendered). No asset contains real logos, trademarks, brands, people or vendor material. Nothing was taken from IPTV Smarters or `_reference/`.
@@ -55,4 +55,12 @@ Because Source Sans 3 has a Reserved Font Name, **do not subset or otherwise mod
 | `login.jpg`, `home.jpg`, `home-scrolled.jpg`, `live-tv.jpg`, `detail.jpg`, `player.jpg` (TV density, zoom 1.75) | 1920×1080 concept mockups (JPEG q82, 1.9 MB for the whole folder): HTML/CSS authored by Codex from `docs/DESIGN.md`, using the real fonts, assets and Phosphor icons (MIT), rendered with headless Chrome. Film/series/channel names are fictional; the content art is fictional Codex image-gen artwork (landscapes, architecture, no people or text) made only for these mockups. |
 
 ## Icons used in the UI
-Not stored here. Use **Phosphor** (MIT) via the `egui-phosphor` crate, Regular + Fill (see DESIGN.md §4.8).
+**Phosphor** (MIT), Regular + Fill (see DESIGN.md §4.8). `egui-phosphor` 0.14 only supports egui 0.36, so the official font files are vendored instead:
+
+| File | Size | Source | Notes |
+|---|---|---|---|
+| `fonts/Phosphor.ttf` | 489 KB | [phosphor-icons/web](https://github.com/phosphor-icons/web) `src/regular/Phosphor.ttf` (package `@phosphor-icons/web` 2.1.2, commit `3d40a3e`), downloaded 2026-10-20 | **unmodified**. SHA-256 `06b91e022b7ee899a63efced879392a74f0bacbda54e4467e9f663220d173a10`. |
+| `fonts/Phosphor-Fill.ttf` | 449 KB | same repository, `src/fill/Phosphor-Fill.ttf` | **unmodified**. SHA-256 `a53f5d2630cab5e3b7536ecb9d69d71519a2190298c22b1f8d770dd37bc2940a`. |
+| `fonts/LICENSE-Phosphor.txt` | | the repository's `LICENSE` | MIT, Copyright (c) 2020-2021 Phosphor Icons |
+
+Glyph constants (`crates/app/src/ui/icons/glyphs.rs`) are generated from the same commit's `src/regular/style.css` (Regular and Fill share code points). Both fonts are embedded in the binary (~0.94 MB).

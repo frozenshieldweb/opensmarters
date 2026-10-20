@@ -8,7 +8,7 @@ This tracks the phases in [BUILD_PROMPT.md](BUILD_PROMPT.md#7-how-to-work).
 | 1: core (protocol, parsers) | **done** | 148 tests; 3 fuzz targets ran 5 min each with no crashes |
 | 2: store, keychain, fake-panel | **done** | Encrypted cache and leak test; fake-panel with quirk modes and generated media |
 | Art direction | **done** | "Afterglow": `docs/DESIGN.md`, `assets/` (generated with Codex) |
-| 3: UI shell, navigation, profiles, Live TV | in progress | |
+| 3: UI shell, navigation, profiles, Live TV | **3a done** (app foundation) | `crates/app`: architecture (`docs/APP_ARCHITECTURE.md`), Afterglow UI kit, spatial focus engine, router, session/cache/EPG/images, shared player with reconnect/progress; screens: shell, onboarding, profiles, Home, Live TV (preview, PIN locks, number entry), fullscreen player, Settings (account, playback, appearance, about); stubs for Movies/Series/Detail/Catch-up/Guide/Search/Favourites/Parental/Storage; dev harness (`--demo --ephemeral --route --keys --screenshot-*`). 50 tests. |
 | 4: VOD, series, resume, catch-up, favourites, parental, settings | not started | |
 | 5: hardening, packaging, SECURITY.md | not started | `cargo deny check` passes (documented exceptions) |
 | 6: real-provider test | not started | |
@@ -30,4 +30,6 @@ This tracks the phases in [BUILD_PROMPT.md](BUILD_PROMPT.md#7-how-to-work).
 
 - XMLTV in a non-UTF-8 encoding stops at the first invalid byte. The fix would be quick-xml's `encoding` feature.
 - The timeshift format still needs checking against real panels. Both formats are implemented and selectable per profile.
-- `egui-phosphor` 0.14 targets egui 0.36, but we use egui 0.37.
+- Phosphor icons: `egui-phosphor` 0.14 targets egui 0.36, so the app loads the official Phosphor TTFs from `assets/fonts/` (MIT) with generated glyph constants (`crates/app/src/ui/icons/glyphs.rs`).
+- App (3a) follow-ups: Home backdrop crossfade on focus; reduced motion doesn't follow the Windows animation setting yet; M3U EPG uses the first `url-tvg` only; compact breakpoint (< 960 pt) keeps the collapsed rail instead of a top bar.
+- Real-provider findings already handled in the app: one stream at a time (stop before load, debounced zapping), live reconnect 2/5/10/30/30 s, connection-limit message from `account_info()` after a stream failure, subtitles off by default, live OSD without scrubber, catalogue titles (never mpv's media title), catch-up failure message, Home never fetches the VOD/series "All" lists, decorative symbols mapped (★ ➤) and CJK/Arabic/superscripts via the OS font fallback.

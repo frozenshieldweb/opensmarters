@@ -6,12 +6,58 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+build = "build.rs"
 
 [[bin]]
 name = "opensmarters"
 path = "src/main.rs"
 
+[lib]
+# The app is a binary, but its modules are also a library so integration tests
+# (tests/*.rs) can drive the session layer, router and focus engine directly.
+name = "opensmarters_app"
+path = "src/lib.rs"
+
+[features]
+default = []
+## `--demo`: run the dev-only fake panel in-process and log in to it. Never enable in
+## release builds.
+demo = ["dep:fake-panel"]
+
 [dependencies]
+opensmarters-core = { path = "../core" }
+opensmarters-store = { path = "../store" }
+opensmarters-player = { path = "../player" }
+fake-panel = { path = "../fake-panel", optional = true }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+eframe = { version = "0.37", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    # OS font fallback for characters our fonts lack (CJK, Arabic, emoji in channel names).
+    "system_fonts",
+    "accesskit",
+    "clipboard",
+    "x11",
+    "wayland",
+] }
+egui_extras = { version = "0.37", default-features = false, features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+lru = "0.16"
+rfd = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "registry", "ansi"] }
+
+[dev-dependencies]
+fake-panel = { path = "../fake-panel" }
+
+[build-dependencies]
+embed-resource = "3"
 
 [lints]
 workspace = true

@@ -312,6 +312,59 @@ controls the bytes, the titles that become file names, the HTTP answers and the 
   (`UISettings.AnimationsEnabled`). File dialogs are `rfd` (system common dialogs). The exe
   embeds only an icon resource; no elevation is requested.
 
+### 4.11 The installer (`crates/installer`, `opensmarters-setup.exe`)
+
+The setup exe is downloaded from the web and run from the Downloads folder by people who
+trust it with their user account. Design: [ADR 0002](adr/0002-installer.md).
+
+- **No elevation, ever.** Per-user install (`%LOCALAPPDATA%\Programs\opensmarters`), an
+  `asInvoker` manifest, no services, scheduled tasks, autoruns or browser changes. The app
+  is opened after install through `%SystemRoot%\explorer.exe` (absolute path), so it runs
+  as the desktop user even if someone started setup elevated.
+- **No network.** The installer contains no HTTP client, TLS stack or network runtime
+  (`crates/installer/tests/no_network.rs` checks the dependency graph with `cargo tree`).
+- **DLL planting** (the classic installer flaw when run from Downloads): the setup binary
+  is linked with `/DEPENDENTLOADFLAG:0x800`, so its static imports are resolved from
+  System32 only, and `main` first calls `opensmarters_player::harden_dll_search_path()`
+  (default DLL directories, current directory removed) before anything loads by name.
+- **Integrity first.** The payload is one xz archive with a SHA-256 manifest, embedded in
+  the exe (covered by the Authenticode signature once releases are signed). The archive
+  hash is checked before anything is extracted; every file is hashed as it is written and
+  again by reading it back; any mismatch stops with "The installer is damaged. Download it
+  again and check its SHA-256." (`payload.rs`, `tests/rollback.rs`).
+- **Atomic and recoverable.** Files go to `<dir>.new`, are verified, then swapped with the
+  old folder; shortcuts and the Apps & features entry are written last; any failure or a
+  cancel rolls everything back (registry values restored exactly, shortcuts restored byte
+  for byte). Tested by injecting failures at each stage (`tests/rollback.rs`).
+- **Paths.** The install folder is canonicalised and refused if it is a network path (UNC,
+  mapped drive), a drive root, reached through a junction or symbolic link, inside Windows /
+  Program Files / ProgramData / the app's data folder / the recordings folder, or one of
+  the user's special folders itself. Setup installs only into an empty folder or one
+  holding its own `install-manifest.txt` (`paths.rs`).
+- **Uninstall deletes only what it installed**: files listed in `install-manifest.txt`
+  (relative paths validated: no `..`, drives, device names; never through a junction),
+  then folders left empty. Files the user added stay. Shortcuts are removed only if they
+  point into the install folder. The app's data folder and saved passwords are deleted
+  **only** when the user ticks the unticked boxes (or passes `--purge-data` /
+  `--purge-passwords`); passwords are found by enumerating generic credentials whose
+  service part is exactly `opensmarters` (`keychain.rs`). Recordings and downloads in the
+  Videos folder are never touched.
+- **Self-removal.** `uninstall.exe` copies itself to the per-user `%TEMP%`, runs the copy
+  (which reports its exit code back through a pipe) and exits; the copy then deletes the
+  original. Old copies are deleted by the next run.
+- **Test seams are compiled out.** `--sandbox` (temp folders, the test registry root
+  `HKCU\Software\opensmartersTest\<id>`, a fake keychain), `--preview`, the harness and
+  `--slow` exist only with the `dev` cargo feature; release builds reject them.
+- **Logs** (`%TEMP%\opensmarters-setup.log`) hold paths and steps only; the installer never
+  reads a secret.
+
+Residual: releases are **not Authenticode-signed** yet (SR-19), so SmartScreen warns and
+only the published SHA-256 vouches for the download; `tools/package.ps1` signs both exes as
+soon as a certificate is configured. "Delete my data" removes `%LOCALAPPDATA%\opensmarters`
+as a whole: a recordings folder the user moved *inside* it would go too. A running app is
+detected by its files being in use (the user is asked to close it; setup never closes or
+kills it).
+
 ## 5. Residual risks and out of scope
 
 - **Memory-safety bugs in libmpv/FFmpeg/libcurl/OpenSSL/libass** on hostile streams are the
@@ -422,6 +475,10 @@ cargo +nightly fuzz run hls -- -max_total_time=300
 # Recordings and downloads: Range resume, redirects, timeouts, HTML/playlist bodies refused
 cargo test -p opensmarters-core --test download
 cargo test -p opensmarters --all-features --test dvr
+
+# Installer: install/update/repair/uninstall and rollback in sandboxes (test registry root
+# HKCU\Software\opensmartersTest, temp folders); the CLI end to end; no network crates
+cargo test -p opensmarters-installer --features dev
 ```
 
 **End-to-end log check** (synthetic credentials only; the fake panel's `special` user has

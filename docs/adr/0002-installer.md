@@ -76,12 +76,16 @@ and writes:
 |---|---|---|---|
 | zip (deflate, today's portable zip) | | 59.9 MB | |
 | zstd level 22 + long window | 36.6 MB | ≈ 47 MB | 0.3 s |
-| **xz preset 9 (`lzma-rust2`)** | **33.6 MB** | **≈ 43 MB** | **1.5 s** |
+| xz preset 9 (`lzma-rust2`) | 33.6 MB | ≈ 43 MB | 1.5 s |
+| **xz preset 9 + BCJ x86 filter (`lzma-rust2`), shipped** | **33.2 MB** | **42.1 MB** | **1.5 s** |
 | xz preset 9e (liblzma, for reference) | 33.5 MB | | 1.7 s |
 
-xz is ~4 MB smaller, and `lzma-rust2` is a **pure-Rust** encoder and decoder (Apache-2.0)
-whose ratio matches liblzma, so neither the installer nor the build needs a C library.
-Decoding the whole payload takes about 2 s, which is real work the progress light follows.
+xz is ~5 MB smaller, and `lzma-rust2` is a **pure-Rust** encoder and decoder (Apache-2.0)
+whose ratio matches liblzma, so neither the installer nor the build needs a C library. The
+x86 branch filter (BCJ) helps the exe and the DLL a little more. Decoding the whole payload
+takes about 2 s, which is real work the progress light follows. Measured on the 0.1.0
+release folder (152.6 MB, 10 files): payload 42.1 MB, setup exe 51.4 MiB, portable zip
+57.1 MiB.
 
 **Embedding: a build script, not an appended archive.** `crates/installer/build.rs`
 `include_bytes!`s `payload.xz` and the manifest:
@@ -139,8 +143,9 @@ validate target ─▶ archive hash ─▶ extract to <dir>.new (hash each file)
 |---|---|
 | No elevation, DPI, long paths | Embedded application manifest: `asInvoker`, PerMonitorV2, `supportedOS` Windows 10/11, `longPathAware` (`build.rs`, via `embed-resource`, with the icon and a VERSIONINFO naming the product "opensmarters") |
 | DLL planting (the exe runs from Downloads) | Static imports are resolved from System32 only (`/DEPENDENTLOADFLAG:0x800` link flag on the setup binary), and the first line of `main` calls `opensmarters_player::harden_dll_search_path()` (the player crate's audited `unsafe`, reused rather than duplicated) |
+| Clean PCs without the Visual C++ Redistributable | The VC runtime is linked statically into the setup binary (link arguments in `build.rs`); its imports are then Windows system DLLs only, the Universal CRT being part of Windows 10/11 |
 | Known folders (Start menu, Desktop, `%LOCALAPPDATA%\Programs`, system folders) | `known-folders` (safe `SHGetKnownFolderPath` wrapper) |
-| Apps & features entry | `winreg` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\opensmarters` |
+| Apps & features entry | `winreg` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\opensmarters`; `URLInfoAbout`/`HelpLink` come from the workspace `repository` field (one place) |
 | Shortcuts | `mslnk` (pure-Rust `.lnk` writer). The app defines no AppUserModelID, so none is set. |
 | Folder picker | `rfd` (already used by the app) |
 | Purging saved passwords (opt-in at uninstall) | `windows-native-keyring-store` + `keyring-core` (already in the tree through `keyring`): enumerate generic credentials whose service part is `opensmarters`, delete them |
@@ -195,9 +200,28 @@ and the setup exe (before hashing), with an RFC 3161 timestamp; otherwise the bu
 unsigned and the script says so. Until releases are signed, SmartScreen warns; the landing
 page says so honestly.
 
+## Decision 8: the window
+
+- 720 × 460 pt, not resizable, no OS title bar: a custom header (symbol mark, drag region,
+  close button). Windows 11 rounds the corners and draws the shadow of the undecorated
+  window (eframe's `Decorations(false)` command asks for winit's undecorated shadow);
+  Windows 10 shows square corners.
+- One light: the **open-corners symbol** over the art panel is an empty frame of dark glass
+  with a champagne hairline at rest; while working the art dims and the symbol fills with
+  light along its diagonal (a triangle-strip mesh built from the SVG geometry, per-vertex
+  gradient, soft leading edge, feathered glow). Removing lets the light drain. Reduced
+  motion (Windows' *Animation effects*, via `afterglow::system_motion`) shows a plain bar
+  inside the frame instead, with ≤ 100 ms fades and no slides.
+- Focus is egui's own (Tab/Shift+Tab, arrows, Enter/Space, AccessKit roles and labels on
+  every control); hover moves it; the ring and glow are Afterglow's. While the installer
+  works nothing is focused by default, so the light is the one bright thing; Esc asks to
+  cancel.
+- If OpenGL can't start (a VM without a graphics driver), setup offers the default install
+  (or the plain uninstall) through a message box instead of failing.
+
 ## Consequences and follow-ups
 
-- The setup exe (≈ 52 MB measured target) stays under the portable zip (59.9 MB).
+- The setup exe (51.4 MiB measured) stays under the portable zip (57.1 MiB).
 - Follow-ups: an "all users" install into Program Files (needs elevation; out of scope for
   v1); a "close it for me" button for a running app; an MSI for enterprise deployment;
   Authenticode signing of releases; a clean-machine VM test as part of release QA.

@@ -1,0 +1,153 @@
+# Launch assets (landing page + installer): the single list of what the pipeline makes.
+# Stage 1 (`codex_generate.py`) reads [[codex]]; stage 2 (`build.py`) reads [[output]].
+# Paths are relative to the repository root. See tools/assets/README.md.
+
+product = "opensmarters"
+wordmark = "opensmarters"
+out_dir = "assets/launch"
+
+# ---------------------------------------------------------------------------------------
+# Stage 1: AI image generation with Codex CLI (non-deterministic; a human picks one
+# candidate and copies it to `chosen`, which is committed so stage 2 is reproducible).
+# ---------------------------------------------------------------------------------------
+
+[[codex]]
+id = "installer-panel"
+brief = "briefs/installer-panel.md"
+gen_size = "1024x1536 (portrait 2:3)"
+candidates = 3
+chosen = "assets/launch/sources/installer-panel.png"
+
+[[codex]]
+id = "illustration-ready"
+brief = "briefs/illustration-ready.md"
+gen_size = "1254x1254 (square)"
+candidates = 3
+chosen = "assets/launch/sources/illustration-ready.png"
+
+# ---------------------------------------------------------------------------------------
+# Stage 2: deterministic build. kind = photo | lightart | html | font | copy
+# Budgets are in KiB and fail the build when exceeded.
+# ---------------------------------------------------------------------------------------
+
+# --- Installer -------------------------------------------------------------------------
+
+[[output]]
+kind = "photo"
+id = "installer-panel"
+src = "assets/launch/sources/installer-panel.png"
+size = [600, 920]            # @2x of the 300×460 pt right-hand panel of the 720×460 pt window
+anchor = [0.5, 0.5]
+gain = 1.0
+grain = 1.4
+seed = 7
+edge_fade = { side = "left", width = 0.28, color = "#141013" }  # blends into the window's `bg`
+exports = [
+  { path = "installer/panel@2x.jpg", width = 600, quality = 86, max_kb = 140 },
+  { path = "installer/panel@1x.jpg", width = 300, quality = 86, max_kb = 45 },
+]
+
+[[output]]
+kind = "lightart"
+id = "illustration-ready"
+src = "assets/launch/sources/illustration-ready.png"
+size = 512
+margin = 0.06
+exports = [
+  { path = "installer/ready.png", width = 512, max_kb = 260 },
+  { path = "web/ready.png", width = 512, max_kb = 260 },
+]
+
+# --- Brand: the wordmark and lockup are the existing assets/brand/wordmark.png and
+# lockup.png (typeset from Fraunces; see assets/README.md). Nothing to build here.
+
+# --- Web --------------------------------------------------------------------------------
+
+[[output]]
+kind = "photo"
+id = "hero"
+src = "assets/backgrounds/hero.jpg"
+size = [1920, 1080]
+anchor = [1.0, 0.5]
+gain = 1.0
+grain = 0.0
+seed = 0
+# AVIF q80 / WebP q90: lower settings smooth away the source's film grain and the dark
+# gradients band (measured: AVIF q62 keeps 6 grey levels in the dark area, q80 keeps 16).
+exports = [
+  { path = "web/hero-1920.avif", width = 1920, quality = 80, max_kb = 140 },
+  { path = "web/hero-1920.webp", width = 1920, quality = 90, max_kb = 200 },
+  { path = "web/hero-1920.jpg",  width = 1920, quality = 84, max_kb = 250 },
+  { path = "web/hero-1280.avif", width = 1280, quality = 80, max_kb = 80 },
+  { path = "web/hero-1280.webp", width = 1280, quality = 90, max_kb = 110 },
+  { path = "web/hero-1280.jpg",  width = 1280, quality = 84, max_kb = 140 },
+  { path = "web/hero-768.webp",  width = 768,  quality = 90, max_kb = 60 },
+  { path = "web/hero-768.jpg",   width = 768,  quality = 84, max_kb = 80 },
+]
+
+[[output]]
+kind = "html"
+id = "og-image"
+template = "templates/og-image.html"
+viewport = [1200, 630]
+scale = 2                    # rendered at 2× and downsampled for crisp type
+transparent = false
+exports = [{ path = "web/og-image.jpg", width = 1200, quality = 88, max_kb = 220 }]
+
+[[output]]
+kind = "html"
+id = "apple-touch-icon"
+template = "templates/app-icon.html"
+viewport = [180, 180]
+scale = 4
+transparent = false
+exports = [{ path = "web/apple-touch-icon.png", width = 180, max_kb = 30 }]
+
+[[output]]
+kind = "html"
+id = "icon-maskable"
+template = "templates/app-icon-maskable.html"
+viewport = [512, 512]
+scale = 2
+transparent = false
+exports = [{ path = "web/icon-512-maskable.png", width = 512, max_kb = 60 }]
+
+[[output]]
+kind = "html"
+id = "favicon-32"
+template = "templates/favicon-32.html"
+viewport = [32, 32]
+scale = 1
+transparent = true
+exports = [{ path = "web/favicon-32.png", width = 32, max_kb = 4 }]
+
+[[output]]
+kind = "copy"
+id = "favicon-svg"
+src = "assets/icon/icon.svg"
+exports = [{ path = "web/favicon.svg", max_kb = 4 }]
+
+# --- Web fonts --------------------------------------------------------------------------
+# Fraunces has no Reserved Font Name: subsetting is fine (OFL text shipped alongside).
+# Source Sans 3 reserves the name "Source": a subset is a Modified Version, so it is
+# renamed ("Afterglow Sans") and every "Source" name record is removed (OFL 1.1 §3).
+
+[[output]]
+kind = "font"
+id = "font-display"
+src = "assets/fonts/Fraunces-Variable.ttf"
+family = "Fraunces"
+pin = { SOFT = 100, WONK = 0 }
+unicodes = "latin"
+licence = "assets/fonts/OFL-Fraunces.txt"
+exports = [{ path = "web/fonts/fraunces-latin.woff2", max_kb = 90 }]
+
+[[output]]
+kind = "font"
+id = "font-ui"
+src = "assets/fonts/SourceSans3-Variable.ttf"
+family = "Afterglow Sans"
+rename_from = "Source"
+unicodes = "latin"
+licence = "assets/fonts/OFL-SourceSans3.txt"
+exports = [{ path = "web/fonts/afterglow-sans-latin.woff2", max_kb = 70 }]

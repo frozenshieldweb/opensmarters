@@ -1,0 +1,34 @@
+<!doctype html>
+<!-- Social card 1200×630: hero art anchored right under DESIGN's scrim-left, lockup,
+     headline (Fraunces), one line of copy and a quiet facts line (Source Sans 3). -->
+<html><head><meta charset="utf-8"><style>
+@font-face { font-family: "Display"; src: url({{FONT_DISPLAY}}) format("truetype"); font-weight: 100 900; }
+@font-face { font-family: "UI"; src: url({{FONT_UI}}) format("truetype"); font-weight: 200 900; }
+html, body { margin: 0; width: 1200px; height: 630px; overflow: hidden; background: #141013; }
+.bg { position: absolute; inset: 0; background: url({{HERO}}) right center / cover no-repeat; }
+.scrim { position: absolute; inset: 0;
+  background: linear-gradient(90deg, rgba(20,16,19,.95) 0%, rgba(20,16,19,.86) 34%, rgba(20,16,19,.35) 58%, rgba(20,16,19,0) 72%); }
+.c { position: absolute; left: 80px; top: 0; bottom: 0; width: 700px;
+  display: flex; flex-direction: column; justify-content: center; }
+.lock { display: flex; align-items: center; gap: 12px; margin-bottom: 40px; }
+.lock .s { width: 46px; height: 46px; }
+.lock .s svg { width: 100%; height: 100%; display: block; }
+.lock .w { font-family: "Display"; font-size: 44px; line-height: 1; color: #F4ECE4;
+  font-variation-settings: "opsz" 144, "wght" 560, "SOFT" 100, "WONK" 0; letter-spacing: -0.01em;
+  position: relative; top: -2px; }
+h1 { margin: 0 0 22px; font-family: "Display"; font-weight: 560; font-size: 68px; line-height: 1.04;
+  color: #F4ECE4; font-variation-settings: "opsz" 72, "wght" 560, "SOFT" 100, "WONK" 0; letter-spacing: -0.01em; }
+p { margin: 0; font-family: "UI"; font-size: 26px; line-height: 1.35; color: #BFAFB6;
+  font-variation-settings: "wght" 400; max-width: 680px; }
+.f { margin-top: 34px; font-family: "UI"; font-size: 19px; color: #A8989E;
+  font-variation-settings: "wght" 600; letter-spacing: .02em; }
+.f b { color: #E6BE91; font-weight: inherit; }
+</style></head><body>
+<div class="bg"></div><div class="scrim"></div>
+<div class="c">
+  <div class="lock"><div class="s">{{SYMBOL_SVG}}</div><span class="w">{{WORDMARK}}</span></div>
+  <h1>Make room for<br>good stories.</h1>
+  <p>A secure, open-source player for your own TV subscription.</p>
+  <div class="f">Windows <b>·</b> Free software, GPL-3.0 <b>·</b> No telemetry</div>
+</div>
+</body></html>

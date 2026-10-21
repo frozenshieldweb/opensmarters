@@ -1,0 +1,15 @@
+{
+  "id": "illustration-ready",
+  "file": "illustration-ready.png",
+  "candidate": "20261020-195402-2.png",
+  "size": [
+    1254,
+    1254
+  ],
+  "sha256": "6596595e87082881eead10bdbbe6a3cece806586d03de3908a2f165bc070088c",
+  "codex": "codex-cli 0.155.0-alpha.16",
+  "generated": "20261020-195402",
+  "brief": "briefs/illustration-ready.md",
+  "brief_sha256": "12e9bf6b1e7c48ec060d6a1ec52ab7d343ecdfbbe7e8bae3d5f6b2ac4912d8e7",
+  "chosen": "2026-10-20"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "installer-panel",
+  "file": "installer-panel.png",
+  "candidate": "20261020-195130-1.png",
+  "size": [
+    1024,
+    1536
+  ],
+  "sha256": "3eb5047d3f4c12bb39cee5492a6a7a819b884bd37660443bc91356e637d9d1c7",
+  "codex": "codex-cli 0.155.0-alpha.16",
+  "generated": "20261020-195130",
+  "brief": "briefs/installer-panel.md",
+  "brief_sha256": "8acc65cc0e74a8814774c9b262f97996049c2b5c7d5488b1d1e8270e5e8d41a8",
+  "chosen": "2026-10-20"
+}

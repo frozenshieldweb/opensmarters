@@ -1,0 +1,10 @@
+<!doctype html>
+<!-- PWA maskable icon 512×512: full-bleed plate, symbol at 52% so it stays inside the 80%
+     safe zone whatever mask the platform applies. -->
+<html><head><meta charset="utf-8"><style>
+html, body { margin: 0; width: 512px; height: 512px; overflow: hidden; }
+.p { width: 512px; height: 512px; display: grid; place-items: center;
+  background: linear-gradient(180deg, #2A2026 0%, #141013 100%); }
+.s { width: 52%; height: 52%; }
+.s svg { width: 100%; height: 100%; display: block; }
+</style></head><body><div class="p"><div class="s">{{SYMBOL_SVG}}</div></div></body></html>

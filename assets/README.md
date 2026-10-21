@@ -7,6 +7,16 @@ Design assets for opensmarters, art direction **"Afterglow"**. How to use them i
 
 All raster artwork was created for this project. **No** asset contains text except the wordmark/lockup (set from an OFL font, not AI-rendered). No asset contains real logos, trademarks, brands, people or vendor material. Nothing was taken from IPTV Smarters or `_reference/`.
 
+## Launch assets (`launch/`)
+
+Images and web fonts for the landing page and the installer live in `launch/`. They are made by the pipeline in [`tools/assets/`](../tools/assets/README.md):
+
+- Codex image generation for art, curated, with the picked sources and their sidecars in `launch/sources/`;
+- a typeset template for the social image;
+- derived favicons, responsive hero images and WOFF2 fonts.
+
+Per-file provenance is generated into [`launch/PROVENANCE.md`](launch/PROVENANCE.md). The app itself doesn't embed anything from `launch/`.
+
 ## Provenance
 
 **AI image generation:** OpenAI **Codex CLI 0.162** (`codex exec`, built-in `image_generation` tool) on **2026-10-20**, art-directed and curated by Claude (Anthropic) acting as creative producer. Codex proposed three directions (Afterglow, Lumen Tide, Night Editions; boards in `concepts/directions/`); Afterglow was chosen. The briefs contained only creative direction. Raw generator output is 1672×941 (16:9), 1254×1254 (square) or 1024×1536 (2:3).

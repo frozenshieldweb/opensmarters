@@ -23,3 +23,7 @@ _reference/
 
 # Release output
 /dist/
+
+# Launch-asset pipeline: Codex candidates and build scratch (tools/assets/README.md)
+/tools/assets/raw/
+/tools/assets/.build/

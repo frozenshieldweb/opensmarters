@@ -154,9 +154,15 @@ impl AboutPage {
                         updates::checked_ago(*checked_at, now)
                     ),
                 ),
-                Status::Available { version, .. } => (
+                Status::Available { checked_at, .. } => (
                     Lead::Icon(icons::ARROW_CIRCLE_UP, color::ACCENT),
-                    format!("opensmarters {version} is available."),
+                    match checked_at {
+                        Some(t) => format!(
+                            "A newer version is available (checked {}).",
+                            updates::checked_ago(*t, now)
+                        ),
+                        None => "A newer version is available.".to_owned(),
+                    },
                 ),
                 Status::Failed(e) => (
                     Lead::Icon(icons::WARNING_CIRCLE, color::DANGER),
@@ -166,7 +172,12 @@ impl AboutPage {
         };
         let failed = matches!(view.status, Status::Failed(_)) && !view.checking;
         let button = if view.checking {
-            Button::secondary("Checking…")
+            // Same width as the button it replaces, so nothing jumps.
+            let w = Button::secondary("Check for updates")
+                .icon(icons::ARROWS_CLOCKWISE)
+                .size(ui)
+                .x;
+            Button::secondary("Checking…").width(w)
         } else if failed {
             Button::secondary("Try again").icon(icons::ARROWS_CLOCKWISE)
         } else {
@@ -183,6 +194,7 @@ impl AboutPage {
             version,
             url,
             dismissed,
+            ..
         } = &view.status
             && !view.checking
         {
@@ -230,6 +242,19 @@ impl AboutPage {
         } else {
             color::ACCENT_SOFT
         };
+        // Actions on the right, primary rightmost (§6.11), under "Check for updates" so
+        // Down from it lands on "Get the update".
+        let get_button = url.map(|_| {
+            if dismissed {
+                Button::secondary("Get the update")
+            } else {
+                Button::primary("Get the update")
+            }
+            .trailing(icons::ARROW_SQUARE_OUT)
+            .id(Id::unique(updates::GET_UPDATE_FOCUS_ID))
+        });
+        let not_now_button =
+            (!dismissed).then(|| Button::ghost("Not now").id(Id::unique("settings.about.not-now")));
         let mut get = false;
         let mut not_now = false;
         egui::Frame::new()
@@ -239,73 +264,65 @@ impl AboutPage {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let w = ui.available_width();
+                let actions_w = get_button.as_ref().map_or(0.0, |b| b.size(ui).x)
+                    + not_now_button.as_ref().map_or(0.0, |b| b.size(ui).x + 12.0);
+                let text_w = (w - 36.0 - actions_w - 24.0).max(w * 0.4);
                 let painter = ui.painter().clone();
                 let title = text::galley(
                     &painter,
                     &format!("opensmarters {version} is available"),
                     font::body_strong(),
                     color::TEXT,
-                    w - 36.0,
+                    text_w,
                     1,
                 );
                 let body = text::galley(
                     &painter,
                     if dismissed {
-                        "You chose not to update for now, so the header won't remind you \
-                         about this version. Download the new setup and run it whenever \
+                        "You won't be reminded about this version. Run its setup whenever \
                          you like."
                     } else {
-                        "Download the new setup and run it: it updates opensmarters in place \
-                         and keeps your accounts, favourites and settings."
+                        "Download its setup and run it to update."
                     },
-                    font::body(),
+                    font::caption(),
                     color::TEXT_2,
-                    w - 36.0,
+                    text_w,
                     3,
                 );
-                let text_h = title.size().y + 2.0 + body.size().y;
-                let (r, _) = ui.allocate_exact_size(vec2(w, text_h), Sense::hover());
+                let title_h = title.size().y;
+                let text_h = title_h + 2.0 + body.size().y;
+                let h = text_h.max(44.0);
+                let (r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+                let top = r.center().y - text_h / 2.0;
                 icons::paint(
                     &painter,
-                    pos2(r.left() + 12.0, r.top() + 12.0),
+                    pos2(r.left() + 12.0, r.center().y),
                     icons::ARROW_CIRCLE_UP,
                     24.0,
                     Style::Regular,
                     color::ACCENT,
                 );
-                let title_h = title.size().y;
-                painter.galley(pos2(r.left() + 36.0, r.top()), title, color::TEXT);
+                painter.galley(pos2(r.left() + 36.0, top), title, color::TEXT);
                 painter.galley(
-                    pos2(r.left() + 36.0, r.top() + title_h + 2.0),
+                    pos2(r.left() + 36.0, top + title_h + 2.0),
                     body,
                     color::TEXT_2,
                 );
-                if url.is_none() && dismissed {
-                    return;
+                let mut actions = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_min_max(
+                            pos2(r.right() - actions_w, r.top()),
+                            r.max,
+                        ))
+                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                );
+                actions.spacing_mut().item_spacing.x = 12.0;
+                if let Some(b) = get_button {
+                    get = b.show(&mut actions).activated;
                 }
-                ui.add_space(14.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(36.0);
-                    ui.spacing_mut().item_spacing.x = 12.0;
-                    if url.is_some() {
-                        let b = if dismissed {
-                            Button::secondary("Get the update")
-                        } else {
-                            Button::primary("Get the update")
-                        };
-                        get = b
-                            .trailing(icons::ARROW_SQUARE_OUT)
-                            .id(Id::unique("settings.about.get-update"))
-                            .show(ui)
-                            .activated;
-                    }
-                    if !dismissed {
-                        not_now = Button::ghost("Not now")
-                            .id(Id::unique("settings.about.not-now"))
-                            .show(ui)
-                            .activated;
-                    }
-                });
+                if let Some(b) = not_now_button {
+                    not_now = b.show(&mut actions).activated;
+                }
             });
         if get && let Some(u) = url {
             open_release_page(cx, u.to_owned());
@@ -317,7 +334,7 @@ impl AboutPage {
                 format!("You won't be reminded about opensmarters {version}."),
                 Some(updates::TOAST_KEY),
             );
-            crate::focus::request(&cx.egui, Id::unique("settings.about.get-update"));
+            crate::focus::request(&cx.egui, Id::unique(updates::GET_UPDATE_FOCUS_ID));
         }
     }
 }

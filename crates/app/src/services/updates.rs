@@ -45,6 +45,7 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use eframe::egui;
 use opensmarters_core::net::HttpClient;
 use opensmarters_core::url::Url;
 use opensmarters_core::{DEFAULT_USER_AGENT, HttpConfig, Redactor};
@@ -77,6 +78,8 @@ pub const RETRY_AFTER_FAILURE_SECS: i64 = 86_400;
 pub const FIRST_CHECK_DELAY: Duration = Duration::from_secs(10);
 /// The toast key of "a new version is available".
 pub const TOAST_KEY: &str = "updates.available";
+/// The focus id (`Id::unique`) of Settings › About's "Get the update" button.
+pub const GET_UPDATE_FOCUS_ID: &str = "settings.about.get-update";
 
 /// The machine-local update state (never exported: see `backup::LOCAL_ONLY_KEYS`).
 pub const STATE: Setting<UpdateState> = Setting::new("app.updates", UpdateState::default);
@@ -714,6 +717,8 @@ struct Inner {
     error: Option<CheckError>,
     toast: Option<Version>,
     open_about: bool,
+    /// Focus "Get the update" on the next frame (after the indicator opened About).
+    focus_get_update: bool,
 }
 
 /// What the About page shows.
@@ -734,6 +739,8 @@ pub enum Status {
         url: Option<String>,
         /// "Not now" was chosen for it.
         dismissed: bool,
+        /// Unix time of the last successful check.
+        checked_at: Option<i64>,
     },
     /// The last manual check failed.
     Failed(CheckError),
@@ -782,6 +789,7 @@ impl Updates {
                 error: None,
                 toast: None,
                 open_about: false,
+                focus_get_update: false,
             })),
         }
     }
@@ -805,6 +813,7 @@ impl Updates {
             (None, Some(v), Some(cur)) if v > *cur => Status::Available {
                 url: release_link(HOMEPAGE, g.source.as_ref().and_then(Source::repo), &v),
                 dismissed: g.state.is_dismissed(&v),
+                checked_at: g.state.last_success,
                 version: v,
             },
             _ => match g.state.last_success {
@@ -992,10 +1001,16 @@ pub fn toast_text(v: &Version) -> String {
 pub fn on_frame(cx: &mut AppCtx<'_>) {
     let updates = cx.services.updates.clone();
     updates.ensure_loaded(cx.services);
+    // The page opened last frame (navigation applies at the end of a frame and resets the
+    // focus): start on its "Get the update", the reason the user came.
+    if std::mem::take(&mut updates.lock().focus_get_update) {
+        crate::focus::request(&cx.egui, egui::Id::unique(GET_UPDATE_FOCUS_ID));
+    }
     if updates.take_open_about() {
         cx.nav.section(Route::Settings {
             page: SettingsPage::About,
         });
+        updates.lock().focus_get_update = true;
     }
     if let Some(v) = updates.take_toast() {
         cx.toasts

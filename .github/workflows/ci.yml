@@ -24,6 +24,30 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      # The installer's dev-feature tests drive the real binary (--quiet install, repair,
+      # uninstall through the installed uninstall.exe, exit codes) in sandboxes that use the
+      # test registry root HKCU\Software\opensmartersTest and temp folders.
+      - name: Installer tests (sandboxed)
+        run: cargo test -p opensmarters-installer --features dev
+      - name: Installer headless install/uninstall (sandboxed)
+        shell: pwsh
+        run: |
+          $sb = Join-Path $env:RUNNER_TEMP 'opensmarters-setup-sandbox'
+          cargo build -p opensmarters-installer --features dev --bin opensmarters-setup
+          $setup = 'target/debug/opensmarters-setup.exe'
+          & $setup --quiet --no-launch --desktop-shortcut --sandbox $sb
+          if ($LASTEXITCODE -ne 0) { throw "quiet install failed ($LASTEXITCODE)" }
+          $dir = Join-Path $sb 'LocalAppData/Programs/opensmarters'
+          foreach ($f in 'opensmarters.exe', 'libmpv-2.dll', 'uninstall.exe', 'install-manifest.txt') {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "missing $f" }
+          }
+          & (Join-Path $dir 'uninstall.exe') --uninstall --quiet --sandbox $sb
+          if ($LASTEXITCODE -ne 0) { throw "quiet uninstall failed ($LASTEXITCODE)" }
+          $deadline = (Get-Date).AddSeconds(30)
+          while ((Test-Path $dir) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
+          if (Test-Path $dir) { throw "the install folder was not removed" }
+          Get-Content (Join-Path $sb 'Temp/opensmarters-setup.log')
+          Remove-Item -Recurse -Force 'HKCU:\Software\opensmartersTest' -ErrorAction SilentlyContinue
 
   supply-chain:
     runs-on: ubuntu-latest

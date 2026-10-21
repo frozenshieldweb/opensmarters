@@ -16,6 +16,7 @@
 //!   of the session and the card offers to save it to the profile.
 //! - Other screens open a channel/programme with [`open`] (Guide, Home's Continue
 //!   watching).
+//! - Channels whose every category is hidden (Settings › Categories) are left out.
 
 mod days;
 
@@ -117,6 +118,8 @@ struct Tracked {
 struct ListKey {
     generation: u64,
     parental: bool,
+    /// `Session::category_prefs_generation`.
+    categories: u64,
 }
 
 /// The Catch-up screen.
@@ -193,16 +196,19 @@ impl CatchupScreen {
         let key = ListKey {
             generation: self.catalog.generation(),
             parental: session.parental_enabled(),
+            categories: session.category_prefs_generation(),
         };
         if self.list_key.as_ref() == Some(&key) {
             return;
         }
+        let hidden =
+            session.hidden_categories(opensmarters_store::ContentKind::Live, &cat.categories);
         let channels = channel_list::unlocked_in_session(
             session,
             cat,
             cat.channels
                 .iter()
-                .filter(|c| c.archive && c.stream_id().is_some()),
+                .filter(|c| c.archive && c.stream_id().is_some() && !hidden.hides(&c.categories)),
         );
         self.names = Arc::new(
             channels

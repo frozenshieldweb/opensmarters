@@ -13,6 +13,11 @@
 //! - **Parental control:** locked categories show a lock and ask for the PIN (unlocked for
 //!   the session); their items stay out of "All".
 //! - Favourites show a heart on the poster; movies show their watch progress.
+//! - **Category management** (Settings › Categories): the categories are listed in the
+//!   viewer's order without the hidden ones; "All" leaves out items whose every category
+//!   is hidden; a hidden route or remembered category falls back like a locked one. **H**
+//!   on a category hides it at once (Undo for 8 s, or Ctrl+Z); "Edit categories" at the
+//!   end opens the editor on this section; a region filter shows "Showing FR, CA · Edit".
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -29,7 +34,9 @@ use opensmarters_store::{ContentKind, PlaybackProgress};
 use crate::error::{AppError, AppResult};
 use crate::focus;
 use crate::nav::Route;
+use crate::screens::common::categories as cat_ui;
 use crate::screens::{AppCtx, shell};
+use crate::services::categories::{self, HiddenCategories, hides_item};
 use crate::services::vod::{self, VodSort};
 use crate::services::{ImageSize, Session};
 use crate::task::Loader;
@@ -138,6 +145,8 @@ struct ViewKey {
     query: String,
     sort: VodSort,
     locked: Vec<CategoryId>,
+    /// Hidden categories (Settings › Categories), sorted.
+    hidden: Vec<CategoryId>,
 }
 
 /// The visible items (indices into the listing), filtered and sorted.
@@ -147,12 +156,14 @@ struct View {
     indices: Arc<Vec<usize>>,
 }
 
-/// Filters by `query` and locked categories, in `sort` order (runs off the UI thread).
+/// Filters by `query`, locked categories (any of an item's categories) and hidden ones
+/// (all of an item's categories), in `sort` order (runs off the UI thread).
 fn compute_view<T: CatalogItem<Key = u64>>(
     listing: &Listing<T>,
     query: &str,
     sort: VodSort,
     locked: &HashSet<CategoryId>,
+    hidden: &HashSet<CategoryId>,
     categories_of: impl Fn(&T) -> Vec<&CategoryId>,
 ) -> Vec<usize> {
     let n = listing.items.len();
@@ -165,9 +176,13 @@ fn compute_view<T: CatalogItem<Key = u64>>(
             }
         }
     }
-    if !locked.is_empty() {
+    if !locked.is_empty() || !hidden.is_empty() {
         for (i, item) in listing.items.iter().enumerate() {
-            if keep[i] && categories_of(item).iter().any(|c| locked.contains(*c)) {
+            if !keep[i] {
+                continue;
+            }
+            let cats = categories_of(item);
+            if cats.iter().any(|c| locked.contains(*c)) || hides_item(cats, hidden) {
                 keep[i] = false;
             }
         }
@@ -205,6 +220,11 @@ pub(crate) struct Browse<K: BrowseKind> {
     progress: Loader<Arc<HashMap<u64, PlaybackProgress>>>,
     progress_epoch: u64,
     scroll_to: Option<usize>,
+    /// A category just hidden with H (Undo).
+    hidden: Option<cat_ui::Hidden>,
+    /// Every category is hidden: nothing is opened (and "All", which can take a minute on
+    /// big panels, isn't loaded just to show nothing).
+    nothing_shown: bool,
     _kind: PhantomData<K>,
 }
 
@@ -244,6 +264,8 @@ impl<K: BrowseKind> Browse<K> {
             progress: Loader::new(),
             progress_epoch: 0,
             scroll_to: None,
+            hidden: None,
+            nothing_shown: false,
             _kind: PhantomData,
         }
     }
@@ -339,12 +361,23 @@ impl<K: BrowseKind> Browse<K> {
             return;
         }
         let Some(session) = cx.session() else { return };
-        let unlocked =
-            |id: &CategoryId, name: &str| !session.is_category_locked(K::CONTENT, id, name);
-        let first_unlocked = cats
+        // Hidden categories (Settings › Categories) are never opened: like a locked
+        // category, a hidden route or remembered one falls back to the first usable one
+        // in the viewer's order.
+        let prefs = session.category_prefs(K::CONTENT);
+        let hidden = HiddenCategories::of(&cats, &prefs);
+        let unlocked = |id: &CategoryId, name: &str| {
+            !hidden.contains(id) && !session.is_category_locked(K::CONTENT, id, name)
+        };
+        let shown = categories::arrange(&cats, &prefs);
+        let first_unlocked = shown
             .iter()
             .find(|c| unlocked(&c.id, &c.name))
             .map(|c| Selection::Category(c.id.clone()));
+        self.nothing_shown = shown.is_empty() && !cats.is_empty();
+        if self.nothing_shown && self.route_category.is_none() {
+            return;
+        }
         if let Some(route) = self.route_category.take() {
             if route.eq_ignore_ascii_case("all") {
                 self.apply_selection(cx, Selection::All);
@@ -352,6 +385,14 @@ impl<K: BrowseKind> Browse<K> {
             }
             if let Some(c) = cats.iter().find(|c| c.id.as_str() == route) {
                 let (sel, name) = (Selection::Category(c.id.clone()), c.name.clone());
+                if hidden.contains(&c.id) {
+                    if let Some(sel) =
+                        first_unlocked.or((!self.nothing_shown).then_some(Selection::All))
+                    {
+                        self.apply_selection(cx, sel);
+                    }
+                    return;
+                }
                 if !unlocked(&c.id, &c.name) {
                     // Open behind the PIN on the first unlocked category.
                     if let Some(fallback) = first_unlocked.clone() {
@@ -361,6 +402,9 @@ impl<K: BrowseKind> Browse<K> {
                 self.select(cx, sel, &name);
                 return;
             }
+        }
+        if self.nothing_shown {
+            return;
         }
         let remembered = self
             .remembered
@@ -390,6 +434,93 @@ impl<K: BrowseKind> Browse<K> {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// The hidden categories (by the viewer or the region filter), sorted: items whose
+    /// every category is among them stay out of the listings.
+    fn hidden_categories(&self, session: &Session) -> Vec<CategoryId> {
+        let cats = self.categories.value().map_or(&[][..], |c| c.as_slice());
+        session.hidden_categories(K::CONTENT, cats).sorted_ids()
+    }
+
+    fn cat_row_id(id: &CategoryId) -> Id {
+        Id::unique((K::KEY, "cat", id.as_str()))
+    }
+
+    fn cat_chip_id(id: &CategoryId) -> Id {
+        Id::unique((K::KEY, "chip", id.as_str()))
+    }
+
+    /// Keys before the focus engine: H hides the focused category, Ctrl+Z undoes it.
+    pub(crate) fn on_input(&mut self, cx: &mut AppCtx<'_>, ctx: &egui::Context) {
+        if self.pin.is_some() || focus::text_input_focused(ctx) {
+            return;
+        }
+        if cat_ui::take_undo_key(ctx, self.hidden.is_some()) {
+            self.undo_hide(cx);
+            return;
+        }
+        if !cat_ui::hide_key_pressed(ctx) {
+            return;
+        }
+        let (Some(session), Some(cats)) = (cx.session(), self.categories.value().cloned()) else {
+            return;
+        };
+        let Some(cur) = focus::current(ctx) else {
+            return;
+        };
+        let prefs = session.category_prefs(K::CONTENT);
+        let shown = categories::arrange(&cats, &prefs);
+        let q = SearchQuery::new(&self.cat_filter);
+        // The column lists what its filter matches; the chips list everything.
+        let (list, id_of): (Vec<&Category>, fn(&CategoryId) -> Id) =
+            if shown.iter().any(|c| Self::cat_row_id(&c.id) == cur) {
+                (
+                    shown.into_iter().filter(|c| q.matches(&c.name)).collect(),
+                    Self::cat_row_id,
+                )
+            } else if shown.iter().any(|c| Self::cat_chip_id(&c.id) == cur) {
+                (shown, Self::cat_chip_id)
+            } else {
+                return;
+            };
+        let Some(i) = list.iter().position(|c| id_of(&c.id) == cur) else {
+            return;
+        };
+        if !cat_ui::take_hide_key(ctx, true) {
+            return;
+        }
+        let Some(c) = list.get(i).copied() else {
+            return;
+        };
+        let neighbour = list
+            .get(i + 1)
+            .or_else(|| i.checked_sub(1).and_then(|p| list.get(p)))
+            .map(|n| id_of(&n.id));
+        let all = if id_of(&c.id) == Self::cat_chip_id(&c.id) {
+            self.id("chip-all")
+        } else {
+            self.id("cat-all")
+        };
+        self.hidden = Some(cat_ui::hide(&session, K::CONTENT, c));
+        focus::request(ctx, neighbour.unwrap_or(all));
+    }
+
+    /// Undo of H: shows the category again and gives it the focus.
+    fn undo_hide(&mut self, cx: &mut AppCtx<'_>) {
+        let (Some(session), Some(h)) = (cx.session(), self.hidden.take()) else {
+            return;
+        };
+        cat_ui::unhide(&session, &h);
+        let wide = cx.layout.breakpoint == Breakpoint::Wide;
+        focus::request(
+            &cx.egui,
+            if wide {
+                Self::cat_row_id(&h.id)
+            } else {
+                Self::cat_chip_id(&h.id)
+            },
+        );
     }
 
     /// The listing for the current selection, if loaded.
@@ -422,6 +553,7 @@ impl<K: BrowseKind> Browse<K> {
             query: self.applied_query.clone(),
             sort: self.sort,
             locked: self.locked_categories(session),
+            hidden: self.hidden_categories(session),
         };
         let current = self.view.value().map(|v| &v.key);
         let pending = self.view.is_loading();
@@ -431,7 +563,15 @@ impl<K: BrowseKind> Browse<K> {
         self.view_pending_key = Some(key.clone());
         self.view.start_blocking(cx.rt(), &cx.egui, move || {
             let locked: HashSet<CategoryId> = key.locked.iter().cloned().collect();
-            let indices = compute_view(&listing, &key.query, key.sort, &locked, K::item_categories);
+            let hidden: HashSet<CategoryId> = key.hidden.iter().cloned().collect();
+            let indices = compute_view(
+                &listing,
+                &key.query,
+                key.sort,
+                &locked,
+                &hidden,
+                K::item_categories,
+            );
             Ok(View {
                 key,
                 indices: Arc::new(indices),
@@ -486,6 +626,18 @@ impl<K: BrowseKind> Browse<K> {
             self.load_progress(cx);
         }
         let Some(session) = cx.session() else { return };
+        // The category on screen was hidden (H, the editor): fall back like a locked one.
+        if let (Some(Selection::Category(id)), Some(cats)) =
+            (&self.selection, self.categories.value())
+            && session.hidden_categories(K::CONTENT, cats).contains(id)
+            && self.pin.is_none()
+        {
+            self.selection = None;
+            self.list.cancel();
+        }
+        if self.hidden.as_ref().is_some_and(cat_ui::Hidden::expired) {
+            self.hidden = None;
+        }
         self.decide_initial(cx);
         self.update_view(cx, &session);
 
@@ -537,15 +689,35 @@ impl<K: BrowseKind> Browse<K> {
                 font::heading(),
                 color::TEXT,
             );
+            // While a region filter is set: "Showing FR, CA · Edit" under the heading.
+            let prefs = session.category_prefs(K::CONTENT);
+            let note_h = if cat_ui::has_region_filter(&prefs) {
+                if focus::scope(ui, self.id("region-note"), |ui| {
+                    cat_ui::region_note(
+                        ui,
+                        self.id("region-note.line"),
+                        &prefs,
+                        pos2(cats_rect.left() + 24.0, content.top() + 100.0),
+                        CATS_W - 48.0,
+                    )
+                }) {
+                    cat_ui::open_editor(cx, K::CONTENT);
+                }
+                26.0
+            } else {
+                0.0
+            };
             let mut child = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(
-                pos2(cats_rect.left() + 24.0, content.top() + 106.0),
+                pos2(cats_rect.left() + 24.0, content.top() + 106.0 + note_h),
                 pos2(cats_rect.right() - 24.0, cats_rect.bottom() - 24.0),
             )));
             let pick = focus::scope(&mut child, self.id("cats"), |ui| {
                 self.categories_column(cx, ui, cats, &session)
             });
-            if let Some((sel, name)) = pick {
-                self.select(cx, sel, &name);
+            match pick {
+                Some(Pick::Category(sel, name)) => self.select(cx, sel, &name),
+                Some(Pick::Edit) => cat_ui::open_editor(cx, K::CONTENT),
+                None => {}
             }
             right_left = cats_rect.right() + m;
             top = content.top() + 64.0;
@@ -572,14 +744,30 @@ impl<K: BrowseKind> Browse<K> {
             top += 42.0;
         } else {
             let tr = shell::page_title(cx, ui, K::TITLE);
+            let mut after = tr.right();
             if let Some(n) = self.visible_count() {
-                painter.text(
+                let r = painter.text(
                     pos2(tr.right() + 12.0, tr.center().y + 4.0),
                     Align2::LEFT_CENTER,
                     count_label(n, K::SINGULAR, K::PLURAL),
                     font::caption(),
                     color::TEXT_3,
                 );
+                after = r.right();
+            }
+            let prefs = session.category_prefs(K::CONTENT);
+            if cat_ui::has_region_filter(&prefs)
+                && focus::scope(ui, self.id("region-note"), |ui| {
+                    cat_ui::region_note(
+                        ui,
+                        self.id("region-note.line"),
+                        &prefs,
+                        pos2(after + 16.0, tr.center().y + 4.0),
+                        (content.right() - m - after - 16.0).max(80.0),
+                    )
+                })
+            {
+                cat_ui::open_editor(cx, K::CONTENT);
             }
             right_left = content.left() + m;
             let chips = Rect::from_min_max(
@@ -590,8 +778,10 @@ impl<K: BrowseKind> Browse<K> {
             let pick = focus::scope(&mut child, self.id("chips"), |ui| {
                 self.category_chips(ui, cats, &session)
             });
-            if let Some((sel, name)) = pick {
-                self.select(cx, sel, &name);
+            match pick {
+                Some(Pick::Category(sel, name)) => self.select(cx, sel, &name),
+                Some(Pick::Edit) => cat_ui::open_editor(cx, K::CONTENT),
+                None => {}
             }
             top = content.top() + 148.0;
         }
@@ -609,8 +799,21 @@ impl<K: BrowseKind> Browse<K> {
             pos2(right.right() + 16.0, content.bottom()),
         );
         self.body(cx, ui, body, &session);
+        // Undo after H, at the bottom of the grid.
+        let toast_area = Rect::from_min_max(body.min, pos2(body.max.x, body.max.y - 20.0));
+        if let Some(h) = self.hidden.clone()
+            && cat_ui::undo_toast(ui, &h, toast_area)
+        {
+            self.undo_hide(cx);
+        }
         self.pin_dialog(cx, ui);
     }
+}
+
+/// What the chip row asked for.
+enum Pick {
+    Category(Selection, String),
+    Edit,
 }
 
 fn count_label(n: usize, singular: &str, plural: &str) -> String {
@@ -647,7 +850,7 @@ impl<K: BrowseKind> Browse<K> {
         ui: &mut Ui,
         cats: Option<&[Category]>,
         session: &Arc<Session>,
-    ) -> Option<(Selection, String)> {
+    ) -> Option<Pick> {
         ui.spacing_mut().item_spacing.y = 0.0;
         SearchField::new(self.id("cat-search"), "Find a category")
             .size(ui.available_width(), 52.0)
@@ -670,6 +873,8 @@ impl<K: BrowseKind> Browse<K> {
             return None;
         };
         let q = SearchQuery::new(&self.cat_filter);
+        let prefs = session.category_prefs(K::CONTENT);
+        let shown = categories::arrange(cats, &prefs);
         let mut picked = None;
         egui::ScrollArea::vertical()
             .id_salt(self.id("cats-scroll"))
@@ -678,19 +883,19 @@ impl<K: BrowseKind> Browse<K> {
             .content_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                for c in cats {
+                for c in &shown {
                     if !q.matches(&c.name) {
                         continue;
                     }
                     let sel = Selection::Category(c.id.clone());
                     let locked = session.is_category_locked(K::CONTENT, &c.id, &c.name);
                     let name = text::cap(&c.name, 80);
-                    let f = MenuRow::new(Id::unique((K::KEY, "cat", c.id.as_str())), &name)
+                    let f = MenuRow::new(Self::cat_row_id(&c.id), &name)
                         .locked(locked)
                         .selected(self.selection.as_ref() == Some(&sel))
                         .show(ui);
                     if f.activated {
-                        picked = Some((sel, c.name.clone()));
+                        picked = Some(Pick::Category(sel, c.name.clone()));
                     }
                 }
                 // "All" last: it loads the whole catalogue.
@@ -708,7 +913,7 @@ impl<K: BrowseKind> Browse<K> {
                         .selected(self.selection == Some(Selection::All))
                         .show(ui);
                     if f.activated {
-                        picked = Some((Selection::All, all.clone()));
+                        picked = Some(Pick::Category(Selection::All, all.clone()));
                     }
                     let (r, _) =
                         ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
@@ -720,6 +925,18 @@ impl<K: BrowseKind> Browse<K> {
                         color::TEXT_3,
                     );
                 }
+                // The editor, at the end of the list.
+                ui.add_space(12.0);
+                if Button::ghost("Edit categories")
+                    .icon(icons::SLIDERS_HORIZONTAL)
+                    .small()
+                    .id(self.id("cat-edit"))
+                    .show(ui)
+                    .activated
+                {
+                    picked = Some(Pick::Edit);
+                }
+                ui.add_space(8.0);
             });
         picked
     }
@@ -729,8 +946,10 @@ impl<K: BrowseKind> Browse<K> {
         ui: &mut Ui,
         cats: Option<&[Category]>,
         session: &Arc<Session>,
-    ) -> Option<(Selection, String)> {
+    ) -> Option<Pick> {
         let cats = cats?;
+        let prefs = session.category_prefs(K::CONTENT);
+        let shown = categories::arrange(cats, &prefs);
         let mut picked = None;
         egui::ScrollArea::horizontal()
             .id_salt(self.id("chips-scroll"))
@@ -739,7 +958,7 @@ impl<K: BrowseKind> Browse<K> {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    for c in cats {
+                    for c in &shown {
                         let sel = Selection::Category(c.id.clone());
                         let label = if session.is_category_locked(K::CONTENT, &c.id, &c.name) {
                             format!("{} {}", icons::LOCK_SIMPLE, c.name)
@@ -748,11 +967,11 @@ impl<K: BrowseKind> Browse<K> {
                         };
                         if Chip::new(label)
                             .selected(self.selection.as_ref() == Some(&sel))
-                            .id(Id::unique((K::KEY, "chip", c.id.as_str())))
+                            .id(Self::cat_chip_id(&c.id))
                             .show(ui)
                             .activated
                         {
-                            picked = Some((sel, c.name.clone()));
+                            picked = Some(Pick::Category(sel, c.name.clone()));
                         }
                     }
                     let all = format!("All {}", K::PLURAL);
@@ -762,7 +981,14 @@ impl<K: BrowseKind> Browse<K> {
                         .show(ui)
                         .activated
                     {
-                        picked = Some((Selection::All, all));
+                        picked = Some(Pick::Category(Selection::All, all));
+                    }
+                    if Chip::new(format!("{} Edit categories", icons::SLIDERS_HORIZONTAL))
+                        .id(self.id("chip-edit"))
+                        .show(ui)
+                        .activated
+                    {
+                        picked = Some(Pick::Edit);
                     }
                 });
             });
@@ -850,6 +1076,23 @@ impl<K: BrowseKind> Browse<K> {
             }
             return;
         }
+        // Every category is hidden: say so instead of loading "All" to show nothing.
+        if self.selection.is_none() && self.nothing_shown {
+            if EmptyState::new(
+                self.id("nothing-shown"),
+                Illustration::EmptySearch,
+                "Every category is hidden",
+                "Show some categories again to browse them here.",
+            )
+            .action("Edit categories", true)
+            .illustration_size(160.0)
+            .show(ui)
+            .is_some_and(|f| f.activated)
+            {
+                cat_ui::open_editor(cx, K::CONTENT);
+            }
+            return;
+        }
         let listing = self.current_listing();
         let view = self
             .view
@@ -865,6 +1108,25 @@ impl<K: BrowseKind> Browse<K> {
                         EmptyState::new(self.id("empty"), Illustration::EmptySearch, &head, &body)
                             .illustration_size(160.0)
                             .show(ui);
+                } else if indices.is_empty()
+                    && self.applied_query.is_empty()
+                    && !session.category_prefs(K::CONTENT).is_default()
+                {
+                    // Everything here sits in hidden (or locked) categories.
+                    if EmptyState::new(
+                        self.id("all-hidden"),
+                        Illustration::EmptySearch,
+                        "Nothing to show here",
+                        "These are all in hidden or locked categories. Show some categories \
+                         again to see them here.",
+                    )
+                    .action("Edit categories", false)
+                    .illustration_size(160.0)
+                    .show(ui)
+                    .is_some_and(|f| f.activated)
+                    {
+                        cat_ui::open_editor(cx, K::CONTENT);
+                    }
                 } else if indices.is_empty() {
                     if EmptyState::new(
                         self.id("no-match"),
@@ -1135,36 +1397,56 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            ids(compute_view(&l, "", VodSort::Server, &none, cats)),
+            ids(compute_view(&l, "", VodSort::Server, &none, &none, cats)),
             vec![1, 2, 3, 4]
         );
         assert_eq!(
-            ids(compute_view(&l, "", VodSort::Name, &none, cats)),
+            ids(compute_view(&l, "", VodSort::Name, &none, &none, cats)),
             vec![3, 4, 2, 1]
         );
         assert_eq!(
-            ids(compute_view(&l, "", VodSort::Recent, &none, cats)),
+            ids(compute_view(&l, "", VodSort::Recent, &none, &none, cats)),
             vec![4, 2, 3, 1]
         );
         assert_eq!(
-            ids(compute_view(&l, "", VodSort::Rating, &none, cats)),
+            ids(compute_view(&l, "", VodSort::Rating, &none, &none, cats)),
             vec![3, 2, 1, 4]
         );
         // Accent-insensitive plain search, never a regex.
         assert_eq!(
-            ids(compute_view(&l, "ECLAIR", VodSort::Server, &none, cats)),
+            ids(compute_view(
+                &l,
+                "ECLAIR",
+                VodSort::Server,
+                &none,
+                &none,
+                cats
+            )),
             vec![2]
         );
-        assert!(compute_view(&l, ".*", VodSort::Server, &none, cats).is_empty());
+        assert!(compute_view(&l, ".*", VodSort::Server, &none, &none, cats).is_empty());
         assert_eq!(
-            ids(compute_view(&l, "(2001", VodSort::Server, &none, cats)),
+            ids(compute_view(
+                &l,
+                "(2001",
+                VodSort::Server,
+                &none,
+                &none,
+                cats
+            )),
             vec![1]
         );
         // Locked categories stay out of "All".
         let locked: HashSet<CategoryId> = [CategoryId::from("9")].into_iter().collect();
         assert_eq!(
-            ids(compute_view(&l, "", VodSort::Rating, &locked, cats)),
+            ids(compute_view(&l, "", VodSort::Rating, &locked, &none, cats)),
             vec![2, 1, 4]
+        );
+        // Hidden categories (Settings › Categories) leave "All" too.
+        let hidden: HashSet<CategoryId> = [CategoryId::from("1")].into_iter().collect();
+        assert_eq!(
+            ids(compute_view(&l, "", VodSort::Server, &none, &hidden, cats)),
+            vec![2, 3]
         );
         // Sort orders are cached per list.
         let a = l.order(VodSort::Name);

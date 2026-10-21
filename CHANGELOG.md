@@ -2,6 +2,11 @@
 
 All notable changes to opensmarters. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Category management** (Settings › Categories): for each profile and for Live TV, Movies and Series, hide categories, put them in your own order, and show only some regions when the provider tags its category names ("FR | Sports", "[UK] News", "CA: Hockey"). Hidden categories and the channels, films and series that are only in them disappear from browsing, the Guide, Multiscreen, Catch-up, Search and Home; Favourites and Recordings keep everything. In Live TV, Movies and Series, press H on a category to hide it at once (with Undo), or choose **Edit categories** at the end of the list. Your choices are included in backups.
+
 ## [0.2.1] - 2026-10-21
 
 ### Added

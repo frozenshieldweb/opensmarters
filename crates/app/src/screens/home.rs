@@ -14,6 +14,10 @@
 //! - **Initial focus** goes to the hero's primary button. "See all" buttons appear only
 //!   once the hero is there, so the fallback focus can never park on one.
 //! - Items in locked categories (parental control) stay off Home.
+//! - Hidden categories (Settings › Categories): "Recently added", "Series" and the
+//!   "Recently watched" channels leave out items whose every category is hidden, and the
+//!   "first few categories" fallback takes the first visible ones in the viewer's order.
+//!   Favourites and Continue watching are explicit choices and stay as they are.
 //! - Without a session yet (the startup profile is still opening) Home shows its
 //!   skeleton; the app replaces it as soon as the profile is open.
 
@@ -36,6 +40,7 @@ use crate::focus;
 use crate::nav::{Route, Section};
 use crate::playback::ZapContext;
 use crate::services::catalog::{LiveCatalog, LiveChannel};
+use crate::services::categories::{self, HiddenCategories};
 use crate::services::session::locks::ItemLock;
 use crate::services::session::{series_key, vod_streams_key};
 use crate::services::{ImageService, ImageSize, ImageSlot, Session, vod};
@@ -394,6 +399,8 @@ impl HomeScreen {
             self.movies.start(cx.rt(), &cx.egui, move |_| async move {
                 let cats = s.vod_categories().await?;
                 let names = CategoryNames::new(cats.iter());
+                let prefs = s.category_prefs(ContentKind::Movie);
+                let hidden = HiddenCategories::of(&cats, &prefs);
                 if let Some(all) = s
                     .peek_cached::<Vec<VodStream>>(&vod_streams_key(None))
                     .await
@@ -401,16 +408,19 @@ impl HomeScreen {
                     let kept = unlocked(
                         &s,
                         ContentKind::Movie,
-                        all.iter().cloned(),
+                        all.iter()
+                            .filter(|m| !hidden.hides(movie_categories(m)))
+                            .cloned(),
                         movie_categories,
                         &names,
                     );
                     return Ok(Arc::new(kept));
                 }
+                // The first few visible categories, in the viewer's order.
                 let open = unlocked(
                     &s,
                     ContentKind::Movie,
-                    cats.iter().cloned(),
+                    categories::arrange(&cats, &prefs).into_iter().cloned(),
                     |c| vec![&c.id],
                     &names,
                 );
@@ -424,7 +434,8 @@ impl HomeScreen {
                 Ok(Arc::new(unlocked(
                     &s,
                     ContentKind::Movie,
-                    out,
+                    out.into_iter()
+                        .filter(|m| !hidden.hides(movie_categories(m))),
                     movie_categories,
                     &names,
                 )))
@@ -433,11 +444,15 @@ impl HomeScreen {
             self.series.start(cx.rt(), &cx.egui, move |_| async move {
                 let cats = s.series_categories().await?;
                 let names = CategoryNames::new(cats.iter());
+                let prefs = s.category_prefs(ContentKind::Series);
+                let hidden = HiddenCategories::of(&cats, &prefs);
                 if let Some(all) = s.peek_cached::<Vec<Series>>(&series_key(None)).await {
                     let kept = unlocked(
                         &s,
                         ContentKind::Series,
-                        all.iter().cloned(),
+                        all.iter()
+                            .filter(|x| !hidden.hides(series_categories(x)))
+                            .cloned(),
                         series_categories,
                         &names,
                     );
@@ -446,7 +461,7 @@ impl HomeScreen {
                 let open = unlocked(
                     &s,
                     ContentKind::Series,
-                    cats.iter().cloned(),
+                    categories::arrange(&cats, &prefs).into_iter().cloned(),
                     |c| vec![&c.id],
                     &names,
                 );
@@ -459,7 +474,8 @@ impl HomeScreen {
                 Ok(Arc::new(unlocked(
                     &s,
                     ContentKind::Series,
-                    out,
+                    out.into_iter()
+                        .filter(|x| !hidden.hides(series_categories(x))),
                     series_categories,
                     &names,
                 )))
@@ -560,13 +576,15 @@ impl HomeScreen {
         if !fav.is_empty() {
             return (fav, "Favourites");
         }
+        // Recently watched channels whose every category is hidden stay off Home.
+        let hidden = session.hidden_categories(ContentKind::Live, &cat.categories);
         let recent: Vec<LiveChannel> = self
             .recents
             .value()
             .map(|r| {
                 r.iter()
                     .filter_map(|rc| cat.get(&rc.stream_id))
-                    .filter(|c| !session.is_locked(*c))
+                    .filter(|c| !session.is_locked(*c) && !hidden.hides(&c.categories))
                     .cloned()
                     .collect()
             })

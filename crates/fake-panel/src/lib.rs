@@ -71,7 +71,8 @@
 //! `malformed-item`, `timeshift-503`, `timeshift-smarters-only`, `stall` (a live `.ts`
 //! that freezes and never closes), and for recordings and downloads `slow-media`
 //! (≈ 256 KiB/s, `Range` still works), `live-endless` (live `.ts` loops forever at its real
-//! bitrate), `media-html` / `media-playlist` (a `200 OK` that isn't video).
+//! bitrate), `media-html` / `media-playlist` (a `200 OK` that isn't video), and
+//! `tagged-categories` (region tags in category names: `"UK | News"`, `"[CA] Kids"`).
 //!
 //! ## M3U
 //!
@@ -326,7 +327,8 @@ pub async fn spawn(config: Config) -> Result<Handle, Error> {
     };
     let base_url = format!("http://127.0.0.1:{}", addr.port());
     let state = Arc::new(server::State {
-        catalogue: Catalogue::generate(config.seed, config.quirks.huge),
+        catalogue: Catalogue::generate(config.seed, config.quirks.huge)
+            .with_region_tags(config.quirks.tagged_categories),
         quirks: config.quirks,
         seed: config.seed,
         port: addr.port(),

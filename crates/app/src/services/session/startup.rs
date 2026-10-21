@@ -25,7 +25,7 @@ use opensmarters_core::{HttpConfig, LoginInfo, XtreamAccount};
 use opensmarters_store::{CacheScope, ContentKind, ProfileId, ProfileSource};
 
 use super::{
-    AccountSummary, InsecureReason, LOGIN_TTL, OpenFailure, Session, Source, blocking,
+    AccountSummary, InsecureReason, LOGIN_TTL, OpenFailure, Session, Source, blocking, categories,
     connection_budget, guide, load_parental, locks, user_agent_string,
 };
 use crate::error::AppError;
@@ -107,6 +107,11 @@ impl Session {
         .await
         .unwrap_or_default();
         let parental = load_parental(&store, profile_id).await.unwrap_or_default();
+        let category_prefs = blocking(&store, move |s| {
+            categories::read_category_prefs(s, profile_id)
+        })
+        .await
+        .unwrap_or_default();
         services.blocking("mark profile used", move |s| {
             s.profiles().mark_used(profile_id)
         });
@@ -147,6 +152,8 @@ impl Session {
             lock_state: locks::LockState::default(),
             // Connection budget (Phase 7).
             connections,
+            // Category management.
+            categories: categories::CategoryState::new(category_prefs),
         }))
     }
 

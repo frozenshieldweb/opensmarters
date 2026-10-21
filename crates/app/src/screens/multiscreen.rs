@@ -16,6 +16,10 @@
 //! channel or zaps, builds every tile list without locked channels
 //! ([`multi::playable`]), and `MultiView` checks every target again.
 //!
+//! Category management (Settings › Categories) applies like in Live TV: the picker lists
+//! the categories in the viewer's order without the hidden ones, and "All" and number entry
+//! leave out channels whose every category is hidden.
+//!
 //! ## Keys
 //!
 //! | Key | Action |
@@ -47,6 +51,7 @@ use crate::playback::multi::{self, LockedCategories, TileSettings};
 use crate::playback::{PlaybackItem, PlaybackRequest, PlaybackStatus, ZapContext};
 use crate::services::Session;
 use crate::services::catalog::{LiveCatalog, LiveChannel};
+use crate::services::categories::HiddenCategories;
 use crate::task::Loader;
 use crate::ui::assets::Illustration;
 use crate::ui::icons::{self, Style};
@@ -202,10 +207,15 @@ fn toggle_fullscreen(cx: &AppCtx<'_>) {
 #[derive(Debug, Clone)]
 struct ChannelData {
     generation: u64,
+    /// `Session::category_prefs_generation` it was built for.
+    categories: u64,
     catalog: Arc<LiveCatalog>,
-    /// Every channel except those of locked categories (a tile's list for number entry).
+    /// Every channel except those of locked categories and those whose every category is
+    /// hidden (a tile's list for number entry).
     all: Arc<Vec<LiveChannel>>,
     locks: LockedCategories,
+    /// Hidden categories (Settings › Categories).
+    hidden: HiddenCategories,
 }
 
 /// The multiscreen screen.
@@ -267,18 +277,25 @@ impl MultiscreenScreen {
     fn channel_data(&mut self, session: &Session) -> Option<ChannelData> {
         let cat = self.catalog.value()?;
         let generation = self.catalog.generation();
+        let categories = session.category_prefs_generation();
         if self
             .data
             .as_ref()
-            .is_none_or(|d| d.generation != generation)
+            .is_none_or(|d| d.generation != generation || d.categories != categories)
         {
             let locks = LockedCategories::of(session, cat);
-            let all = multi::playable(&cat.channels, |c| locks.hides(c));
+            let hidden =
+                session.hidden_categories(opensmarters_store::ContentKind::Live, &cat.categories);
+            let all = multi::playable(&cat.channels, |c| {
+                locks.hides(c) || hidden.hides(&c.categories)
+            });
             self.data = Some(ChannelData {
                 generation,
+                categories,
                 catalog: Arc::clone(cat),
                 all,
                 locks,
+                hidden,
             });
         }
         self.data.clone()
@@ -346,8 +363,12 @@ impl MultiscreenScreen {
             return;
         }
         let Some(index) = data.all.iter().position(|c| c.number == Some(number)) else {
-            cx.toasts
-                .info(picker::number_missing(number, &data.catalog, &data.locks));
+            cx.toasts.info(picker::number_missing(
+                number,
+                &data.catalog,
+                &data.locks,
+                &data.hidden,
+            ));
             return;
         };
         let zap = ZapContext {
@@ -840,6 +861,7 @@ impl Screen for MultiscreenScreen {
                 generation: d.generation,
                 all: &d.all,
                 locks: &d.locks,
+                hidden: &d.hidden,
             });
             match (p.show(cx, &session, channels, &keys), &data) {
                 (Some((_, zap)), Some(d)) => {

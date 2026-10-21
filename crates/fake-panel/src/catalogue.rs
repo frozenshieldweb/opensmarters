@@ -328,6 +328,37 @@ const SERIES_CATS: &[VodCat] = &[
     vod(206, "アニメ", "Animation", 3),
 ];
 
+/// Category names with a region tag (the `tagged-categories` quirk), by category id. The
+/// categories not listed keep their names (some real panels mix tagged and untagged
+/// ones; "Adult Night" and "18+ After Dark" still match the parental keywords).
+const REGION_TAGGED: &[(u32, &str)] = &[
+    (1, "UK | News"),
+    (2, "FR | Sports"),
+    (3, "[CA] Kids"),
+    (4, "DE: Documentary"),
+    (5, "UK | Music"),
+    (6, "FR | Entertainment"),
+    (8, "UK | Sussex Local"),
+    (9, "UK | Essex FM"),
+    (10, "GR | Ελληνικά"),
+    (11, "JP | 日本語"),
+    (13, "CA: Coming Soon"),
+    (101, "FR | Action"),
+    (102, "UK | Comedy"),
+    (103, "DE: Kino"),
+    (104, "[CA] Science Fiction"),
+    (105, "UK | Documentary"),
+    (106, "FR | Family"),
+    (107, "UK | Thriller"),
+    (108, "GR | Ελληνικές Ταινίες"),
+    (201, "UK | Drama Series"),
+    (202, "FR | Comedy Series"),
+    (203, "[CA] Crime & Mystery"),
+    (204, "UK | Kids Series"),
+    (205, "DE: Documentary Series"),
+    (206, "JP | アニメ"),
+];
+
 /// 2025-01-01T00:00:00Z: `added` dates are spread over the following ~14 months.
 pub(crate) const ADDED_BASE: i64 = 1_735_689_600;
 
@@ -489,6 +520,25 @@ impl Catalogue {
             series,
             episodes,
         }
+    }
+
+    /// With `on` (the `tagged-categories` quirk), gives most categories a region tag in
+    /// their name ([`REGION_TAGGED`]). Ids, channels, films and series stay the same.
+    #[must_use]
+    pub fn with_region_tags(mut self, on: bool) -> Self {
+        if on {
+            for c in self
+                .live_categories
+                .iter_mut()
+                .chain(self.vod_categories.iter_mut())
+                .chain(self.series_categories.iter_mut())
+            {
+                if let Some((_, name)) = REGION_TAGGED.iter().find(|(id, _)| *id == c.id) {
+                    (*name).clone_into(&mut c.name);
+                }
+            }
+        }
+        self
     }
 
     fn gen_live(rng: &mut Rng, huge: bool) -> Vec<LiveChannel> {
@@ -802,6 +852,31 @@ mod tests {
         assert!(a.movie(200_001).is_some());
         let (_, ep) = a.episode(300_001).unwrap_or_else(|| unreachable!());
         assert_eq!(ep.episode_num, 1);
+    }
+
+    #[test]
+    fn region_tags_rename_categories_only() {
+        let plain = Catalogue::generate(7, false);
+        let tagged = Catalogue::generate(7, false).with_region_tags(true);
+        let unchanged = Catalogue::generate(7, false).with_region_tags(false);
+        assert_eq!(unchanged.live_categories, plain.live_categories);
+        assert_eq!(tagged.live_categories.len(), plain.live_categories.len());
+        let name = |cats: &[Category], id: u32| {
+            cats.iter()
+                .find(|c| c.id == id)
+                .map(|c| c.name.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(name(&tagged.live_categories, 2), "FR | Sports");
+        assert_eq!(name(&tagged.live_categories, 7), "Adult Night");
+        assert_eq!(name(&tagged.vod_categories, 103), "DE: Kino");
+        assert_eq!(name(&tagged.series_categories, 203), "[CA] Crime & Mystery");
+        for (a, b) in tagged.live.iter().zip(&plain.live) {
+            assert_eq!(
+                (a.stream_id, &a.name, a.category_id),
+                (b.stream_id, &b.name, b.category_id)
+            );
+        }
     }
 
     #[test]

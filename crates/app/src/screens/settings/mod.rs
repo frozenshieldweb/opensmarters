@@ -7,6 +7,7 @@
 //! | Account | `account.rs` | status, expiry, connections, HTTP warning, edit (PIN) / refresh |
 //! | Profiles | `profiles.rs` | every profile on this computer: switch, add, edit, delete (PIN) |
 //! | Playback | `playback.rs` | this profile: stream format, catch-up format, User-Agent; every profile: audio/subtitle languages, hardware decoding, buffer |
+//! | Categories | `categories.rs` | this profile, per section: hide, reorder, filter by region (Live TV, Movies, Series open it on their section) |
 //! | Parental control | `parental.rs` (+ `pin_flow.rs`) | PIN set/change/off (page protected by the PIN), words, category locks, forgot PIN |
 //! | Appearance | `appearance.rs` | TV mode, UI size, reduced motion (follows Windows by default) |
 //! | Language & region | `language.rs` | clock format, display language |
@@ -22,6 +23,7 @@
 mod about;
 mod account;
 mod appearance;
+mod categories;
 mod language;
 mod licences;
 mod parental;
@@ -52,6 +54,8 @@ pub trait SettingsPageUi {
     fn on_back(&mut self, _cx: &mut AppCtx<'_>) -> bool {
         false
     }
+    /// Keys of the page's own, before the focus engine (like [`Screen::on_input`]).
+    fn on_input(&mut self, _cx: &mut AppCtx<'_>, _ctx: &egui::Context) {}
     /// The widget that gets the focus when moving Right from the section list into this
     /// page for the first time (default: the nearest one geometrically). Text pages return
     /// their first item so reading starts at the top.
@@ -68,6 +72,7 @@ pub struct SettingsScreen {
     account: account::AccountPage,
     profiles: profiles::ProfilesPage,
     playback: playback::PlaybackPage,
+    categories: categories::CategoriesPage,
     parental: parental::ParentalPage,
     appearance: appearance::AppearancePage,
     language: language::LanguagePage,
@@ -94,6 +99,7 @@ impl SettingsScreen {
             account: account::AccountPage::default(),
             profiles: profiles::ProfilesPage::default(),
             playback: playback::PlaybackPage::default(),
+            categories: categories::CategoriesPage::default(),
             parental: parental::ParentalPage::default(),
             appearance: appearance::AppearancePage::default(),
             language: language::LanguagePage,
@@ -110,6 +116,7 @@ impl SettingsScreen {
             SettingsPage::Account => &mut self.account,
             SettingsPage::Profiles => &mut self.profiles,
             SettingsPage::Playback => &mut self.playback,
+            SettingsPage::Categories => &mut self.categories,
             SettingsPage::Parental => &mut self.parental,
             SettingsPage::Appearance => &mut self.appearance,
             SettingsPage::Language => &mut self.language,
@@ -126,6 +133,7 @@ fn page_icon(p: SettingsPage) -> &'static str {
         SettingsPage::Account => icons::USER_CIRCLE,
         SettingsPage::Profiles => icons::USERS_THREE,
         SettingsPage::Playback => icons::PLAY_CIRCLE,
+        SettingsPage::Categories => icons::LIST_BULLETS,
         SettingsPage::Parental => icons::LOCK_SIMPLE,
         SettingsPage::Appearance => icons::PALETTE,
         SettingsPage::Language => icons::GLOBE,
@@ -153,9 +161,10 @@ impl Screen for SettingsScreen {
         self.page_mut(page).on_back(cx)
     }
 
-    fn on_input(&mut self, _cx: &mut AppCtx<'_>, ctx: &egui::Context) {
-        // Right from the section list into a page not visited yet: start at its top.
+    fn on_input(&mut self, cx: &mut AppCtx<'_>, ctx: &egui::Context) {
         let page = self.page;
+        self.page_mut(page).on_input(cx, ctx);
+        // Right from the section list into a page not visited yet: start at its top.
         let page_scope = Id::unique(("settings.page", page.slug()));
         if focus::is_in_scope(ctx, Id::unique("settings.sections"))
             && focus::scope_memory(ctx, page_scope).is_none()

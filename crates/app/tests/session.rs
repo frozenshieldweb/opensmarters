@@ -431,3 +431,172 @@ fn multiscreen_tiles_never_reach_locked_channels() {
     let unlocked = LockedCategories::of(&session, &catalog);
     assert!(adult_channels.iter().all(|c| !unlocked.hides(c)));
 }
+
+#[test]
+fn category_choices_hide_filter_and_never_relax_locks() {
+    use opensmarters_app::services::categories::{HiddenCategories, arrange};
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let panel = rt
+        .block_on(fake_panel::spawn(
+            fake_panel::Config::api_only().with_quirks("tagged-categories".parse().unwrap()),
+        ))
+        .unwrap();
+    let store = Arc::new(
+        Store::open(
+            StoreOptions::in_memory(),
+            Arc::new(MemorySecretStore::new()),
+        )
+        .unwrap(),
+    );
+    store
+        .parental()
+        .set_pin(&SecretString::from("1234".to_owned()))
+        .unwrap();
+    let services = Services::new(
+        rt.handle().clone(),
+        Arc::clone(&store),
+        Redactor::new(),
+        Paths::default(),
+        true,
+        egui::Context::default(),
+    );
+    let env = Env {
+        rt,
+        services,
+        panel,
+    };
+    let id = xtream_profile(&env, "demo", "demo", UserAgent::Default);
+    let session = env
+        .rt
+        .block_on(Session::open(env.services.clone(), id))
+        .unwrap_or_else(|f| panic!("{}", f.error));
+    let catalog = env.rt.block_on(session.live_catalog()).unwrap();
+    let find = |needle: &str| {
+        catalog
+            .categories
+            .iter()
+            .find(|c| c.name.contains(needle))
+            .cloned()
+            .unwrap_or_else(|| panic!("no category containing {needle}"))
+    };
+    let sports = find("FR | Sports");
+    let adult = find("Adult");
+    // Defaults change nothing.
+    assert!(
+        session
+            .hidden_categories(ContentKind::Live, &catalog.categories)
+            .is_empty()
+    );
+    let g0 = session.category_prefs_generation();
+
+    // Hide (optimistic at once, stored in the background).
+    let sid = sports.id.as_str().to_owned();
+    let write_id = sid.clone();
+    session.change_category_prefs(
+        ContentKind::Live,
+        "hide",
+        |p| {
+            p.hidden.insert(sid);
+        },
+        move |s, profile| {
+            s.categories()
+                .set_hidden(profile, ContentKind::Live, &write_id, true)
+        },
+    );
+    assert!(session.category_prefs_generation() > g0);
+    let hidden = session.hidden_categories(ContentKind::Live, &catalog.categories);
+    assert!(hidden.contains(&sports.id));
+    let shown = arrange(
+        &catalog.categories,
+        &session.category_prefs(ContentKind::Live),
+    );
+    assert!(shown.iter().all(|c| c.id != sports.id));
+    let mut stored = false;
+    for _ in 0..100 {
+        if store
+            .categories()
+            .prefs(id, ContentKind::Live)
+            .unwrap()
+            .hidden
+            .contains(sports.id.as_str())
+        {
+            stored = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(stored, "hidden category stored");
+
+    // Hiding never unlocks: a hidden locked category stays locked, and so do its
+    // channels at the point of use.
+    let aid = adult.id.as_str().to_owned();
+    let write_aid = aid.clone();
+    session.change_category_prefs(
+        ContentKind::Live,
+        "hide",
+        |p| {
+            p.hidden.insert(aid);
+        },
+        move |s, profile| {
+            s.categories()
+                .set_hidden(profile, ContentKind::Live, &write_aid, true)
+        },
+    );
+    assert!(session.is_category_locked(ContentKind::Live, &adult.id, &adult.name));
+    let adult_channel = catalog
+        .channels
+        .iter()
+        .find(|c| c.categories.contains(&adult.id))
+        .unwrap();
+    assert!(session.live_request(adult_channel, None).is_err());
+
+    // Region filter: only UK categories (and their channels) are left.
+    session.change_category_prefs(
+        ContentKind::Live,
+        "regions",
+        |p| {
+            p.regions = ["UK".to_owned()].into_iter().collect();
+        },
+        move |s, profile| {
+            s.categories()
+                .set_regions(profile, ContentKind::Live, &["UK"])
+        },
+    );
+    let prefs = session.category_prefs(ContentKind::Live);
+    let shown = arrange(&catalog.categories, &prefs);
+    assert!(!shown.is_empty());
+    assert!(shown.iter().all(|c| c.name.starts_with("UK | ")));
+    let hidden = HiddenCategories::of(&catalog.categories, &prefs);
+    let visible = catalog
+        .channels
+        .iter()
+        .filter(|c| !hidden.hides(&c.categories))
+        .count();
+    let uk: usize = shown.iter().map(|c| catalog.count(&c.id)).sum();
+    assert_eq!(visible, uk, "only the channels of UK categories stay");
+
+    // A new session reads the stored choices back.
+    let mut reopened_ok = false;
+    for _ in 0..100 {
+        let s = store.categories().prefs(id, ContentKind::Live).unwrap();
+        if s.regions.contains("UK") && s.hidden.contains(adult.id.as_str()) {
+            reopened_ok = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(reopened_ok, "choices stored");
+    session.close();
+    let again = env
+        .rt
+        .block_on(Session::open(env.services.clone(), id))
+        .unwrap_or_else(|f| panic!("{}", f.error));
+    let p = again.category_prefs(ContentKind::Live);
+    assert!(p.hidden.contains(sports.id.as_str()));
+    assert!(p.regions.contains("UK"));
+}

@@ -38,7 +38,7 @@ struct Cli {
     /// Known: mixed-types, html-content-type, backdrop-string, episodes-array,
     /// category-all-literal (default on), slow, huge, stream-host, malformed-item,
     /// timeshift-503, timeshift-smarters-only, slow-media, live-endless, media-html,
-    /// media-playlist.
+    /// media-playlist, tagged-categories.
     #[arg(long, value_delimiter = ',')]
     quirks: Vec<String>,
 

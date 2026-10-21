@@ -5,7 +5,8 @@
 //! ([`browse`]).
 //!
 //! Keys: arrows move through the categories, the toolbar (search, sort) and the grid;
-//! PageUp/PageDown page the grid; Esc closes the sort menu / PIN pad, else goes back.
+//! PageUp/PageDown page the grid; H on a category hides it (Undo, or Ctrl+Z); Esc closes
+//! the sort menu / PIN pad, else goes back.
 
 pub(crate) mod browse;
 
@@ -85,6 +86,10 @@ impl Screen for MoviesScreen {
 
     fn on_back(&mut self, cx: &mut AppCtx<'_>) -> bool {
         self.inner.on_back(cx)
+    }
+
+    fn on_input(&mut self, cx: &mut AppCtx<'_>, ctx: &egui::Context) {
+        self.inner.on_input(cx, ctx);
     }
 
     fn ui(&mut self, cx: &mut AppCtx<'_>, ui: &mut egui::Ui) {

@@ -85,6 +85,8 @@ pub enum SettingsPage {
     Account,
     /// Live container, timeshift format, User-Agent; languages, decoding, buffer.
     Playback,
+    /// Category management: hide, reorder, filter by region.
+    Categories,
     /// Accounts / profiles management.
     Profiles,
     /// Parental control (PIN, keywords, locks).
@@ -105,10 +107,11 @@ pub enum SettingsPage {
 
 impl SettingsPage {
     /// All pages in menu order.
-    pub const ALL: [SettingsPage; 10] = [
+    pub const ALL: [SettingsPage; 11] = [
         SettingsPage::Account,
         SettingsPage::Profiles,
         SettingsPage::Playback,
+        SettingsPage::Categories,
         SettingsPage::Recordings,
         SettingsPage::Parental,
         SettingsPage::Appearance,
@@ -123,6 +126,7 @@ impl SettingsPage {
         match self {
             SettingsPage::Account => "Account",
             SettingsPage::Playback => "Playback",
+            SettingsPage::Categories => "Categories",
             SettingsPage::Profiles => "Profiles",
             SettingsPage::Parental => "Parental control",
             SettingsPage::Appearance => "Appearance",
@@ -139,6 +143,7 @@ impl SettingsPage {
         match self {
             SettingsPage::Account => "account",
             SettingsPage::Playback => "playback",
+            SettingsPage::Categories => "categories",
             SettingsPage::Profiles => "profiles",
             SettingsPage::Parental => "parental",
             SettingsPage::Appearance => "appearance",
@@ -486,6 +491,7 @@ mod tests {
             "recordings:tab=scheduled",
             "multiscreen",
             "settings:recordings",
+            "settings:categories",
         ] {
             let r = Route::parse(s).unwrap_or(Route::Profiles);
             assert_eq!(r.to_string(), s);

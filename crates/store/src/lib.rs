@@ -16,6 +16,7 @@
 //! | Global settings (time format, language, UI scale, last profile, TMDB opt-in, cache cap) | SQLite | [`Store::settings`] → [`AppSettings`] |
 //! | TMDB API key | keychain | [`AppSettings::tmdb_api_key`] |
 //! | Parental PIN (Argon2id), lockout state, keywords, category locks | SQLite | [`Store::parental`] → [`Parental`] |
+//! | Category management: hidden categories, the viewer's order, the region filter | SQLite | [`Store::categories`] → [`Categories`] |
 //! | JSON export / import of the non-secret parts (backup, migration) | — | [`Store::export_json`], [`Store::import_json`] ([`export`]) |
 //!
 //! ## Quick start
@@ -101,6 +102,7 @@
 #![forbid(unsafe_code)]
 
 mod cache;
+pub mod categories;
 mod db;
 mod error;
 pub mod export;
@@ -126,6 +128,7 @@ use std::time::Duration;
 use rusqlite::Connection;
 
 pub use cache::{Cache, CacheScope, CachedValue};
+pub use categories::{Categories, CategoryPrefs};
 pub use db::SCHEMA_VERSION;
 pub use error::{Result, StoreError};
 pub use export::ImportSummary;
@@ -245,8 +248,8 @@ impl StoreOptions {
 /// the threading model. Cheap per-domain handles are returned by [`profiles`](Self::profiles),
 /// [`favourites`](Self::favourites), [`playback`](Self::playback),
 /// [`recent_live`](Self::recent_live), [`recordings`](Self::recordings),
-/// [`reminders`](Self::reminders), [`cache`](Self::cache), [`settings`](Self::settings) and
-/// [`parental`](Self::parental).
+/// [`reminders`](Self::reminders), [`cache`](Self::cache), [`settings`](Self::settings),
+/// [`parental`](Self::parental) and [`categories`](Self::categories).
 pub struct Store {
     conn: Mutex<Connection>,
     secrets: Arc<dyn SecretStore>,
@@ -363,6 +366,11 @@ impl Store {
     /// Parental control.
     pub fn parental(&self) -> Parental<'_> {
         Parental { store: self }
+    }
+
+    /// Category management (hidden categories, order, region filter).
+    pub fn categories(&self) -> Categories<'_> {
+        Categories { store: self }
     }
 
     /// Reclaims free pages and truncates the WAL (e.g. after clearing the cache).

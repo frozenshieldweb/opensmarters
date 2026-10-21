@@ -20,6 +20,9 @@
 //!   an item counts (not just the primary one), and while parental control is on the
 //!   film/series category lists are loaded first (keyword locks match their names); if
 //!   they can't be, films and series are left out.
+//! - **Hidden categories** (Settings › Categories): results whose every category is
+//!   hidden are left out (the category lists are loaded while a region filter is set,
+//!   since regions come from their names).
 //! - **Programmes (Phase 7):** Enter on one on air or coming up opens the Guide's actions
 //!   (Watch, Record, Remind me, Switch to it when it starts); rows show a bell for a
 //!   reminder and a red dot for a recording.
@@ -185,7 +188,8 @@ async fn categories_for_locks<T: VodItem>(session: &Arc<Session>) -> Option<Arc<
     {
         return Some(c);
     }
-    if !session.parental_enabled() {
+    // Keyword locks and the region filter both need the names.
+    if !session.parental_enabled() && session.category_prefs(T::KIND).regions.is_empty() {
         return None;
     }
     match T::KIND {
@@ -208,7 +212,12 @@ async fn gather<T: VodItem>(session: &Arc<Session>) -> Gathered<T> {
         .as_deref()
         .map(|c| locks::CategoryNames::new(c.iter()))
         .unwrap_or_default();
-    let locked = |item: &T| locks::is_item_locked(session, T::KIND, &item.categories(), &names);
+    // Hidden categories (Settings › Categories): items whose every category is hidden.
+    let hidden = session.hidden_categories(T::KIND, cats.as_deref().map_or(&[][..], Vec::as_slice));
+    let locked = |item: &T| {
+        let ids = item.categories();
+        hidden.hides(ids.iter().copied()) || locks::is_item_locked(session, T::KIND, &ids, &names)
+    };
     if let Some(all) = session.peek_cached::<Vec<T>>(&T::list_key(None)).await {
         return Gathered {
             items: all.iter().filter(|i| !locked(i)).cloned().collect(),
@@ -223,7 +232,7 @@ async fn gather<T: VodItem>(session: &Arc<Session>) -> Gathered<T> {
     let total = cats.as_ref().map_or(0, |c| c.len());
     if let Some(cats) = &cats {
         for c in cats.iter() {
-            if session.is_category_locked(T::KIND, &c.id, &c.name) {
+            if hidden.contains(&c.id) || session.is_category_locked(T::KIND, &c.id, &c.name) {
                 continue;
             }
             if let Some(list) = session
@@ -297,7 +306,14 @@ async fn build_sources(
     previous: Option<Arc<Sources>>,
 ) -> Result<Arc<Sources>, AppError> {
     let channels: Vec<LiveChannel> = match session.live_catalog().await {
-        Ok(cat) => channel_list::unlocked_in_session(&session, &cat, &cat.channels),
+        Ok(cat) => {
+            let hidden = session.hidden_categories(ContentKind::Live, &cat.categories);
+            channel_list::unlocked_in_session(
+                &session,
+                &cat,
+                cat.channels.iter().filter(|c| !hidden.hides(&c.categories)),
+            )
+        }
         Err(_) => Vec::new(),
     };
     let (movies, series) = if session.is_xtream() {

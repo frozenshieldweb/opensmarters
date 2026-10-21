@@ -81,7 +81,7 @@ export const CONTENT = {
   trustLabel: "Why you can trust it",
   trust: [
     { id: "open", icon: "CODE", label: "Open source · GPL-3.0", tip: "Free software: read, build and change the code under GPL-3.0-or-later." },
-    { id: "telemetry", icon: "EYE_SLASH", label: "No telemetry, no accounts", tip: "No analytics and no sign-up. The app talks to your provider, and to TMDB only if you turn it on." },
+    { id: "telemetry", icon: "EYE_SLASH", label: "No telemetry, no accounts", tip: "No analytics and no sign-up. The app talks to your provider, to TMDB only if you turn it on, and to GitHub only when you check for updates or turn on automatic checks." },
     { id: "native", icon: "CPU", label: "Native app, no web engine", tip: "Built in Rust. Provider text is drawn as text and never run as code." },
     { id: "passwords", icon: "KEY", label: "Passwords in Credential Manager", tip: "Passwords and playlist links live in Windows Credential Manager, never in files or logs." },
     { id: "smooth", icon: "GAUGE", label: "Smooth with 35,000 titles", tip: "Films and series load per category, so a big catalogue never blocks the screen." },

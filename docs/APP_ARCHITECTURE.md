@@ -23,12 +23,12 @@ cargo fmt; cargo clippy -p opensmarters --all-targets --all-features -- -D warni
 | `src/main.rs` | CLI parsing, logging, tokio runtime, store, `--demo`, `eframe::run_native` |
 | `src/app.rs` | `OpensmartersApp` (the `eframe::App`): frame loop, router, lifecycle hooks, zoom/TV mode, harness hook |
 | `src/screens/` | **One module per screen** + the [`Screen`](#3-the-screen-contract) trait and `AppCtx` (`screens/mod.rs`) |
-| `src/screens/shell.rs` | Side rail (§6.1; profile menu: Switch / Manage profiles, closed by `shell::close_menus`), `status_cluster` (clock, offline, a quiet unencrypted lock with a tooltip, "Not verified" account notice), `page_title` |
+| `src/screens/shell.rs` | Side rail (§6.1; profile menu: Switch / Manage profiles, closed by `shell::close_menus`), `status_cluster` (clock, a focusable accent "Update available" pill that opens Settings › About — never without the side rail, so not over fullscreen playback —, offline, a quiet unencrypted lock with a tooltip, "Not verified" account notice), `page_title` |
 | `src/screens/common/` | Logic shared by screens: `locks` (an item is locked when any of its categories is), `channel_list` (unlocked + sorted channel lists), `profile_data::delete_profile` (also forgets the profile's recent searches and remembered categories; use it wherever a profile is deleted), `unlock::UnlockFlow` (after a request builder's `AppError::Locked`: `verify_item` when the categories are unknown, then the PIN, `unlock_category`/`unlock_item`, retry; Home and Detail use it) |
 | `src/nav/` | `Route` (typed routes, `--route` syntax, `back_label`), `Router` (back stack), `Navigator` (`cx.nav`), `nav::back_label(ctx)` (what the page below is called: "‹ Movies" back buttons) |
 | `src/focus/` | The spatial focus engine (`engine.rs`, pure + unit-tested) and its egui glue (`mod.rs`) |
 | `src/ui/` | Design system: `theme` (tokens, fonts, visuals), `icons` (Phosphor), `paint` (focus ring/glow, scrims, cover-fit), `text` (capping, truncation, timecodes), `motion`, `layout` (breakpoints), `assets` (bundled art), `widgets/`. `theme`, `icons`, `paint` and `motion` live in the shared **`crates/afterglow`** crate (also used by the installer, ADR 0002) and are re-exported here unchanged |
-| `src/services/` | `Services` (runtime, store, redactor, images, paths, background-error queue, FIFO store writer `writer`), `fetch_queue` (bounded "what is on screen" request queue), `Session` (provider: catalogue, EPG, favourites, parental, playback requests; Phase-4 additions in child modules `session/*.rs`; parental locks at the point of use in `session/locks.rs`), `catalog` (`LiveChannel`, `LiveCatalog`, `Programme`), `images`, `epg`, `prefs` (app-wide preferences), `parental` (PIN length, lockout/wrong-PIN texts, "forgot PIN" check with a limiter persisted in the store: `forgot_pin_attempt`), `backup` (export/import without secrets or machine-local settings), `search_history` (recent searches per profile), `connections` (connection budget, Phase 7), `alerts` (app-wide prompts, §7.2), `reminders` (programme reminders and actions, §7.3), `demo` |
+| `src/services/` | `Services` (runtime, store, redactor, images, paths, background-error queue, FIFO store writer `writer`), `fetch_queue` (bounded "what is on screen" request queue), `Session` (provider: catalogue, EPG, favourites, parental, playback requests; Phase-4 additions in child modules `session/*.rs`; parental locks at the point of use in `session/locks.rs`), `catalog` (`LiveChannel`, `LiveCatalog`, `Programme`), `images`, `epg`, `prefs` (app-wide preferences), `parental` (PIN length, lockout/wrong-PIN texts, "forgot PIN" check with a limiter persisted in the store: `forgot_pin_attempt`), `backup` (export/import without secrets or machine-local settings), `search_history` (recent searches per profile), `connections` (connection budget, Phase 7), `alerts` (app-wide prompts, §7.2), `reminders` (programme reminders and actions, §7.3), `updates` (`cx.services.updates`: "Check for updates", **notify only**: one GET to GitHub's Releases API (https, 256 KiB, 20 s), strict tag parsing, the release link built locally; the weekly automatic check is off by default (pref `check_updates_automatically`), its state `app.updates` is machine-local; `updates::on_frame` runs it and opens About from the header pill; see SECURITY.md §4.5), `demo` |
 | `src/platform.rs` | Safe OS queries: Windows *Animation effects* (`UISettings.AnimationsEnabled` via the `windows` crate's WinRT projection) for reduced motion; `open_folder` / `open_url` through `launcher()` — the system launcher by **absolute path** (`%SystemRoot%\explorer.exe`, `/usr/bin/open`, `xdg-open`), never a bare name resolved via the current directory or `PATH` (SR-16) |
 | `src/window_state.rs` | Window size/position/maximised remembered between runs (store setting `app.window`, physical px, debounced; never for `--ephemeral`/`--window-size`) |
 | `src/playback/tracks.rs` | Preferred audio/subtitle languages (ISO 639 normalisation, track choice) |
@@ -43,7 +43,7 @@ cargo fmt; cargo clippy -p opensmarters --all-targets --all-features -- -D warni
 | `src/task.rs` | `Loader<T>`: background work with staleness protection |
 | `src/logging.rs` | Redacted `tracing` (stderr + rotating log file) |
 | `src/cli.rs`, `src/harness.rs` | Command line and the dev/test harness (scripted keys, screenshots; harness flags only with the `harness` feature) |
-| `tests/session.rs`, `tests/startup.rs` | Integration tests against the in-process `fake-panel` (startup: cached fast start + background check) |
+| `tests/session.rs`, `tests/startup.rs`, `tests/updates.rs` | Integration tests against the in-process `fake-panel` (startup: cached fast start + background check; updates: the update check against `/__updates/releases/latest` and a raw socket, never GitHub) |
 
 The crate is a binary **and** a library (`opensmarters_app`) so integration tests can drive
 the session layer, router and focus engine.
@@ -106,7 +106,7 @@ back. `ui` receives a `Ui` whose max rect is `cx.layout.content` (right of the r
 | `cx.playback` | the shared player (see §7) |
 | `cx.play(req, fullscreen)` | play a `PlaybackRequest` (fullscreen pushes the player route) |
 | `cx.toasts` | `info/success/warning/error` |
-| `cx.prefs` + `cx.save_prefs()` | TV mode, UI size, reduced motion (+ follow Windows), 12/24 h, aspect preset, volume, preferred audio/subtitle language, hardware decoding, buffering, live rewind window |
+| `cx.prefs` + `cx.save_prefs()` | TV mode, UI size, reduced motion (+ follow Windows), 12/24 h, aspect preset, volume, preferred audio/subtitle language, hardware decoding, buffering, live rewind window, check for updates automatically |
 | `cx.sessions` | open/switch profiles, last failure |
 | `cx.layout` | breakpoint, `screen`, `content`, `margin`, `poster_width`, `tv`, card sizes, `safe_area()`, `grid_columns()` |
 | `cx.now` | `DateTime<Utc>` for EPG progress |
@@ -141,7 +141,7 @@ back. `ui` receives a `Ui` whose max rect is `cx.layout.content` (right of the r
 | Language & region | `settings/language.rs` | 12/24 h clock, display language (English only) |
 | Storage & data | `settings/storage.rs` | cache/pictures usage and clearing, cache limit, history, backup export/import (PIN), data folder, copy log |
 | Privacy & security | `settings/privacy.rs` | plain-language facts; optional TMDB key (keychain, checked on request) |
-| About | `settings/about.rs`, `licences.rs` | versions, GPL notice, source link, third-party licences (a test keeps the list in sync with direct dependencies) |
+| About | `settings/about.rs`, `licences.rs` | Updates first (`services/updates.rs`): the installed version, **Check for updates** (spinner while checking) with the result — up to date / available (**Get the update** opens the locally built release page, **Not now** dismisses that version) / a plain-language error with Try again — and the **Check automatically** toggle (off by default); then versions, GPL notice, source link, third-party licences (a test keeps the list in sync with direct dependencies) |
 
 While a PIN is set it is required for: locked categories, Settings › Parental, adding /
 editing / deleting profiles (picker, Settings › Profiles, Settings › Account) and importing a
@@ -587,6 +587,7 @@ Dev-only environment switches for `--demo`:
 | `OPENSMARTERS_DEMO_REMINDERS=notify:70,switch:25,missed:300` | sets synthetic reminders on the first demo channels, starting that many seconds from now (`missed:` = started that long ago), to see the prompts fire |
 | `OPENSMARTERS_DEMO_SLEEP_SECS_PER_MIN=2` | a sleep-timer "minute" lasts 2 s (15 min = 30 s) |
 | `OPENSMARTERS_DEMO_MAX_STREAMS=4` | sets the demo profile's "simultaneous streams" override (the demo account allows 2), e.g. to try multiscreen with 1, 3 or 4 tiles |
+| `OPENSMARTERS_UPDATE_URL=fake?tag=v0.3.0` | **`harness` builds only**: the update check asks the demo panel's GitHub-shaped `/__updates/releases/latest` instead of GitHub (`fake` alone: this version with the minor bumped; `?status=429`, `?draft=true`, `?big=1`, `?delay_ms=8000` for the other states), or any full URL (https, or http to 127.0.0.1/localhost). Release builds always ask GitHub |
 
 ## 10. UI kit catalogue (`src/ui`)
 
@@ -635,7 +636,9 @@ Tokens, icons, paint and motion come from `crates/afterglow` (re-exported as `cr
   `cx.services.redactor.redact(..)`.
 - Provider strings are plain text (egui never interprets markup) and are capped with
   `ui::text::cap` before layout. Images only via the image service. Media only via
-  `PlayableUrl` (built by the session). No telemetry.
+  `PlayableUrl` (built by the session). No telemetry: besides the provider, the app talks
+  only to TMDB (opt-in) and to GitHub when the user checks for updates or turns on the
+  weekly check (`services/updates.rs`).
 - Show `Callout::unencrypted()` wherever an `http://` account is edited or shown.
 
 ## 12. Who owns what (Phase 4)

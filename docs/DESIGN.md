@@ -383,7 +383,8 @@ Launch state (focus on Resume). Scrolled state with a focused poster: [`concepts
 
 ### 8.6 Settings
 - Two panes on `bg`: section list 280 pt (`surface-1`, rows 48 pt: Account, Profiles, Playback, Parental control, Appearance (TV mode, Size, Motion), Language & region (Time format), Storage & data, Privacy & security, About) and the detail pane (max width 760; 880 on wide windows). Rows 56-68 pt and more: label `body-strong` + description `caption` `text-3` on the left (the text takes what the control leaves, at least 40%; the description wraps to 3 lines and the row grows), control on the right (toggle, value + `CARET_RIGHT`, segmented control). **Toggle:** 52×30 pill; off `surface-4` with a `text-2` knob, on `accent` with a `text-on-accent` knob; 160 ms knob slide.
-- About: lockup, version, licence (GPL-3.0-or-later), font licences (OFL), "No telemetry" statement.
+- About: lockup, **Updates** (the version + secondary "Check for updates", a status line with icon + words — spinner, `success` check, `accent` arrow-circle-up, `danger` warning; a newer version shows an `accent-soft` card with ghost "Not now" and primary "Get the update" on the right; "Check automatically" toggle row), version details, licence (GPL-3.0-or-later), font licences (OFL), "No telemetry" statement.
+- Header status cluster: a newer, non-dismissed version adds a quiet pill left of the clock (28 pt, r-full, `accent-soft` fill, 16 pt `ARROW_CIRCLE_UP` + `caption-strong` "Update available" in `accent`, `text` on focus; ring + glow; tooltip); it opens Settings › About on "Get the update". Not shown without the side rail (fullscreen playback, multiscreen).
 
 ---
 

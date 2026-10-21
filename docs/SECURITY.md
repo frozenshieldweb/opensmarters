@@ -72,6 +72,11 @@ next to a password).
 The most important boundary is the **FFI boundary to libmpv**: FFmpeg's demuxers and
 decoders parse provider-controlled bytes in C. Everything before it is memory-safe Rust.
 
+Besides the provider's hosts, the app talks to two others, both only on the user's request:
+TMDB (the user's own key, off by default) and **GitHub's API** for "Check for updates"
+(Settings › About, or the weekly automatic check, off by default; §4.5). Their answers are
+untrusted input too.
+
 ## 4. Mitigations
 
 ### 4.1 Provider data never becomes code or markup
@@ -84,9 +89,12 @@ decoders parse provider-controlled bytes in C. Everything before it is memory-sa
   names). EPG base64 is decoded leniently (`crates/core/src/epg.rs`).
 - **No shell, no string-built commands.** mpv is driven with node-based commands; the URL
   is one argument (`issue_load` in `crates/player/src/player.rs`). The only processes the
-  app starts are `explorer` for "open data folder" (`crates/app/src/platform.rs`) and the
+  app starts are `explorer` for "open data folder" (`crates/app/src/platform.rs`), the
   system browser for a validated YouTube watch URL after confirmation
-  (`crates/app/src/screens/detail/trailer.rs`); both pass a single argument, no shell.
+  (`crates/app/src/screens/detail/trailer.rs`), and the system browser for the release
+  page of a newer version when the user chooses "Get the update" (a URL built locally,
+  never taken from GitHub's answer; `crates/app/src/services/updates.rs`); all pass a
+  single argument, no shell.
 - **Trailers** are never embedded: only `https://www.youtube.com/watch?v=<11 chars>` is
   ever handed to the OS.
 
@@ -101,6 +109,7 @@ decoders parse provider-controlled bytes in C. Everything before it is memory-sa
 | Images | `image` crate (png, jpeg; pure Rust) | 10 MiB download, 8192 px per side, 256 MiB decode allocation, 6 concurrent, downscaled to ≤ 1920 px | `crates/app/src/services/images.rs` |
 | mpv node trees | `NodeOut::from_raw` | depth 16, 4096 items | `crates/player/src/node.rs` |
 | Backup import | serde + store validation | 64 MiB, 1000 profiles, 100 k favourites/profile, all-or-nothing transaction | `crates/store/src/export.rs` |
+| Update check answer (GitHub "latest release") | `updates::parse_release` | **256 KiB**; connect 10 s, idle 15 s, total 20 s; ≤ 3 redirects, https only (never → http); only `tag_name`, `draft`, `prerelease` read; tag ≤ 64 bytes, exactly `v?MAJOR.MINOR.PATCH(-PRE)?` with `u32` parts (no build metadata, no leading zeros); drafts/pre-releases skipped; no URL or text from the answer is used or shown | `crates/app/src/services/updates.rs` |
 | Media downloads / recordings | `download::Downloader` (streaming) | connect 10 s, read-idle 30 s, no overall deadline (live); ≤ 5 redirects, http(s) only, never https → http; identity encoding; `206` checked against `Content-Range`; no size cap but a free-space guard | `crates/core/src/download.rs` |
 | HLS playlists (recording HLS-only channels) | `hls::parse` | 4 MiB, 16 KiB/line, 20 000 segments (newest kept), 256 variants, 8 KiB/URI; web URIs only; encrypted / byte-range streams refused | `crates/core/src/hls.rs` |
 
@@ -183,9 +192,27 @@ four `cargo-fuzz` targets exist (`fuzz/fuzz_targets/{m3u,xmltv,xtream_json,hls}.
   during onboarding and in the status cluster.
 - **No Referer, no cookies** on API/playlist/image requests.
 - **No telemetry**: the only hosts contacted are the panel/playlist host, the stream and
-  image hosts it returns, an EPG host the user or playlist names, and — only after the user
-  enters their own key — `api.themoviedb.org`. The trailer button opens youtube.com in the
-  browser after a confirmation. No API key is embedded.
+  image hosts it returns, an EPG host the user or playlist names, `api.themoviedb.org`
+  (only after the user enters their own key) and `api.github.com` (only when the user
+  chooses **Check for updates** or turns on the weekly automatic check). The trailer
+  button opens youtube.com in the browser after a confirmation. No API key is embedded.
+- **Update check (notify only)** (`crates/app/src/services/updates.rs`): one
+  `GET https://api.github.com/repos/<owner>/<repo>/releases/latest` (owner/repo from the
+  build's `CARGO_PKG_REPOSITORY`; anything that isn't a GitHub repository turns the
+  feature off) with `User-Agent: opensmarters/<version>` and
+  `Accept: application/vnd.github+json` and nothing else (no cookies, no `Referer`, no
+  identifier; an integration test checks the exact header set). GitHub sees the IP
+  address. Threat model: the answer is untrusted (a compromised or impersonated GitHub,
+  or a bug): it is size-capped and only a strictly validated version number is taken
+  from it (§4.2); the "Get the update" link is built locally from `CARGO_PKG_HOMEPAGE`
+  (if it is a plain https URL) or `https://github.com/<owner>/<repo>/releases/tag/v<X.Y.Z>`,
+  never from `html_url` or asset links; release notes are never rendered; nothing is
+  downloaded, installed or run (the user runs the new setup; the installer has no network
+  code at all, §4.11). The automatic check is **off by default**, runs at most weekly
+  (after a failure, at most daily), and is silent on failure. Its state (last check,
+  latest version seen, dismissed version) is machine-local and never exported. The
+  dev/test URL override (`OPENSMARTERS_UPDATE_URL`) exists only in builds with the
+  `harness` feature (SR-03), and even there accepts only https or http to loopback.
 - **SSRF to the LAN is accepted**: a provider can make the app fetch images or streams from
   `127.0.0.1` or LAN addresses (GET only, nothing reflected back). This is inherent to
   IPTV and acceptable for a desktop player.
@@ -211,7 +238,8 @@ four `cargo-fuzz` targets exist (`fuzz/fuzz_targets/{m3u,xmltv,xtream_json,hls}.
   moving the clock backwards cannot lengthen a lockout. Once the lockout reaches 1 h, a
   4-digit PIN takes about 200 days of attempts at the keyboard on average.
 - **Backups**: import is PIN-gated, validated field by field and applied in one
-  transaction; machine-local settings (PIN length, window, search history) are stripped.
+  transaction; machine-local settings (PIN length, window, search history, update-check
+  state) are stripped.
 - **Logs**: `logs\opensmarters.log`, rotated at 5 MiB with one old file, redacted at write
   time. "Copy log" copies a redacted tail.
 
@@ -323,6 +351,8 @@ trust it with their user account. Design: [ADR 0002](adr/0002-installer.md).
   as the desktop user even if someone started setup elevated.
 - **No network.** The installer contains no HTTP client, TLS stack or network runtime
   (`crates/installer/tests/no_network.rs` checks the dependency graph with `cargo tree`).
+  Updates stay manual: the app can tell the user a newer version exists (§4.5), and the
+  user downloads and runs the new setup, which updates in place.
 - **DLL planting** (the classic installer flaw when run from Downloads): the setup binary
   is linked with `/DEPENDENTLOADFLAG:0x800`, so its static imports are resolved from
   System32 only, and `main` first calls `opensmarters_player::harden_dll_search_path()`
@@ -471,6 +501,11 @@ cd fuzz && cargo +nightly fuzz run m3u -- -max_total_time=300
 cargo +nightly fuzz run xmltv -- -max_total_time=300
 cargo +nightly fuzz run xtream_json -- -max_total_time=300
 cargo +nightly fuzz run hls -- -max_total_time=300
+
+# Update check: strict tag parsing, locally built link, caps, exact request headers
+# (against the fake panel's /__updates/releases/latest and a raw socket; never GitHub)
+cargo test -p opensmarters --all-features --test updates
+cargo test -p opensmarters --all-features --lib updates
 
 # Recordings and downloads: Range resume, redirects, timeouts, HTML/playlist bodies refused
 cargo test -p opensmarters-core --test download

@@ -12,6 +12,7 @@ These rules apply to every contributor, human or agent. Read [BUILD_PROMPT.md](B
 | `crates/app` | `opensmarters` (bin) | eframe/egui desktop app | forbidden |
 | `crates/fake-panel` | `fake-panel` (bin + lib) | Dev-only fake Xtream/M3U/XMLTV server with synthetic data and generated test streams | forbidden |
 | `crates/afterglow` | `opensmarters-afterglow` / `afterglow` | The Afterglow design system for egui (tokens, fonts, icons, focus/gradient painting, motion), shared by the app and the installer | forbidden |
+| `crates/installer` | `opensmarters-installer` (bins `opensmarters-setup`, `opensmarters-pack`) | Per-user Windows installer, updater and uninstaller; the release payload packer ([ADR 0002](adr/0002-installer.md)). Dev/test flags only with the `dev` feature | forbidden |
 
 ## Rules
 

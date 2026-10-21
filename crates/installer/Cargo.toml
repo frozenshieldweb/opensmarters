@@ -1,0 +1,80 @@
+[package]
+name = "opensmarters-installer"
+description = "opensmarters setup: a per-user Windows installer, updater and uninstaller (eframe/egui), and its payload packer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "opensmarters-setup"
+path = "src/main.rs"
+
+[[bin]]
+# Release tool: packs the staged release folder into payload.xz + payload.manifest
+# (tools/package.ps1). Never shipped.
+name = "opensmarters-pack"
+path = "src/bin/pack.rs"
+
+[lib]
+# The setup logic is also a library so integration tests (tests/*.rs) can drive it.
+name = "opensmarters_installer"
+path = "src/lib.rs"
+
+[features]
+default = []
+## Dev/test only: the hidden flags `--sandbox`, `--preview`, `--keys`, `--screenshot-after`,
+## `--screenshot-out`, `--exit-after`, `--ppp`, `--reduced-motion` and `--slow`. Never
+## enable in release builds (tools/package.ps1 builds without features).
+dev = []
+
+# Everything is Windows-only: on other platforms the binaries are stubs that say so.
+[target.'cfg(windows)'.dependencies]
+opensmarters-afterglow = { path = "../afterglow" }
+# Only for `harden_dll_search_path` (the player crate's audited `unsafe`); no libmpv, no egui.
+opensmarters-player = { path = "../player", default-features = false }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+eframe = { version = "0.37", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "accesskit",
+    # "Copy details" on the error screen.
+    "clipboard",
+] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Purging saved passwords (opt-in at uninstall): enumerate and delete the app's generic
+# credentials. Both are already in the tree through `keyring` (crates/store).
+keyring-core = "1"
+windows-native-keyring-store = "1.1"
+# Safe SHGetKnownFolderPath wrapper: %LOCALAPPDATA%\Programs, Start menu, Desktop, system folders.
+known-folders = "1.4"
+# The payload: pure-Rust xz (LZMA2) decoder; the encoder is used by opensmarters-pack.
+lzma-rust2 = { version = "0.23", default-features = false, features = ["std", "encoder", "optimization", "xz"] }
+# Start menu / desktop shortcuts (pure-Rust .lnk writer).
+mslnk = "0.1.8"
+# "Change…" folder picker and the --help message box (already used by the app).
+rfd = "0.17"
+# File and archive hashes (the version lzma-rust2 already uses).
+sha2 = "0.11"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+# Apps & features entry under HKCU (already in the tree through embed-resource).
+winreg = "0.56"
+
+[target.'cfg(windows)'.dev-dependencies]
+# Pins the data folder and keychain service names to what the app really uses.
+opensmarters-store = { path = "../store" }
+tempfile = "3"
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+lzma-rust2 = { version = "0.23", default-features = false, features = ["std", "encoder", "optimization", "xz"] }
+sha2 = "0.11"
+
+[lints]
+workspace = true

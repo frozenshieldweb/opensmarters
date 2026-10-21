@@ -287,6 +287,17 @@ pub mod font {
 const UI_VF: &[u8] = include_bytes!("../../../assets/fonts/SourceSans3-Variable.ttf");
 const DISPLAY_VF: &[u8] = include_bytes!("../../../assets/fonts/Fraunces-Variable.ttf");
 
+/// The Fraunces variable font (unmodified, OFL), for faces at other coordinates than
+/// `display` (the installer sets the wordmark live at `opsz` 144, as LAUNCH_PROMPT §0 asks).
+pub fn display_font_bytes() -> &'static [u8] {
+    DISPLAY_VF
+}
+
+/// A face of a variable font at the given axis coordinates (`[("wght", 600.0)]`).
+pub fn variable_face(bytes: &'static [u8], coords: &[(&str, f32)]) -> Arc<FontData> {
+    face(bytes, coords)
+}
+
 fn face(bytes: &'static [u8], coords: &[(&str, f32)]) -> Arc<FontData> {
     let tags: Vec<([u8; 4], f32)> = coords
         .iter()

@@ -254,7 +254,8 @@ code {
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  padding: clamp(16px, 2.6vh, 48px) var(--margin) clamp(12px, 2vh, 28px);
+  --pad-b: clamp(12px, 2vh, 28px);
+  padding: clamp(16px, 2.6vh, 48px) var(--margin) var(--pad-b);
 }
 .hero {
   flex: 1;
@@ -676,11 +677,34 @@ h1:focus-visible {
 
 /* ---- bottom strip: feature beats + footer ---------------------------------------------------- */
 .strip {
+  position: relative;
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
   gap: 16px 32px;
   padding-top: clamp(8px, 1.6vh, 20px);
+}
+.strip::before {
+  /* scrim-bottom (DESIGN §4.6): the strip's text never sits on the bright hero art. A soft
+     ramp over 140 px, full width, down to the page's bottom edge; the art reads above it. */
+  content: "";
+  position: absolute;
+  z-index: -1;
+  top: -140px;
+  bottom: calc(-1 * var(--pad-b));
+  left: 50%;
+  width: 100vw;
+  transform: translateX(-50%);
+  background: linear-gradient(
+    to bottom,
+    rgb(20 16 19 / 0) 0,
+    rgb(20 16 19 / 0.16) 40px,
+    rgb(20 16 19 / 0.5) 85px,
+    rgb(20 16 19 / 0.82) 125px,
+    rgb(20 16 19 / 0.9) 140px,
+    rgb(20 16 19 / 0.92) 100%
+  );
+  pointer-events: none;
 }
 .beats {
   flex: 0 1 auto;
@@ -941,11 +965,32 @@ h1:focus-visible {
   box-shadow: var(--e3);
 }
 .rp-hint {
+  position: relative;
+  z-index: 0;
+  width: fit-content;
+  max-width: 100%;
   margin: 20px 0 0 2px;
   font-size: 13px;
   line-height: 18px;
   color: var(--text-3);
   transition: color var(--base) var(--cubic-out);
+}
+.rp-hint::before {
+  /* A feathered local scrim: the hint can cross the hero art below the replica. */
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: -10px -40px -10px -16px;
+  background: linear-gradient(
+    90deg,
+    rgb(20 16 19 / 0) 0,
+    rgb(20 16 19 / 0.9) 16px,
+    rgb(20 16 19 / 0.9) calc(100% - 48px),
+    rgb(20 16 19 / 0) 100%
+  );
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 9px, #000 calc(100% - 9px), transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 9px, #000 calc(100% - 9px), transparent);
+  pointer-events: none;
 }
 .rp-hint.is-active,
 .rp-hint.is-hint {
@@ -2101,7 +2146,8 @@ html:not([data-js]) .rp-hint {
 /* ---- tablet and phone: stack, scrolling allowed ---------------------------------------------- */
 @media (max-width: 1023.98px) {
   .stage {
-    padding: 24px var(--margin) 24px;
+    --pad-b: 24px;
+    padding: 24px var(--margin) var(--pad-b);
     min-height: 0;
   }
   .hero {
@@ -2129,6 +2175,9 @@ html:not([data-js]) .rp-hint {
   }
   .chips {
     margin-top: 32px;
+  }
+  .strip::before {
+    display: none; /* the hero only covers the first screen here, and fades out below */
   }
   .strip {
     flex-direction: column;

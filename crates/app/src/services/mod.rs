@@ -14,6 +14,7 @@
 pub mod alerts;
 pub mod backup;
 pub mod catalog;
+pub mod categories;
 pub mod connections;
 #[cfg(feature = "demo")]
 pub mod demo;

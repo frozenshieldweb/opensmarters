@@ -91,6 +91,8 @@ mod pin;
 mod startup;
 // p7b: stream addresses for background recordings/downloads (no lock check; dvr only).
 mod dvr;
+// Category management: hidden categories, order, region filter (Settings › Categories).
+mod categories;
 
 /// TTL of category and stream lists.
 pub const LIST_TTL: Duration = Duration::from_secs(6 * 3600);
@@ -348,6 +350,9 @@ pub struct Session {
 
     // --- Connection budget (Phase 7): player, multiscreen, downloads, recordings.
     connections: Arc<super::connections::ConnectionBudget>,
+
+    // --- Category management (session/categories.rs).
+    categories: categories::CategoryState,
 }
 
 impl std::fmt::Debug for Session {
@@ -586,6 +591,11 @@ impl Session {
         .await
         .unwrap_or_default();
         let parental = load_parental(&store, profile_id).await.unwrap_or_default();
+        let category_prefs = blocking(&store, move |s| {
+            categories::read_category_prefs(s, profile_id)
+        })
+        .await
+        .unwrap_or_default();
 
         // A cached (offline) login's `active_cons` is stale: don't trust it.
         let connections = connection_budget(&store, profile_id, account.as_ref(), !offline).await;
@@ -625,6 +635,8 @@ impl Session {
             parental: RwLock::new(parental),
             lock_state: locks::LockState::default(),
             connections,
+            // Category management.
+            categories: categories::CategoryState::new(category_prefs),
         }))
     }
 

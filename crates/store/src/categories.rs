@@ -80,6 +80,12 @@ impl CategoryPrefs {
     }
 }
 
+/// True when `id` can be stored (the same rule every write applies): callers leave out a
+/// provider's unusable ids instead of failing a whole change because of one.
+pub fn is_valid_id(id: &str) -> bool {
+    validate_item_id("category_id", id).is_ok()
+}
+
 /// Checks a region tag: empty (untagged categories) or 1–4 ASCII capital letters/digits.
 pub(crate) fn validate_region(tag: &str) -> Result<&str> {
     let ok = tag.len() <= MAX_REGION_TAG_CHARS
@@ -428,6 +434,8 @@ mod tests {
 
     #[test]
     fn ids_are_validated_and_deduplicated() {
+        assert!(is_valid_id("12"));
+        assert!(!is_valid_id("http://h.example.invalid/x"));
         let ids = valid_ids(&["1", "2", "1"]).unwrap_or_default();
         assert_eq!(ids, ["1", "2"]);
         assert!(valid_ids(&["ok", "http://h.example.invalid/x"]).is_err());

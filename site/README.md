@@ -47,33 +47,47 @@ Open <http://localhost:8000/>. Serve over HTTP: browsers don't run ES modules fr
 
 ## Publish a release
 
-1. Build the release with `tools/package.ps1` (it writes `dist/`).
-2. Update the page from it:
+**Normally automatic.** Push a `vX.Y.Z` tag that matches the workspace version in
+`Cargo.toml`. `.github/workflows/release.yml` then:
 
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File site\scripts\update-release.ps1 `
-       -BaseUrl "https://github.com/frozenshieldweb/opensmarters/releases/download/v{version}"
-   ```
+1. builds the zip and the setup exe on a clean Windows runner (`tools/package.ps1`);
+2. attests their build provenance;
+3. publishes the GitHub Release with the notes from that version's `CHANGELOG.md` section;
+4. runs `update-release.ps1` against the published files and commits `site/release.js` and
+   `site/index.html` to `main`;
+5. deploys the page (below).
 
-   It reads `dist/` (or `-Dist <folder>`): `opensmarters-<v>-windows-x64.zip`, and once
-   Part B ships, `opensmarters-<v>-windows-x64-setup.exe` and `SHA256SUMS.txt`. It computes
-   every SHA-256, checks them against `SHA256SUMS.txt` / `*.sha256` (a mismatch stops it),
-   reads the Authenticode status, writes `release.js` and rebuilds `index.html`.
-   Without `-BaseUrl` the URLs stay `TODO`.
-3. Upload the same files to the place `-BaseUrl` points at (the GitHub Release `v<version>`),
-   and commit `site/`.
+**By hand** (a local build, or another host):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File site\scripts\update-release.ps1 `
+    -BaseUrl "https://github.com/frozenshieldweb/opensmarters/releases/download/v{version}"
+```
+
+It reads `dist/` (or `-Dist <folder>`): `opensmarters-<v>-windows-x64-setup.exe`,
+`opensmarters-<v>-windows-x64.zip` and `SHA256SUMS.txt`. It computes every SHA-256, checks
+them against `SHA256SUMS.txt` / `*.sha256` (a mismatch stops it), reads the Authenticode
+status, writes `release.js` and rebuilds `index.html`. Without `-BaseUrl` the URLs stay
+`TODO`. Upload the same files to where `-BaseUrl` points, and commit `site/`.
 
 With an installer, the primary button downloads it and the zip becomes a secondary link.
-Without one (0.1.0), the primary button downloads the zip and says so. While `signed` is
-false, the page says Windows may warn about an unknown publisher.
+Without one, the primary button downloads the zip and says so. While `signed` is false, the
+page says Windows may warn about an unknown publisher.
 
 ## Deploy
 
-Any static host works: publish the `site/` folder as it is.
+The page is served by GitHub Pages from the `gh-pages` branch, at
+<https://frozenshieldweb.github.io/opensmarters/>. `.github/workflows/pages.yml` copies
+`site/` there (without `scripts/`, `README.md` and `package.json`) when `site/` changes on
+`main`, when run by hand, and after each release. It doesn't deploy while `release.js`
+lists no published files, so the "Links not set yet" state never goes public.
 
-- **GitHub Pages:** Settings → Pages → Source: *GitHub Actions*, with a workflow that uploads
-  `site/` (`actions/upload-pages-artifact` with `path: site`, then `actions/deploy-pages`).
-- **Netlify / Cloudflare Pages:** publish directory `site`; `_headers` is applied.
+Pages was switched on by the first push to `gh-pages` from a maintainer's account (a push
+made with the workflow's `GITHUB_TOKEN` doesn't enable it); later deploys come from the
+workflow.
+
+Any other static host works too: publish the `site/` folder as it is (Netlify / Cloudflare
+Pages: publish directory `site`; `_headers` is applied).
 
 **Security headers.** `index.html` carries the Content-Security-Policy in a `<meta>` tag.
 Browsers ignore `frame-ancestors` there, so the meta has every directive except that one.
@@ -86,16 +100,13 @@ Content-Security-Policy: default-src 'self'; img-src 'self' data:; style-src 'se
 
 GitHub Pages can't set headers, so there the page can be framed by another site.
 
-## Before publishing (TODO for the owner)
+## Addresses
 
-- `release.js`: the download URLs (`-BaseUrl`, once the GitHub Release exists). Until
-  they're set, the page shows a small "Links not set yet" notice and the links explain
-  themselves instead of going nowhere. `sourceUrl` is set (`https://github.com/frozenshieldweb/opensmarters`).
-- `content.js`: `meta.siteUrl`, the page's public address (Open Graph wants absolute image
-  URLs; until then they're relative and `og:url`/canonical are left out).
-- The "Licence", "Security" and "Build from source" links are derived from `sourceUrl`
-  (`/blob/main/LICENSE`, `/blob/main/docs/SECURITY.md`, `#build-from-source`); check them
-  once `main` is pushed.
+- `release.js`: `sourceUrl` is the repository; the "Licence", "Security" and "Build from
+  source" links are derived from it (`/blob/main/LICENSE`, `/blob/main/docs/SECURITY.md`,
+  `#build-from-source`). The download URLs are written by `update-release.ps1`.
+- `content.js`: `meta.siteUrl` is the page's public address (canonical, `og:url`, absolute
+  `og:image`).
 
 ## Checks used while building it (dev tooling, not needed by the page)
 

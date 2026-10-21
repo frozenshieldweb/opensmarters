@@ -17,6 +17,8 @@ This tracks the phases in [BUILD_PROMPT.md](BUILD_PROMPT.md#7-how-to-work).
 
 Workspace gates at the end of Phase 6: `cargo fmt`, clippy (`-D warnings`, with and without `--all-features`), **508 tests**, `cargo deny check` and `cargo audit` all pass.
 
+At 0.2.0 (Rust 1.99.1, pinned in `rust-toolchain.toml`): the same gates plus the installer's sandboxed dev-feature tests, **745 tests**, all passing locally and on GitHub Actions.
+
 ## Real-provider test (2026-10-20, the user's Xtream account)
 
 **Protocol** (`crates/core/examples/live_probe.rs`):
@@ -63,6 +65,7 @@ Workspace gates at the end of Phase 6: `cargo fmt`, clippy (`-D warnings`, with 
 - **Release:**
   - Builds are not Authenticode-signed. The signtool hook in `tools/package.ps1` has never run (no certificate).
   - **Installer:** not tested on a clean PC or VM (no VM here; Windows Sandbox needs Pro), on Windows 10, with a screen reader, with the "Change…" folder dialog, or when OpenGL fails. Every run was sandboxed, so "Open opensmarters" after a real install wasn't seen either. `uninstall.exe` is a full copy of the setup exe (~51 MB). There's no "close it for me" button when the app is running. "Delete my data" removes all of `%LOCALAPPDATA%\opensmarters`, including a recordings folder the user moved inside it. The zip's hash changes on every run (`Compress-Archive` stores timestamps); the setup payload is reproducible.
+  - **0.2.0 was released on 2026-10-21**, the first public release: <https://github.com/frozenshieldweb/opensmarters/releases/tag/v0.2.0> (setup exe, zip, `SHA256SUMS.txt`, a provenance attestation per file) and the landing page <https://frozenshieldweb.github.io/opensmarters/>.
   - **Releases** are built by `.github/workflows/release.yml` on a `v*` tag (Windows runner, `tools/package.ps1`), with a build-provenance attestation per file. The same workflow fills the landing page from the published files (`site/scripts/update-release.ps1`), commits that to `main`, and deploys `site/` to the `gh-pages` branch (`.github/workflows/pages.yml`, <https://frozenshieldweb.github.io/opensmarters/>). Release notes come from `CHANGELOG.md`.
   - Every GitHub Action is pinned to a commit SHA (tag in a comment). `rustsec/audit-check` was dropped: it runs on the retired Node 20, and `cargo deny check` already fails on the same RustSec advisories.
   - The libmpv DLL comes from the pinned shinchiro build (see `docs/LIBMPV.md`).

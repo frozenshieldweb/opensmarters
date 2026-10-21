@@ -81,6 +81,10 @@ impl Screen for SeriesScreen {
         self.inner.on_back(cx)
     }
 
+    fn on_input(&mut self, cx: &mut AppCtx<'_>, ctx: &egui::Context) {
+        self.inner.on_input(cx, ctx);
+    }
+
     fn ui(&mut self, cx: &mut AppCtx<'_>, ui: &mut egui::Ui) {
         self.inner.ui(cx, ui);
     }

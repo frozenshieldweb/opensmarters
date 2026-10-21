@@ -17,6 +17,10 @@
 //!
 //! Data comes from [`Session::guide_row`], which fetches only the rows on screen (Xtream)
 //! or reads the session's bounded XMLTV guide (M3U / EPG URL override).
+//!
+//! Category management (Settings › Categories) applies like in Live TV: the chips follow
+//! the viewer's order without the hidden categories, and "All" leaves out channels whose
+//! every category is hidden (Favourites are unchanged).
 
 mod layout;
 
@@ -89,6 +93,8 @@ struct ListKey {
     generation: u64,
     favourites: usize,
     parental: bool,
+    /// `Session::category_prefs_generation`.
+    categories: u64,
 }
 
 /// The PIN asked for before a locked category opens.
@@ -198,20 +204,31 @@ impl GuideScreen {
     }
 
     fn refresh_list(&mut self, session: &Session, cat: &LiveCatalog) {
+        let hidden = session.hidden_categories(ContentKind::Live, &cat.categories);
+        // A hidden category isn't browsed: back to All.
+        if let CategorySelection::Category(id) = &self.selection
+            && hidden.contains(id)
+        {
+            self.selection = CategorySelection::All;
+        }
         let favs = session.favourite_ids(ContentKind::Live);
         let key = ListKey {
             selection: self.selection.clone(),
             generation: self.catalog.generation(),
             favourites: favs.len(),
             parental: session.parental_enabled(),
+            categories: session.category_prefs_generation(),
         };
         if self.list_key.as_ref() == Some(&key) {
             return;
         }
+        // Hidden categories leave All; Favourites stay as they are.
+        let favourites = self.selection == CategorySelection::Favourites;
         let picked = cat
             .select(&self.selection, &favs)
             .into_iter()
-            .filter_map(|i| cat.channels.get(i));
+            .filter_map(|i| cat.channels.get(i))
+            .filter(|c| favourites || !hidden.hides(&c.categories));
         // Locked categories stay out of All/Favourites; a category opened with the PIN
         // shows all of its channels.
         let list = if self.selection.server_category().is_some() {
@@ -660,6 +677,8 @@ impl GuideScreen {
         let chips = Rect::from_min_max(rect.min, pos2(ctl.left(), rect.bottom()));
         let mut picked: Option<(CategorySelection, String)> = None;
         let selection = self.selection.clone();
+        let prefs = session.category_prefs(ContentKind::Live);
+        let shown = crate::services::categories::arrange(&cat.categories, &prefs);
         focus::scope(ui, Id::unique("guide.chips"), |ui| {
             ChipRow::new(Id::unique("guide.chips.row")).show(ui, chips, |ui| {
                 for (sel, name) in [
@@ -675,7 +694,7 @@ impl GuideScreen {
                         picked = Some((sel, name.into()));
                     }
                 }
-                for c in &cat.categories {
+                for c in &shown {
                     if cat.count(&c.id) == 0 {
                         continue;
                     }

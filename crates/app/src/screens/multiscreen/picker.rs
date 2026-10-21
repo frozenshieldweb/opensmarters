@@ -7,6 +7,10 @@
 //! unlocked category, when a channel is in a locked one too), so a tile's zap list never
 //! holds one; a locked category itself is opened in Live TV with the PIN (the picker says
 //! so), and a locked channel's number is refused.
+//!
+//! Category management (Settings › Categories): the categories follow the viewer's order
+//! without the hidden ones; "All" (and its count) leaves out channels whose every category
+//! is hidden; Favourites are unchanged.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,6 +26,7 @@ use crate::playback::ZapContext;
 use crate::playback::multi::LockedCategories;
 use crate::screens::AppCtx;
 use crate::services::catalog::{LiveCatalog, LiveChannel};
+use crate::services::categories::{self, HiddenCategories};
 use crate::services::{ImageSize, Session};
 use crate::ui::icons::{self, Style};
 use crate::ui::theme::{color, font, radius};
@@ -58,6 +63,8 @@ pub(super) struct Channels<'a> {
     pub all: &'a Arc<Vec<LiveChannel>>,
     /// The parental locks.
     pub locks: &'a LockedCategories,
+    /// The hidden categories (Settings › Categories).
+    pub hidden: &'a HiddenCategories,
 }
 
 /// The open picker.
@@ -65,7 +72,7 @@ pub(super) struct Channels<'a> {
 pub(super) struct Picker {
     slot: usize,
     selection: CategorySelection,
-    list_key: Option<(CategorySelection, u64, usize)>,
+    list_key: Option<(CategorySelection, u64, usize, u64)>,
     visible: Arc<Vec<LiveChannel>>,
     /// The tile's channel (focused first).
     current: Option<String>,
@@ -120,18 +127,33 @@ impl Picker {
         catalog: &LiveCatalog,
         generation: u64,
         locks: &LockedCategories,
+        hidden: &HiddenCategories,
     ) {
+        // A hidden category isn't browsed: back to All.
+        if let CategorySelection::Category(id) = &self.selection
+            && hidden.contains(id)
+        {
+            self.selection = CategorySelection::All;
+        }
         let favs = session.favourite_ids(ContentKind::Live);
-        let key = (self.selection.clone(), generation, favs.len());
+        let key = (
+            self.selection.clone(),
+            generation,
+            favs.len(),
+            session.category_prefs_generation(),
+        );
         if self.list_key.as_ref() == Some(&key) {
             return;
         }
+        let favourites = self.selection == CategorySelection::Favourites;
         let picked: Vec<LiveChannel> = catalog
             .select(&self.selection, &favs)
             .into_iter()
             .filter_map(|i| catalog.channels.get(i))
             // Never a channel of a locked category: this list becomes a tile's zap list.
             .filter(|c| !locks.hides(c))
+            // Hidden categories leave All (Favourites stay as they are).
+            .filter(|c| favourites || !hidden.hides(&c.categories))
             .cloned()
             .collect();
         let order = sorted_indices(&picked, SortOrder::NumberAsc);
@@ -152,6 +174,7 @@ impl Picker {
         catalog: &LiveCatalog,
         all: &Arc<Vec<LiveChannel>>,
         locks: &LockedCategories,
+        hidden: &HiddenCategories,
     ) -> Result<(LiveChannel, ZapContext), String> {
         if let Some(i) = self.visible.iter().position(|c| c.number == Some(number)) {
             return Ok((
@@ -163,7 +186,7 @@ impl Picker {
             ));
         }
         let Some(i) = all.iter().position(|c| c.number == Some(number)) else {
-            return Err(number_missing(number, catalog, locks));
+            return Err(number_missing(number, catalog, locks, hidden));
         };
         Ok((
             all[i].clone(),
@@ -189,9 +212,10 @@ impl Picker {
             generation,
             all,
             locks,
+            hidden,
         }) = catalog
         {
-            self.refresh(session, cat, generation, locks);
+            self.refresh(session, cat, generation, locks, hidden);
             if !self.placed_focus {
                 // First frame with data: the tile's channel, else the first one.
                 self.placed_focus = true;
@@ -210,7 +234,7 @@ impl Picker {
                 self.commit = self.number.take().and_then(|(b, _)| b.parse().ok());
             }
             if let Some(n) = self.commit.take() {
-                match self.by_number(n, cat, all, locks) {
+                match self.by_number(n, cat, all, locks, hidden) {
                     Ok(p) => picked = Some(p),
                     Err(msg) => cx.toasts.info(msg),
                 }
@@ -289,7 +313,7 @@ impl Picker {
                 );
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(cats));
                 focus::scope(&mut child, Id::unique("multi.pick.cats"), |ui| {
-                    self.categories(cx, ui, session, catalog.map(|c| c.catalog));
+                    self.categories(cx, ui, session, catalog.map(|c| (c.catalog, c.all.len())));
                 });
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(list));
                 if let Some(p) =
@@ -328,9 +352,9 @@ impl Picker {
         cx: &mut AppCtx<'_>,
         ui: &mut Ui,
         session: &Arc<Session>,
-        catalog: Option<&Arc<LiveCatalog>>,
+        catalog: Option<(&Arc<LiveCatalog>, usize)>,
     ) {
-        let Some(cat) = catalog else {
+        let Some((cat, all_count)) = catalog else {
             for i in 0..6 {
                 let (r, _) =
                     ui.allocate_exact_size(vec2(ui.available_width(), 48.0), Sense::hover());
@@ -347,6 +371,8 @@ impl Picker {
             return;
         };
         let favs = session.favourite_ids(ContentKind::Live).len();
+        let prefs = session.category_prefs(ContentKind::Live);
+        let shown = categories::arrange(&cat.categories, &prefs);
         let mut chosen: Option<(CategorySelection, String)> = None;
         egui::ScrollArea::vertical()
             .id_salt("multi.pick.cats.scroll")
@@ -368,7 +394,7 @@ impl Picker {
                     ui,
                     Id::unique("multi.pick.cat.all"),
                     "All",
-                    cat.channels.len(),
+                    all_count,
                     self.selection == CategorySelection::All,
                     false,
                 ) {
@@ -391,7 +417,7 @@ impl Picker {
                     r.center().y,
                     Stroke::new(1.0, color::STROKE_SUBTLE),
                 );
-                for c in &cat.categories {
+                for c in &shown {
                     let sel = CategorySelection::Category(c.id.clone());
                     let locked = session.is_category_locked(ContentKind::Live, &c.id, &c.name);
                     if row(
@@ -578,18 +604,21 @@ impl Picker {
     }
 }
 
-/// Why number entry found nothing: no such channel, or it is in a locked category.
+/// Why number entry found nothing: no such channel, it is in a locked category, or in
+/// hidden ones only.
 pub(super) fn number_missing(
     number: u64,
     catalog: &LiveCatalog,
     locks: &LockedCategories,
+    hidden: &HiddenCategories,
 ) -> String {
-    if catalog
-        .channels
-        .iter()
-        .any(|c| c.number == Some(number) && locks.hides(c))
-    {
+    let with_number = || catalog.channels.iter().filter(|c| c.number == Some(number));
+    if with_number().any(|c| locks.hides(c)) {
         format!("Channel {number} is in a locked category. Open it in Live TV with your PIN first.")
+    } else if with_number().any(|c| hidden.hides(&c.categories)) {
+        format!(
+            "Channel {number} is in a hidden category. Show it again in Settings \u{203a} Categories."
+        )
     } else {
         format!("There's no channel {number}.")
     }

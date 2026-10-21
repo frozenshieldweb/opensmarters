@@ -16,6 +16,7 @@
 //! | [`grid`] | [`VirtualGrid`] (row-virtualised card grid) |
 //! | [`dialog`] | [`Dialog`] (modal with focus trap) |
 //! | [`toast`] | [`Toasts`] |
+//! | [`undo`] | [`UndoToast`] (a toast-styled card with an Undo button the screen draws) |
 //! | [`feedback`] | skeletons, spinner, progress bar, [`EmptyState`], coming-soon placeholder |
 //! | [`pin_pad`] | [`PinPad`] (fixed length to check a PIN, variable to choose one) |
 //! | [`pin_prompt`] | [`PinPrompt`] (load status → pad → off-thread verify; dialog or inline) |
@@ -44,6 +45,7 @@ pub mod pin_pad;
 pub mod pin_prompt;
 pub mod rail;
 pub mod toast;
+pub mod undo;
 pub mod up_next;
 pub mod zap_banner;
 
@@ -61,6 +63,7 @@ pub use pin_pad::{PinPad, PinPadEvent};
 pub use pin_prompt::{PinPrompt, PinPromptResult};
 pub use rail::Rail;
 pub use toast::{ToastKind, Toasts};
+pub use undo::UndoToast;
 
 pub use dropdown::Dropdown;
 pub use episode_row::{EpisodeRow, EpisodeRowResponse};

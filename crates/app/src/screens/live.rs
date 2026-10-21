@@ -12,7 +12,14 @@
 //! Keys (see [`crate::playback::keys`]): PageUp/PageDown page the list; **Ctrl+↑ / media
 //! "next" = channel +1**, **Ctrl+↓ / media "previous" = channel −1** in the preview
 //! (stopping at the ends of the list); digits = channel number (the current list, else
-//! All); M mute, F fullscreen, I channel banner.
+//! All); M mute, F fullscreen, I channel banner; **H** on a category (column row or chip)
+//! hides it at once (Undo for 8 s, or Ctrl+Z).
+//!
+//! Category management (Settings › Categories): the categories are listed in the viewer's
+//! order without the hidden ones; "All" (and its count) leaves out channels whose every
+//! category is hidden; Favourites are unchanged. "Edit categories" at the end of the
+//! categories opens the editor on Live TV; while a region filter is set, a quiet "Showing
+//! FR, CA · Edit" line says so.
 //!
 //! The visible list (filter by category and parental locks, sort) is computed off the UI
 //! thread: a real provider has ~10 000 channels (50 000 with the `huge` demo quirk).
@@ -27,9 +34,10 @@ use eframe::egui::{
 };
 use opensmarters_core::catalog::{CatalogItem, CategorySelection, SearchQuery, SortOrder};
 use opensmarters_core::chrono::Local;
-use opensmarters_core::{CategoryId, chrono};
+use opensmarters_core::{Category, CategoryId, chrono};
 use opensmarters_store::{ContentKind, ItemSnapshot, PinOutcome};
 
+use super::common::categories as cat_ui;
 use super::common::channel_list;
 use super::player::{NumberMatch, paint_number_box};
 use super::{AppCtx, Screen, shell};
@@ -39,6 +47,7 @@ use crate::nav::{PlayerRoute, Route, Section};
 use crate::playback::keys::{self, Surface};
 use crate::playback::{PlaybackItem, PlaybackStatus, ZapContext, ZapOutcome};
 use crate::services::catalog::{LiveCatalog, LiveChannel, Programme, split_tag};
+use crate::services::categories;
 use crate::services::epg::EpgState;
 use crate::services::{ImageSize, Session};
 use crate::task::Loader;
@@ -68,6 +77,16 @@ fn row_id(key: &str) -> Id {
 
 fn video_id() -> Id {
     Id::unique("live.video")
+}
+
+/// A category row of the column (wide layout).
+fn cat_row_id(id: &CategoryId) -> Id {
+    Id::unique(("live.cat", id.as_str()))
+}
+
+/// A category chip (medium/TV).
+fn cat_chip_id(id: &CategoryId) -> Id {
+    Id::unique(("live.chip", id.as_str()))
 }
 
 /// The preview's primary button ("Fullscreen", or "Watch …" before anything plays).
@@ -135,10 +154,12 @@ impl<'a> LockFilter<'a> {
 /// channel number that isn't in the current list).
 pub(crate) fn all_by_number(session: &Session, cat: &LiveCatalog) -> Vec<LiveChannel> {
     let mut locks = LockFilter::new(session, cat);
+    // "All" leaves out the channels of hidden categories (Settings › Categories).
+    let hidden = session.hidden_categories(ContentKind::Live, &cat.categories);
     let picked: Vec<LiveChannel> = cat
         .channels
         .iter()
-        .filter(|c| !locks.is_locked(c))
+        .filter(|c| !locks.is_locked(c) && !hidden.hides(&c.categories))
         .cloned()
         .collect();
     channel_list::sorted(picked, SortOrder::NumberAsc)
@@ -161,16 +182,24 @@ fn compute_list(
 ) -> ListResult {
     let mut locks = LockFilter::new(session, cat);
     let in_server_category = key.selection.server_category().is_some();
+    // Hidden categories (Settings › Categories) leave All; Favourites stay as they are.
+    let hidden = session.hidden_categories(ContentKind::Live, &cat.categories);
+    let favourites = key.selection == CategorySelection::Favourites;
     let picked: Vec<LiveChannel> = cat
         .select(&key.selection, favs)
         .into_iter()
         .filter_map(|i| cat.channels.get(i))
         // Channels of locked categories stay out of All/Favourites.
         .filter(|c| in_server_category || !locks.is_locked(c))
+        .filter(|c| favourites || !hidden.hides(&c.categories))
         .cloned()
         .collect();
     let picked = channel_list::sorted(picked, key.sort);
-    let all_count = cat.channels.iter().filter(|c| !locks.is_locked(c)).count();
+    let all_count = cat
+        .channels
+        .iter()
+        .filter(|c| !locks.is_locked(c) && !hidden.hides(&c.categories))
+        .count();
     ListResult {
         key,
         channels: Arc::new(picked),
@@ -210,6 +239,8 @@ struct ListKey {
     sort: SortOrder,
     generation: u64,
     favourites: usize,
+    /// `Session::category_prefs_generation` (hidden categories, region filter).
+    categories: u64,
 }
 
 /// The Live TV screen.
@@ -235,6 +266,8 @@ pub struct LiveScreen {
     pending_number: Option<u64>,
     pin: Option<PinPrompt>,
     focus_playing_on_load: bool,
+    /// A category just hidden with H (Undo).
+    hidden: Option<cat_ui::Hidden>,
 }
 
 impl LiveScreen {
@@ -262,6 +295,7 @@ impl LiveScreen {
             pending_number: None,
             pin: None,
             focus_playing_on_load: true,
+            hidden: None,
         }
     }
 
@@ -297,6 +331,7 @@ impl LiveScreen {
             sort: self.sort,
             generation: self.catalog.generation(),
             favourites: favs.len(),
+            categories: session.category_prefs_generation(),
         };
         if self.list_key.as_ref() == Some(&key) || self.requested.as_ref() == Some(&key) {
             return;
@@ -348,7 +383,11 @@ impl LiveScreen {
         match cat.channels.iter().position(|c| c.number == Some(n)) {
             Some(i) => {
                 let ch = &cat.channels[i];
-                if session.is_some_and(|s| LockFilter::new(s, cat).is_locked(ch)) {
+                if session.is_some_and(|s| {
+                    LockFilter::new(s, cat).is_locked(ch)
+                        || s.hidden_categories(ContentKind::Live, &cat.categories)
+                            .hides(&ch.categories)
+                }) {
                     NumberMatch::Missing
                 } else {
                     NumberMatch::All(i, ch.clone())
@@ -389,6 +428,75 @@ impl LiveScreen {
             self.selection = sel;
             self.scroll_to = Some(0);
         }
+    }
+
+    /// H on a category row or chip: hides it at once, moves the focus to its neighbour
+    /// and offers Undo. Returns true when it did (the key is consumed only then).
+    fn hide_focused(&mut self, cx: &mut AppCtx<'_>, ctx: &egui::Context) -> bool {
+        let (Some(session), Some(cat)) = (cx.session(), self.catalog.value().cloned()) else {
+            return false;
+        };
+        let Some(cur) = focus::current(ctx) else {
+            return false;
+        };
+        let prefs = session.category_prefs(ContentKind::Live);
+        let shown = categories::arrange(&cat.categories, &prefs);
+        let q = SearchQuery::new(&self.category_filter);
+        // The column lists what the filter matches; the chips list everything.
+        let (list, id_of): (Vec<&Category>, fn(&CategoryId) -> Id) =
+            if shown.iter().any(|c| cat_row_id(&c.id) == cur) {
+                (
+                    shown.into_iter().filter(|c| q.matches(&c.name)).collect(),
+                    cat_row_id,
+                )
+            } else if shown.iter().any(|c| cat_chip_id(&c.id) == cur) {
+                (shown, cat_chip_id)
+            } else {
+                return false;
+            };
+        let Some(i) = list.iter().position(|c| id_of(&c.id) == cur) else {
+            return false;
+        };
+        if !cat_ui::take_hide_key(ctx, true) {
+            return false;
+        }
+        let Some(c) = list.get(i).copied() else {
+            return false;
+        };
+        let neighbour = list
+            .get(i + 1)
+            .or_else(|| i.checked_sub(1).and_then(|p| list.get(p)))
+            .map(|n| id_of(&n.id));
+        let fallback = if id_of(&c.id) == cat_chip_id(&c.id) {
+            Id::unique("live.chip.all")
+        } else {
+            Id::unique("live.cat.all")
+        };
+        self.hidden = Some(cat_ui::hide(&session, ContentKind::Live, c));
+        if self.selection == CategorySelection::Category(c.id.clone()) {
+            self.selection = CategorySelection::All;
+            self.scroll_to = Some(0);
+        }
+        focus::request(ctx, neighbour.unwrap_or(fallback));
+        self.invalidate_list();
+        true
+    }
+
+    /// Undo of H: shows the category again and gives it the focus.
+    fn undo_hide(&mut self, cx: &mut AppCtx<'_>, wide: bool) {
+        let (Some(session), Some(h)) = (cx.session(), self.hidden.take()) else {
+            return;
+        };
+        cat_ui::unhide(&session, &h);
+        focus::request(
+            &cx.egui,
+            if wide {
+                cat_row_id(&h.id)
+            } else {
+                cat_chip_id(&h.id)
+            },
+        );
+        self.invalidate_list();
     }
 
     fn play_preview(&mut self, cx: &mut AppCtx<'_>, index: usize) {
@@ -514,6 +622,15 @@ impl Screen for LiveScreen {
 
     fn on_input(&mut self, cx: &mut AppCtx<'_>, ctx: &egui::Context) {
         if self.pin.is_some() || focus::text_input_focused(ctx) {
+            return;
+        }
+        // H hides the focused category; Ctrl+Z takes it back while Undo shows.
+        if cat_ui::take_undo_key(ctx, self.hidden.is_some()) {
+            let wide = cx.layout.breakpoint == Breakpoint::Wide;
+            self.undo_hide(cx, wide);
+            return;
+        }
+        if self.hide_focused(cx, ctx) {
             return;
         }
         // Digits: channel-number entry.
@@ -659,8 +776,23 @@ impl Screen for LiveScreen {
                 let sel = std::mem::take(&mut self.selection);
                 self.select(cx, sel, &name);
             }
+            // A hidden category (Settings › Categories, H, or the route) isn't browsed:
+            // back to All, like a category the viewer can't open.
+            if let CategorySelection::Category(id) = &self.selection
+                && session
+                    .hidden_categories(ContentKind::Live, &cat.categories)
+                    .contains(id)
+            {
+                self.selection = CategorySelection::All;
+                self.scroll_to = Some(0);
+            }
             self.refresh_list(cx, &session, cat);
         }
+        if self.hidden.as_ref().is_some_and(cat_ui::Hidden::expired) {
+            self.hidden = None;
+        }
+        let prefs = session.category_prefs(ContentKind::Live);
+        let regions = cat_ui::has_region_filter(&prefs);
 
         // Categories column (wide) or chips (medium/TV).
         if wide {
@@ -678,8 +810,24 @@ impl Screen for LiveScreen {
                 font::heading(),
                 color::TEXT,
             );
+            // While a region filter is set: "Showing FR, CA · Edit" under the heading.
+            let note_h = if regions { 26.0 } else { 0.0 };
+            if regions {
+                let open = focus::scope(ui, Id::unique("live.region-note"), |ui| {
+                    cat_ui::region_note(
+                        ui,
+                        Id::unique("live.region-note.line"),
+                        &prefs,
+                        pos2(cats_rect.left() + 24.0, content.top() + 100.0),
+                        cats_w - 48.0,
+                    )
+                });
+                if open {
+                    cat_ui::open_editor(cx, ContentKind::Live);
+                }
+            }
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(
-                pos2(cats_rect.left() + 24.0, content.top() + 106.0),
+                pos2(cats_rect.left() + 24.0, content.top() + 106.0 + note_h),
                 pos2(cats_rect.right() - 24.0, cats_rect.bottom() - 96.0),
             )));
             focus::scope(&mut child, Id::unique("live.cats"), |ui| {
@@ -732,13 +880,28 @@ impl Screen for LiveScreen {
         );
         if catalog.is_some() {
             let n = self.visible.len();
-            painter.text(
+            let cr = painter.text(
                 pos2(tr.right() + 12.0, head_y + 4.0),
                 Align2::LEFT_CENTER,
                 format!("{n} channel{}", if n == 1 { "" } else { "s" }),
                 font::caption(),
                 color::TEXT_3,
             );
+            // Medium/TV (no column): the region note follows the count.
+            if regions && !wide {
+                let open = focus::scope(ui, Id::unique("live.region-note"), |ui| {
+                    cat_ui::region_note(
+                        ui,
+                        Id::unique("live.region-note.line"),
+                        &prefs,
+                        pos2(cr.right() + 16.0, head_y + 4.0),
+                        (list_rect.right() - cr.right() - 24.0).max(80.0),
+                    )
+                });
+                if open {
+                    cat_ui::open_editor(cx, ContentKind::Live);
+                }
+            }
         }
 
         let mut list_area = list_rect;
@@ -852,34 +1015,51 @@ impl Screen for LiveScreen {
                 self.channel_list(cx, &mut child, &session);
             }
         }
-        // Footer hint.
+        // Footer hint (the undo toast takes its place while it shows).
         let fy = list_area.bottom() - 24.0;
         painter.hline(
             list_area.x_range(),
             fy - 22.0,
             Stroke::new(1.0, color::STROKE_SUBTLE),
         );
-        icons::paint(
-            &painter,
-            pos2(list_area.left() + 9.0, fy),
-            icons::INFO,
-            16.0,
-            Style::Regular,
-            color::TEXT_3,
-        );
-        painter.text(
-            pos2(list_area.left() + 28.0, fy),
-            Align2::LEFT_CENTER,
-            "Enter to watch \u{b7} Ctrl+\u{2191}/\u{2193} change channel \u{b7} Type a number to jump",
-            font::caption(),
-            color::TEXT_3,
-        );
+        let on_categories = focus::is_in_scope(&cx.egui, Id::unique("live.cats"))
+            || focus::is_in_scope(&cx.egui, Id::unique("live.chips"));
+        if self.hidden.is_none() {
+            icons::paint(
+                &painter,
+                pos2(list_area.left() + 9.0, fy),
+                icons::INFO,
+                16.0,
+                Style::Regular,
+                color::TEXT_3,
+            );
+            text::line(
+                &painter,
+                pos2(list_area.left() + 28.0, fy),
+                Align2::LEFT_CENTER,
+                if on_categories {
+                    "Enter to open \u{b7} H to hide this category \u{b7} Edit categories at the end"
+                } else {
+                    "Enter to watch \u{b7} Ctrl+\u{2191}/\u{2193} change channel \u{b7} Type a number to jump"
+                },
+                font::caption(),
+                color::TEXT_3,
+                list_area.width() - 28.0,
+            );
+        }
 
         // Preview column.
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(preview_rect));
         focus::scope(&mut child, Id::unique("live.preview"), |ui| {
             self.preview_column(cx, ui, &session, preview_rect)
         });
+
+        // Undo after H, over the list's footer.
+        if let Some(h) = self.hidden.clone()
+            && cat_ui::undo_toast(ui, &h, list_area)
+        {
+            self.undo_hide(cx, wide);
+        }
 
         self.overlays(cx, ui);
     }
@@ -916,7 +1096,10 @@ impl LiveScreen {
         };
         let q = SearchQuery::new(&self.category_filter);
         let favs = session.favourite_ids(ContentKind::Live).len();
+        let prefs = session.category_prefs(ContentKind::Live);
+        let shown = categories::arrange(&cat.categories, &prefs);
         let mut picked: Option<(CategorySelection, String)> = None;
+        let mut edit = false;
         egui::ScrollArea::vertical()
             .id_salt("live.cats.scroll")
             .auto_shrink([false, false])
@@ -948,14 +1131,14 @@ impl LiveScreen {
                         Stroke::new(1.0, color::STROKE_SUBTLE),
                     );
                 }
-                for c in &cat.categories {
+                for c in &shown {
                     if !q.is_empty() && !q.matches(&c.name) {
                         continue;
                     }
                     let count = cat.count(&c.id);
                     let sel = CategorySelection::Category(c.id.clone());
                     let locked = session.is_category_locked(ContentKind::Live, &c.id, &c.name);
-                    let f = MenuRow::new(Id::unique(("live.cat", c.id.as_str())), &c.name)
+                    let f = MenuRow::new(cat_row_id(&c.id), &c.name)
                         .count(Some(count))
                         .locked(locked)
                         .selected(self.selection == sel)
@@ -964,9 +1147,21 @@ impl LiveScreen {
                         picked = Some((sel, c.name.clone()));
                     }
                 }
+                // The editor, at the end of the list.
+                ui.add_space(12.0);
+                edit = Button::ghost("Edit categories")
+                    .icon(icons::SLIDERS_HORIZONTAL)
+                    .small()
+                    .id(Id::unique("live.cat.edit"))
+                    .show(ui)
+                    .activated;
+                ui.add_space(8.0);
             });
         if let Some((sel, name)) = picked {
             self.select(cx, sel, &name);
+        }
+        if edit {
+            cat_ui::open_editor(cx, ContentKind::Live);
         }
     }
 
@@ -979,6 +1174,9 @@ impl LiveScreen {
     ) {
         let Some(cat) = catalog else { return };
         let mut picked: Option<(CategorySelection, String)> = None;
+        let mut edit = false;
+        let prefs = session.category_prefs(ContentKind::Live);
+        let shown = categories::arrange(&cat.categories, &prefs);
         let row = ui.max_rect();
         // Edge fade where more chips hide; the focused chip scrolls into view.
         ChipRow::new(Id::unique("live.chips.row")).show(ui, row, |ui| {
@@ -998,7 +1196,7 @@ impl LiveScreen {
             {
                 picked = Some((CategorySelection::Favourites, "Favourites".into()));
             }
-            for c in &cat.categories {
+            for c in &shown {
                 let sel = CategorySelection::Category(c.id.clone());
                 let label = if session.is_category_locked(ContentKind::Live, &c.id, &c.name) {
                     format!("{} {}", icons::LOCK_SIMPLE, c.name)
@@ -1007,16 +1205,23 @@ impl LiveScreen {
                 };
                 if Chip::new(label)
                     .selected(self.selection == sel)
-                    .id(Id::unique(("live.chip", c.id.as_str())))
+                    .id(cat_chip_id(&c.id))
                     .show(ui)
                     .activated
                 {
                     picked = Some((sel, c.name.clone()));
                 }
             }
+            edit = Chip::new(format!("{} Edit categories", icons::SLIDERS_HORIZONTAL))
+                .id(Id::unique("live.chip.edit"))
+                .show(ui)
+                .activated;
         });
         if let Some((sel, name)) = picked {
             self.select(cx, sel, &name);
+        }
+        if edit {
+            cat_ui::open_editor(cx, ContentKind::Live);
         }
     }
 

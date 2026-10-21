@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The shell: the side rail (§6.1) and the status cluster (clock, offline and
-//! unencrypted-connection indicators) shared by screens.
+//! The shell: the side rail (§6.1) and the status cluster (clock, "Update available",
+//! offline and unencrypted-connection indicators) shared by screens.
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, Id, Rect, Sense, Stroke, Ui, pos2, vec2};
 
@@ -604,8 +604,9 @@ pub fn account_notice(ctx: &egui::Context) -> Option<String> {
 pub const UNENCRYPTED_TOOLTIP: &str = "Unencrypted connection: your password is visible on the network. \
      See Settings › Account.";
 
-/// Paints the status cluster at the top-right of the content area: offline, account and
-/// unencrypted indicators and the clock. Returns the rect used.
+/// Paints the status cluster at the top-right of the content area: the clock, "Update
+/// available" (focusable, [`update_indicator_id`]), offline, account and unencrypted
+/// indicators. Returns the rect used.
 ///
 /// The unencrypted state is a quiet `text-3` lock with a tooltip here (it was noisy on
 /// every screen); the full warning callout stays on Settings › Account and onboarding.
@@ -624,6 +625,10 @@ pub fn status_cluster(cx: &AppCtx<'_>, ui: &Ui) -> Rect {
     );
     let mut x = clock_rect.left() - 20.0;
     let mut rect = clock_rect;
+    if let Some(r) = update_indicator(cx, ui, x, y) {
+        x = r.left() - 16.0;
+        rect = rect.union(r);
+    }
     if let Some(s) = cx.session() {
         if s.is_offline() {
             let r = indicator(&painter, x, y, icons::WIFI_SLASH, "Offline", color::WARNING);
@@ -667,6 +672,65 @@ pub fn status_cluster(cx: &AppCtx<'_>, ui: &Ui) -> Rect {
         }
     }
     rect
+}
+
+/// The focus id of the header's "Update available" pill.
+pub fn update_indicator_id() -> Id {
+    Id::unique("shell.status.update")
+}
+
+/// "Update available": a quiet accent pill next to the clock while a newer version that
+/// wasn't dismissed is known (`services::updates`). Focusable (Up from the page reaches
+/// it); Enter or a click opens Settings › About (on the next frame, from
+/// `updates::on_frame`). Never over fullscreen playback (multiscreen draws this cluster
+/// without the side rail). Returns its rect.
+fn update_indicator(cx: &AppCtx<'_>, ui: &Ui, right: f32, y: f32) -> Option<Rect> {
+    if cx.layout.content.left() <= cx.layout.screen.left() + 0.5 {
+        return None;
+    }
+    let version = cx.services.updates.indicator()?;
+    let painter = ui.painter();
+    let label = "Update available";
+    let label_w = text::width(painter, label, font::caption_strong());
+    let size = vec2(12.0 + 16.0 + 6.0 + label_w + 14.0, 28.0);
+    let r = Rect::from_min_size(pos2(right - size.x, y - size.y / 2.0), size);
+    let resp = ui.interact(r, update_indicator_id(), Sense::CLICK);
+    let f = focus::register(
+        ui,
+        &resp,
+        FocusOpts::default().in_scope(Id::unique("shell.status")),
+    );
+    paint::focus_glow(painter, r, radius::FULL, f.anim);
+    painter.rect_filled(r, CornerRadius::same(radius::FULL), color::ACCENT_SOFT);
+    icons::paint(
+        painter,
+        pos2(r.left() + 12.0 + 8.0, y),
+        icons::ARROW_CIRCLE_UP,
+        16.0,
+        Style::Regular,
+        color::ACCENT,
+    );
+    painter.text(
+        pos2(r.left() + 12.0 + 16.0 + 6.0, y),
+        Align2::LEFT_CENTER,
+        label,
+        font::caption_strong(),
+        if f.focused {
+            color::TEXT
+        } else {
+            color::ACCENT
+        },
+    );
+    if f.focused {
+        paint::focus_ring(painter, r, radius::FULL, 1.0);
+    }
+    resp.on_hover_text(format!(
+        "opensmarters {version} is available. Open Settings › About to get it."
+    ));
+    if f.activated {
+        cx.services.updates.request_open_about();
+    }
+    Some(r)
 }
 
 fn indicator(

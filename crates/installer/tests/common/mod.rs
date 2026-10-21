@@ -23,7 +23,9 @@ pub struct Sandbox {
 
 impl Sandbox {
     pub fn new() -> Self {
-        let tmp = tempfile::tempdir().unwrap();
+        // Under target/tmp rather than %TEMP%: CI runners set TEMP with an 8.3 short name
+        // (C:\Users\RUNNER~1\...), which the install-folder check rightly refuses.
+        let tmp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
         let env = Environment::sandbox(tmp.path()).unwrap();
         assert!(
             env.registry.is_test(),

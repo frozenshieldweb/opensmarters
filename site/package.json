@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "description": "The opensmarters landing page: static files, no dependencies. See README.md.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node scripts/build.mjs --check"
+  }
+}

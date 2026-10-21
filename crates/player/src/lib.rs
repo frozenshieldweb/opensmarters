@@ -44,6 +44,9 @@
 //!   blits it into egui's framebuffer, with egui overlays drawn on top.
 //! * [`RenderContext`]: the low-level render API (`!Send`, unsafe to
 //!   create) for integrations other than egui.
+//! * [`set_awake`] ([`Awake`]): keeps the display on while video plays and the PC awake
+//!   while a recording runs (Windows `SetThreadExecutionState`; the app draws the video,
+//!   so mpv's own screensaver blocking doesn't apply).
 //!
 //! ## Usage with eframe (glow renderer)
 //!
@@ -119,6 +122,7 @@ mod ffi;
 mod node;
 mod playable;
 mod player;
+mod power;
 mod render;
 #[cfg(feature = "egui")]
 mod video;
@@ -137,6 +141,7 @@ pub use player::{
     Aspect, CacheState, EndReason, LoadOptions, LogLine, MAX_SEEK_RANGES, Op, Player, PlayerEvent,
     PlayerState, Property, SeekRange, Track, TrackKind, TrackSelection, VideoFit,
 };
+pub use power::{Awake, set_awake};
 pub use render::{GetProcAddress, RenderContext};
 #[cfg(feature = "egui")]
 pub use video::{VideoStats, VideoView};

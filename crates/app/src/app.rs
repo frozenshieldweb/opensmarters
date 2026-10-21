@@ -82,6 +82,8 @@ pub struct OpensmartersApp {
     sleep: crate::playback::sleep::SleepTimer,
     alerts: crate::services::alerts::Alerts,
     multi: crate::playback::multi::MultiView,
+    /// The display stays on while video plays, the PC awake while recordings run.
+    keep_awake: crate::platform::KeepAwake,
     #[cfg(feature = "demo")]
     demo: Option<crate::services::demo::Demo>,
 }
@@ -256,6 +258,7 @@ impl OpensmartersApp {
             sleep: crate::playback::sleep::SleepTimer::default(),
             alerts: crate::services::alerts::Alerts::default(),
             multi: crate::playback::multi::MultiView::new(cc.get_proc_address.clone(), mpv_log),
+            keep_awake: crate::platform::KeepAwake::default(),
             #[cfg(feature = "demo")]
             demo: config.demo,
         };
@@ -577,6 +580,16 @@ impl eframe::App for OpensmartersApp {
             crate::services::alerts::on_frame(&mut cx);
             crate::services::updates::on_frame(&mut cx);
         }
+        // The app draws the video itself, so mpv's screensaver blocking doesn't apply:
+        // keep the display on while video plays, and the PC awake for recordings.
+        let visible = !ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        let video = self.playback.status().is_running() || self.multi.is_active();
+        let jobs = crate::dvr::needs_pc_awake(
+            self.dvr.rows().iter().map(|r| (r.state, r.start_at)),
+            opensmarters_store::Timestamp::now(),
+        );
+        self.keep_awake
+            .apply(crate::platform::awake_need(video, visible, jobs));
 
         // 1. Screen-owned keys, then the focus engine, then back.
         if let Some(entry) = self.router.top_mut() {

@@ -54,11 +54,33 @@ pub fn balanced(ui: &Ui, text: &str, font: &FontId, max: f32) -> String {
     if text.contains('\n') {
         return text.to_owned();
     }
-    let rows = ui
+    let galley = ui
         .painter()
-        .layout(text.to_owned(), font.clone(), Color32::WHITE, max)
-        .rows
-        .len();
+        .layout(text.to_owned(), font.clone(), Color32::WHITE, max);
+    let rows = galley.rows.len();
+    if rows > 2 {
+        // Longer paragraphs: never leave a single word on the last line; break before
+        // the last two words instead (the lines above re-wrap naturally).
+        let last_is_one_word = galley.rows.last().is_some_and(|r| {
+            let line: String = r.glyphs.iter().map(|g| g.chr).collect();
+            !line.trim().contains(' ')
+        });
+        if last_is_one_word
+            && let Some(i) = text.trim_end().rfind(' ')
+            && let Some(j) = text[..i].rfind(' ')
+        {
+            let candidate = format!("{}\n{}", &text[..j], &text[j + 1..]);
+            let after = ui
+                .painter()
+                .layout(candidate.clone(), font.clone(), Color32::WHITE, max)
+                .rows
+                .len();
+            if after <= rows {
+                return candidate;
+            }
+        }
+        return text.to_owned();
+    }
     if rows != 2 {
         return text.to_owned();
     }

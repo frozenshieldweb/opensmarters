@@ -38,7 +38,6 @@ pub const EXIT_APP_RUNNING: i32 = 3;
 #[command(
     name = "opensmarters-setup",
     version,
-    about,
     after_help = EXIT_CODES
 )]
 pub struct Cli {

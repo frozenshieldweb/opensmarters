@@ -13,6 +13,8 @@
 //!    Windows 10/11, long paths, common controls v6).
 //! 3. **DLL planting**: `/DEPENDENTLOADFLAG:0x800` so the loader resolves the exe's static
 //!    imports from System32 only, never from the folder the setup runs in (Downloads).
+//! 4. **No VC++ Redistributable needed**: the VC runtime is linked statically into the
+//!    setup binary (the Universal CRT is part of Windows 10/11).
 
 #[cfg(windows)]
 #[path = "src/pack.rs"]
@@ -58,8 +60,27 @@ mod windows {
         );
         resources(&out, &manifest_dir, &version);
         if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            let arg = |a: &str| println!("cargo:rustc-link-arg-bin=opensmarters-setup={a}");
             // LOAD_LIBRARY_SEARCH_SYSTEM32 for the static imports (Windows 10 1607+).
-            println!("cargo:rustc-link-arg-bin=opensmarters-setup=/DEPENDENTLOADFLAG:0x800");
+            arg("/DEPENDENTLOADFLAG:0x800");
+            // The VC++ runtime (vcruntime140.dll) is not part of Windows: link it statically
+            // so setup starts on a clean PC without the Visual C++ Redistributable. The
+            // Universal CRT stays dynamic: it is a Windows 10/11 system component.
+            for lib in [
+                "libvcruntimed.lib",
+                "vcruntime.lib",
+                "vcruntimed.lib",
+                "libcmtd.lib",
+                "msvcrt.lib",
+                "msvcrtd.lib",
+                "libucrt.lib",
+                "libucrtd.lib",
+            ] {
+                arg(&format!("/NODEFAULTLIB:{lib}"));
+            }
+            for lib in ["libcmt.lib", "libvcruntime.lib", "ucrt.lib"] {
+                arg(&format!("/DEFAULTLIB:{lib}"));
+            }
         }
     }
 

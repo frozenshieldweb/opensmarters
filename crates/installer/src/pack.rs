@@ -195,3 +195,60 @@ pub fn pack(root: &Path, product: &str, version: &str, preset: u32) -> io::Resul
     }
     Ok(Packed { archive, manifest })
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn tree(root: &Path) {
+        fs::create_dir_all(root.join("licenses")).unwrap();
+        fs::write(root.join("b.exe"), vec![7_u8; 70_000]).unwrap();
+        fs::write(root.join("A.txt"), b"hello").unwrap();
+        fs::write(root.join("licenses").join("x.txt"), b"licence").unwrap();
+    }
+
+    #[test]
+    fn identical_inputs_give_an_identical_archive() {
+        let one = tempfile::tempdir().unwrap();
+        let two = tempfile::tempdir().unwrap();
+        tree(one.path());
+        // Same files, created in another order and at another time.
+        fs::create_dir_all(two.path().join("licenses")).unwrap();
+        fs::write(two.path().join("licenses").join("x.txt"), b"licence").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(two.path().join("A.txt"), b"hello").unwrap();
+        fs::write(two.path().join("b.exe"), vec![7_u8; 70_000]).unwrap();
+        let a = pack(one.path(), "opensmarters", "1.2.3", 6).unwrap();
+        let b = pack(two.path(), "opensmarters", "1.2.3", 6).unwrap();
+        assert_eq!(a.archive, b.archive);
+        assert_eq!(a.manifest, b.manifest);
+        // Sorted by the path's bytes: upper case first.
+        let files: Vec<&str> = a
+            .manifest
+            .lines()
+            .filter_map(|l| l.strip_prefix("file "))
+            .map(|l| l.splitn(3, ' ').nth(2).unwrap())
+            .collect();
+        assert_eq!(files, ["A.txt", "b.exe", "licenses/x.txt"]);
+    }
+
+    #[test]
+    fn refuses_links_and_empty_folders() {
+        let empty = tempfile::tempdir().unwrap();
+        assert!(pack(empty.path(), "opensmarters", "1", 1).is_err());
+        let t = tempfile::tempdir().unwrap();
+        tree(t.path());
+        let target = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(t.path().join("link"))
+            .arg(target.path())
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(pack(t.path(), "opensmarters", "1", 1).is_err());
+        fs::remove_dir(t.path().join("link")).unwrap();
+    }
+}

@@ -16,3 +16,7 @@ updates:
     groups:
       crates:
         patterns: ['*']
+    ignore:
+      # glow must stay on the version egui_glow uses (crates/player/Cargo.toml): it moves
+      # with egui, by hand.
+      - dependency-name: glow

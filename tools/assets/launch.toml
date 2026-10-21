@@ -152,8 +152,9 @@ unicodes = "latin"
 licence = "assets/fonts/OFL-SourceSans3.txt"
 exports = [{ path = "web/fonts/afterglow-sans-latin.woff2", max_kb = 70 }]
 
-# --- Landing page (site/): Phosphor icon subsets -----------------------------------------
-# BEGIN site icons (added for docs/LAUNCH_PROMPT.md Part A; owner: the landing page)
+# --- Landing page (site/): icon subsets, small "ready" art -------------------------------
+# BEGIN site assets (added for docs/LAUNCH_PROMPT.md Part A; owner: the landing page)
+# Also a small export of the "ready" illustration for the download toast.
 # Phosphor (MIT, the app's icon set, DESIGN.md §4.8): only the glyphs the page uses, as two
 # WOFF2 subsets (Regular at rest, Fill for on/selected states). No renaming needed (MIT, no
 # reserved name). Code points come from crates/app/src/ui/icons/glyphs.rs; the page maps
@@ -176,4 +177,12 @@ family = "Phosphor-Fill"
 unicodes = "U+E2A8,U+E308,U+E39E,U+E3D0,U+E3EE,U+E44A,U+E5A2,U+EAE6"
 licence = "assets/fonts/LICENSE-Phosphor.txt"
 exports = [{ path = "web/fonts/phosphor-fill-subset.woff2", max_kb = 6 }]
-# END site icons
+
+[[output]]
+kind = "lightart"
+id = "illustration-ready-small"
+src = "assets/launch/sources/illustration-ready.png"
+size = 512
+margin = 0.06
+exports = [{ path = "web/ready-128.png", width = 128, max_kb = 24 }]   # the download toast, shown at 48 px
+# END site assets

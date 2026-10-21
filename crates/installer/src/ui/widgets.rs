@@ -38,12 +38,45 @@ pub fn text(ui: &Ui, pos: Pos2, align: Align2, text: &str, font: FontId, color: 
     ui.painter().text(pos, align, text, font, color)
 }
 
-/// Paints text wrapped to `width` with its top-left at `pos`; returns its rect.
+/// Paints text wrapped to `width` with its top-left at `pos`; returns its rect. A text that
+/// wraps to two lines is balanced (no orphaned last word).
 pub fn wrapped(ui: &Ui, pos: Pos2, width: f32, text: &str, font: FontId, color: Color32) -> Rect {
-    let g = ui.painter().layout(text.to_owned(), font, color, width);
+    let text = balanced(ui, text, &font, width);
+    let g = ui.painter().layout(text, font, color, width);
     let rect = Rect::from_min_size(pos, g.size());
     ui.painter().galley(pos, g, color);
     rect
+}
+
+/// `text` with a line break where a two-line wrap is most even, so the second line never
+/// holds a lone word. Other texts are returned as they are.
+pub fn balanced(ui: &Ui, text: &str, font: &FontId, max: f32) -> String {
+    if text.contains('\n') {
+        return text.to_owned();
+    }
+    let rows = ui
+        .painter()
+        .layout(text.to_owned(), font.clone(), Color32::WHITE, max)
+        .rows
+        .len();
+    if rows != 2 {
+        return text.to_owned();
+    }
+    let mut best: Option<(f32, usize)> = None;
+    for (i, ch) in text.char_indices() {
+        if ch != ' ' {
+            continue;
+        }
+        let a = width(ui, &text[..i], font.clone());
+        let b = width(ui, &text[i + 1..], font.clone());
+        if a <= max && b <= max && best.is_none_or(|(m, _)| a.max(b) < m) {
+            best = Some((a.max(b), i));
+        }
+    }
+    best.map_or_else(
+        || text.to_owned(),
+        |(_, i)| format!("{}\n{}", &text[..i], &text[i + 1..]),
+    )
 }
 
 /// Width of `text` in `font`.
@@ -51,22 +84,24 @@ pub fn width(ui: &Ui, text: &str, font: FontId) -> f32 {
     galley(ui, text, font, Color32::WHITE).size().x
 }
 
-/// Shortens `text` in the middle (with `…`) until it fits `max` points.
-pub fn ellipsize_middle(ui: &Ui, text: &str, font: &FontId, max: f32) -> String {
-    if width(ui, text, font.clone()) <= max {
-        return text.to_owned();
+/// Shortens a Windows path to fit `max` points, keeping the drive and as many of the last
+/// folders as fit (`C:\…\Local\Programs\opensmarters`): the end is the part that matters.
+pub fn ellipsize_path(ui: &Ui, path: &str, font: &FontId, max: f32) -> String {
+    if width(ui, path, font.clone()) <= max {
+        return path.to_owned();
     }
-    let chars: Vec<char> = text.chars().collect();
-    let mut keep = chars.len();
-    while keep > 4 {
-        keep -= 1;
-        let head = keep / 3;
-        let tail = keep - head;
-        let s: String = chars[..head]
-            .iter()
-            .chain(std::iter::once(&'…'))
-            .chain(&chars[chars.len() - tail..])
-            .collect();
+    let parts: Vec<&str> = path.split('\\').collect();
+    let head = parts.first().copied().unwrap_or("");
+    for skip in 1..parts.len() {
+        let s = format!("{head}\\…\\{}", parts[skip..].join("\\"));
+        if width(ui, &s, font.clone()) <= max {
+            return s;
+        }
+    }
+    // Even the last folder alone is too long: cut it from the left.
+    let last: Vec<char> = parts.last().copied().unwrap_or("").chars().collect();
+    for start in 1..last.len() {
+        let s = format!("…{}", last[start..].iter().collect::<String>());
         if width(ui, &s, font.clone()) <= max {
             return s;
         }
@@ -220,11 +255,12 @@ pub fn checkbox_row(ui: &mut Ui, id: Id, rect: Rect, label: &str, checked: &mut 
         color::TEXT_2
     };
     let text_left = rect.left() + 14.0 + 22.0 + 12.0;
+    let label_w = rect.right() - 12.0 - text_left;
     let g = painter.layout(
-        label.to_owned(),
+        balanced(ui, label, &font::body(), label_w),
         font::body(),
         label_c,
-        rect.right() - 12.0 - text_left,
+        label_w,
     );
     let pos = pos2(text_left, rect.center().y - g.size().y / 2.0);
     painter.galley(pos, g, label_c);

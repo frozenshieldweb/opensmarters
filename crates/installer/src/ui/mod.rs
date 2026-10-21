@@ -504,7 +504,7 @@ impl SetupApp {
             return;
         }
         let ctl = Control {
-            slow: self.cli.slow.then(|| Duration::from_millis(12)),
+            slow: self.cli.slow.then(|| Duration::from_millis(250)),
             ..Control::default()
         };
         let (tx, rx) = mpsc::channel();
@@ -798,12 +798,8 @@ impl SetupApp {
         };
         let frame = symbol::frame(SYMBOL_CENTER, SYMBOL_W);
         if anim::reduced(&ctx) && matches!(self.screen, Screen::Working(_)) {
-            let f = if matches!(self.screen, Screen::Working(Action::Remove)) {
-                1.0 - self.light
-            } else {
-                self.light
-            };
-            symbol::paint_with_bar(&painter, frame, rest, f, 1.0);
+            // A plain bar always moves forward (removal too).
+            symbol::paint_with_bar(&painter, frame, rest, self.light, 1.0);
         } else {
             symbol::paint(
                 &painter,
@@ -1099,7 +1095,7 @@ impl SetupApp {
             Plan::Downgrade { installed } => {
                 let title = "A newer version is installed";
                 let line = format!(
-                    "This PC has opensmarters {installed}. This installer has {v}, which is older. Your data stays as it is either way."
+                    "This PC has {installed}. This installer has {v}, which is older. Your data stays as it is either way."
                 );
                 let h = Self::title_height(ui, r.width(), title)
                     + 8.0
@@ -1167,7 +1163,7 @@ impl SetupApp {
         } else {
             widgets::button_size(ui, "Change…", false).x + 12.0
         };
-        let shown = widgets::ellipsize_middle(
+        let shown = widgets::ellipsize_path(
             ui,
             &self.opts.dir.display().to_string(),
             &font::body(),
@@ -1356,13 +1352,16 @@ impl SetupApp {
 
     fn running_ui(&mut self, ui: &mut Ui, r: Rect, action: Action) {
         let ctx = ui.ctx().clone();
-        let mut y = Self::title(ui, r, r.top() + 24.0, "opensmarters is open") + 8.0;
-        y = Self::body(
-            ui,
-            r,
-            y,
-            "Close it to continue. Setup carries on by itself once it's closed.",
-        ) + 32.0;
+        let title = "opensmarters is open";
+        let line = "Close it to continue. Setup carries on by itself once it's closed.";
+        let h = Self::title_height(ui, r.width(), title)
+            + 8.0
+            + Self::body_height(ui, r.width(), line)
+            + 32.0
+            + 52.0;
+        let mut y = Self::centred(r.top(), r.bottom(), h);
+        y = Self::title(ui, r, y, title) + 8.0;
+        y = Self::body(ui, r, y, line) + 32.0;
         match self.buttons(
             ui,
             r,
@@ -1579,9 +1578,9 @@ impl SetupApp {
         y += 64.0;
         icons::paint(
             ui.painter(),
-            pos2(r.left() + 9.0, y + 10.0),
-            icons::FILM_STRIP,
-            18.0,
+            pos2(r.left() + 9.0, y + 11.0),
+            icons::SHIELD_CHECK,
+            20.0,
             Style::Regular,
             color::SAGE,
         );
@@ -1643,7 +1642,16 @@ impl SetupApp {
         if !o.problems.is_empty() {
             lines.push("Some items couldn't be removed; the log has the details.".to_owned());
         }
-        let mut y = Self::title(ui, r, r.top() + 24.0, title) + 10.0;
+        let h = Self::title_height(ui, r.width(), title)
+            + 10.0
+            + lines
+                .iter()
+                .map(|l| Self::body_height(ui, r.width(), l) + 6.0)
+                .sum::<f32>()
+            + 24.0
+            + 52.0;
+        let mut y = Self::centred(r.top(), r.bottom(), h);
+        y = Self::title(ui, r, y, title) + 10.0;
         for l in &lines {
             y = Self::body(ui, r, y, l) + 6.0;
         }
@@ -1658,7 +1666,12 @@ impl SetupApp {
 
     fn error_ui(&mut self, ui: &mut Ui, r: Rect, message: &str, details: &str, retry: Action) {
         let ctx = ui.ctx().clone();
-        let top = r.top() + 24.0;
+        let h = Self::title_height(ui, r.width() - 36.0, "Setup didn't finish")
+            + 10.0
+            + Self::body_height(ui, r.width(), message)
+            + 28.0
+            + 52.0;
+        let top = Self::centred(r.top(), r.bottom(), h);
         icons::paint(
             ui.painter(),
             pos2(r.left() + 12.0, top + 20.0),

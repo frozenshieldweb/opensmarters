@@ -32,8 +32,28 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # Failures are also reported as annotations (the run summary shows them, and they're
+      # readable without access to the logs).
       - name: Test
-        run: cargo test --workspace
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'test.log'
+          cargo test --workspace --no-fail-fast 2>&1 | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            $lines = @(Get-Content $log)
+            $n = 0
+            for ($i = 0; $i -lt $lines.Count -and $n -lt 8; $i++) {
+              if ($lines[$i] -match 'panicked at') {
+                $msg = ($lines[$i..([Math]::Min($i + 5, $lines.Count - 1))] -join ' | ').Replace('%', '%25')
+                "::error title=test panic::$msg"
+                $n++
+              }
+            }
+            $failed = ($lines | Where-Object { $_ -match '^test .+ \.\.\. FAILED$' }) -join ', '
+            if ($failed) { "::error title=failed tests::$($failed.Replace('%', '%25'))" }
+          }
+          exit $code
       # The installer's dev-feature tests drive the real binary (--quiet install, repair,
       # uninstall through the installed uninstall.exe, exit codes) in sandboxes that use the
       # test registry root HKCU\Software\opensmartersTest and temp folders.

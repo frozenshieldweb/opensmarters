@@ -7,12 +7,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{Env, FAST_PIN, m3u_file, m3u_url, make_xtream, pin, xtream};
+use opensmarters_store::categories::MAX_CATEGORY_ROWS;
 use opensmarters_store::settings::{self, Setting, TimeFormat};
 use opensmarters_store::{
-    CacheScope, CategoryLock, Clock, ContentKind, ItemSnapshot, LiveContainer, MemorySecretStore,
-    PinHashParams, PinOutcome, PlaybackKind, PlaybackSnapshot, ProfileKind, ProfileSettings,
-    ProfileSource, ProfileUpdate, SecretKey, SecretStore, Store, StoreError, StoreOptions,
-    TimeshiftFormat, UserAgent, next_episode,
+    CacheScope, CategoryLock, CategoryPrefs, Clock, ContentKind, ItemSnapshot, LiveContainer,
+    MemorySecretStore, PinHashParams, PinOutcome, PlaybackKind, PlaybackSnapshot, ProfileKind,
+    ProfileSettings, ProfileSource, ProfileUpdate, SecretKey, SecretStore, Store, StoreError,
+    StoreOptions, TimeshiftFormat, UserAgent, next_episode,
 };
 use secrecy::{ExposeSecret, SecretString};
 
@@ -1221,6 +1222,148 @@ fn keywords_and_category_locks() {
             .unwrap()
             .is_empty()
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// Category management
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn category_prefs_hide_order_and_regions() {
+    let env = Env::new();
+    let store = env.open();
+    let cats = store.categories();
+    let p = make_xtream(&store).id;
+    let live = ContentKind::Live;
+
+    // Defaults: nothing stored.
+    assert!(cats.prefs(p, live).unwrap().is_default());
+
+    cats.set_hidden(p, live, "12", true).unwrap();
+    cats.set_hidden_many(p, live, &["3", "4", "3"], true)
+        .unwrap();
+    let prefs = cats.prefs(p, live).unwrap();
+    assert_eq!(prefs.hidden.len(), 3);
+    assert!(prefs.order.is_empty());
+    // Other sections are separate.
+    assert!(cats.prefs(p, ContentKind::Movie).unwrap().is_default());
+
+    // Order: replaced as a whole, repeats ignored, hidden flags kept.
+    cats.set_order(p, live, &["7", "3", "9", "7"]).unwrap();
+    let prefs = cats.prefs(p, live).unwrap();
+    assert_eq!(prefs.order, ["7", "3", "9"]);
+    assert!(prefs.hidden.contains("3"));
+    cats.set_order(p, live, &["9", "12"]).unwrap();
+    let prefs = cats.prefs(p, live).unwrap();
+    assert_eq!(prefs.order, ["9", "12"]);
+    assert!(
+        prefs.hidden.contains("3"),
+        "a hidden category keeps its flag"
+    );
+
+    // Showing a category that isn't ordered deletes its row.
+    cats.set_hidden_many(p, live, &["3", "4"], false).unwrap();
+    cats.set_hidden(p, live, "12", false).unwrap();
+    let prefs = cats.prefs(p, live).unwrap();
+    assert!(prefs.hidden.is_empty());
+    assert_eq!(prefs.order, ["9", "12"], "ordered rows stay");
+    cats.set_order::<&str>(p, live, &[]).unwrap();
+    assert!(cats.prefs(p, live).unwrap().is_default());
+
+    // Regions (empty tag = untagged categories).
+    cats.set_regions(p, live, &["FR", "", "FR", "UK"]).unwrap();
+    let prefs = cats.prefs(p, live).unwrap();
+    assert_eq!(prefs.regions.len(), 3);
+    assert!(prefs.regions.contains(""));
+    cats.set_regions(p, live, &["CA"]).unwrap();
+    assert_eq!(
+        cats.prefs(p, live).unwrap().regions,
+        ["CA".to_owned()].into_iter().collect()
+    );
+
+    // Reset clears one section only.
+    cats.set_hidden(p, ContentKind::Series, "201", true)
+        .unwrap();
+    cats.set_hidden(p, live, "1", true).unwrap();
+    cats.reset(p, live).unwrap();
+    assert!(cats.prefs(p, live).unwrap().is_default());
+    assert!(
+        cats.prefs(p, ContentKind::Series)
+            .unwrap()
+            .hidden
+            .contains("201")
+    );
+
+    // Replace (the editor's Undo) restores a whole snapshot.
+    let snapshot = CategoryPrefs {
+        hidden: ["5".to_owned(), "6".to_owned()].into_iter().collect(),
+        order: vec!["6".into(), "2".into()],
+        regions: ["DE".to_owned()].into_iter().collect(),
+    };
+    cats.set_hidden(p, live, "1", true).unwrap();
+    cats.replace(p, live, &snapshot).unwrap();
+    assert_eq!(cats.prefs(p, live).unwrap(), snapshot);
+    cats.replace(p, live, &CategoryPrefs::default()).unwrap();
+    assert!(cats.prefs(p, live).unwrap().is_default());
+
+    // Deleting the profile deletes its rows.
+    cats.replace(p, live, &snapshot).unwrap();
+    store.profiles().delete(p).unwrap();
+    assert!(cats.prefs(p, live).unwrap().is_default());
+    assert!(cats.prefs(p, ContentKind::Series).unwrap().is_default());
+}
+
+#[test]
+fn category_prefs_refuse_hostile_input() {
+    let env = Env::new();
+    let store = env.open();
+    let cats = store.categories();
+    let p = make_xtream(&store).id;
+    let live = ContentKind::Live;
+
+    for bad in ["", "http://h.example.invalid/live/u/p/1.ts", "a\nb"] {
+        assert!(
+            matches!(
+                cats.set_hidden(p, live, bad, true),
+                Err(StoreError::Invalid { .. })
+            ),
+            "{bad:?}"
+        );
+    }
+    let long = "x".repeat(300);
+    assert!(cats.set_order(p, live, &["1", long.as_str()]).is_err());
+    assert!(cats.prefs(p, live).unwrap().is_default(), "all or nothing");
+    for bad in ["fr", "FRANCE", "F R", "É"] {
+        assert!(cats.set_regions(p, live, &[bad]).is_err(), "{bad:?}");
+    }
+    // An unknown profile.
+    let ghost = opensmarters_store::ProfileId::new_random();
+    assert!(matches!(
+        cats.set_hidden(ghost, live, "1", true),
+        Err(StoreError::ProfileNotFound(_))
+    ));
+
+    // The cap: at most MAX_CATEGORY_ROWS rows per profile and section.
+    let ids: Vec<String> = (0..MAX_CATEGORY_ROWS).map(|i| format!("c{i}")).collect();
+    cats.set_hidden_many(p, live, &ids, true).unwrap();
+    assert!(matches!(
+        cats.set_hidden(p, live, "one-more", true),
+        Err(StoreError::Invalid { .. })
+    ));
+    assert!(
+        cats.set_order(p, live, &["one-more"]).is_err(),
+        "a new row beyond the cap is refused"
+    );
+    assert_eq!(cats.prefs(p, live).unwrap().hidden.len(), MAX_CATEGORY_ROWS);
+    // Rows that already exist can still change, and other sections are not affected.
+    cats.set_order(p, live, &["c1", "c0"]).unwrap();
+    cats.set_hidden(p, ContentKind::Movie, "101", true).unwrap();
+    let too_many: Vec<String> = (0..=MAX_CATEGORY_ROWS).map(|i| format!("m{i}")).collect();
+    assert!(
+        cats.set_hidden_many(p, ContentKind::Movie, &too_many, true)
+            .is_err()
+    );
+    assert_eq!(cats.prefs(p, ContentKind::Movie).unwrap().hidden.len(), 1);
 }
 
 // ---------------------------------------------------------------------------------------

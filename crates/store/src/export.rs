@@ -1,14 +1,16 @@
 //! Export and import of **non-secret** data as JSON (backup, moving to another machine).
 //!
-//! Included: profiles (without passwords / M3U URLs / EPG overrides), their favourites and
-//! manual category locks, all global settings, and the parental keyword list.
+//! Included: profiles (without passwords / M3U URLs / EPG overrides), their favourites,
+//! manual category locks and category management (hidden categories, order, region
+//! filter), all global settings, and the parental keyword list.
 //! Excluded: every keychain secret, the parental PIN hash and lockout state, watch
 //! history, recent channels and the cache.
 //!
 //! Import treats the file as untrusted input: every field goes through the same
 //! validation as the regular API, provider strings are sanitised, sizes are capped, and
 //! the whole import runs in one transaction (all or nothing). It merges: profiles whose
-//! id already exists are skipped, favourites/locks are added if absent, settings in the
+//! id already exists are skipped, favourites/locks/category choices are added if absent
+//! (fields missing from older backups count as empty), settings in the
 //! file overwrite local ones, keywords are added to the local list. Imported Xtream and
 //! M3U-URL profiles have no secret yet; [`ImportSummary::needs_secrets`] lists them so the
 //! app can ask for the password / URL.
@@ -19,6 +21,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::Store;
+use crate::categories::{MAX_CATEGORY_ROWS, check_cap, validate_region};
 use crate::error::{Result, StoreError};
 use crate::favourites::ItemSnapshot;
 use crate::ids::{ContentKind, ProfileId};
@@ -69,6 +72,12 @@ struct ExportProfile {
     favourites: Vec<ExportFavourite>,
     #[serde(default)]
     category_locks: Vec<ExportLock>,
+    /// Hidden and ordered categories (absent from older backups).
+    #[serde(default)]
+    category_prefs: Vec<ExportCategoryPref>,
+    /// Region filter tags (absent from older backups).
+    #[serde(default)]
+    category_regions: Vec<ExportRegion>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -88,6 +97,22 @@ struct ExportLock {
     state: CategoryLock,
 }
 
+#[derive(Serialize, Deserialize)]
+struct ExportCategoryPref {
+    kind: ContentKind,
+    category_id: String,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
+    position: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExportRegion {
+    kind: ContentKind,
+    tag: String,
+}
+
 /// What [`Store::import_json`] did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ImportSummary {
@@ -101,6 +126,10 @@ pub struct ImportSummary {
     pub favourites_added: usize,
     /// Category locks added.
     pub category_locks_added: usize,
+    /// Hidden / ordered categories added.
+    pub category_prefs_added: usize,
+    /// Region filter tags added.
+    pub category_regions_added: usize,
     /// Settings written.
     pub settings_applied: usize,
     /// Keywords added to the local list.
@@ -116,6 +145,8 @@ impl Store {
         for p in profiles {
             let mut favourites = Vec::new();
             let mut category_locks = Vec::new();
+            let mut category_prefs = Vec::new();
+            let mut category_regions = Vec::new();
             for kind in ContentKind::ALL {
                 favourites.extend(self.favourites().list(p.id, kind)?.into_iter().map(|f| {
                     ExportFavourite {
@@ -138,6 +169,20 @@ impl Store {
                     .collect();
                 locks.sort_by(|a, b| a.category_id.cmp(&b.category_id));
                 category_locks.extend(locks);
+                let cats = self.categories();
+                category_prefs.extend(cats.rows(p.id, kind)?.into_iter().map(|r| {
+                    ExportCategoryPref {
+                        kind,
+                        category_id: r.category_id,
+                        hidden: r.hidden,
+                        position: r.position,
+                    }
+                }));
+                category_regions.extend(
+                    cats.regions(p.id, kind)?
+                        .into_iter()
+                        .map(|tag| ExportRegion { kind, tag }),
+                );
             }
             out.push(ExportProfile {
                 id: p.id,
@@ -148,6 +193,8 @@ impl Store {
                 created_at: p.created_at,
                 favourites,
                 category_locks,
+                category_prefs,
+                category_regions,
             });
         }
         let settings = {
@@ -285,6 +332,34 @@ impl Store {
                      VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
                     params![p.id, l.kind, category_id, l.state],
                 )?;
+            }
+            // Category management: the same merge (added if absent), then the regular
+            // API's per-section row cap.
+            let cap = MAX_CATEGORY_ROWS * ContentKind::ALL.len();
+            if p.category_prefs.len() > cap || p.category_regions.len() > cap {
+                return Err(StoreError::invalid("import", "too many category settings"));
+            }
+            for c in &p.category_prefs {
+                let category_id = validate_item_id("category_id", &c.category_id)?;
+                if !c.hidden && c.position.is_none() {
+                    continue;
+                }
+                summary.category_prefs_added += tx.execute(
+                    "INSERT INTO category_prefs (profile_id, kind, category_id, hidden, position)
+                     VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT DO NOTHING",
+                    params![p.id, c.kind, category_id, c.hidden, c.position],
+                )?;
+            }
+            for r in &p.category_regions {
+                let tag = validate_region(&r.tag)?;
+                summary.category_regions_added += tx.execute(
+                    "INSERT INTO category_regions (profile_id, kind, tag)
+                     VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
+                    params![p.id, r.kind, tag],
+                )?;
+            }
+            for kind in ContentKind::ALL {
+                check_cap(&tx, p.id, kind)?;
             }
         }
 

@@ -18,7 +18,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use crate::error::{Result, StoreError};
 
 /// The ordered list of migrations. Index `i` upgrades version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2];
+pub(crate) const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3];
 
 /// Schema version written by this build.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -207,6 +207,28 @@ CREATE TABLE reminders (
 CREATE INDEX reminders_due ON reminders (profile_id, start_at);
 "#;
 
+/// Version 3: category management (hidden categories, the viewer's order, the region
+/// filter), per profile and section. Modelled on `category_locks`: same keys, kinds and
+/// cascade; ids are validated by the store (`categories.rs`). A row that is neither
+/// hidden nor ordered is deleted, so defaults store nothing.
+const MIGRATION_3: &str = r#"
+CREATE TABLE category_prefs (
+    profile_id  TEXT    NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+    kind        TEXT    NOT NULL CHECK (kind IN ('live', 'movie', 'series')),
+    category_id TEXT    NOT NULL,
+    hidden      INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
+    position    INTEGER,           -- NULL: provider order (after the ordered ones)
+    PRIMARY KEY (profile_id, kind, category_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE category_regions (
+    profile_id TEXT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL CHECK (kind IN ('live', 'movie', 'series')),
+    tag        TEXT NOT NULL,        -- a region tag ("FR"), or '' for untagged categories
+    PRIMARY KEY (profile_id, kind, tag)
+) STRICT, WITHOUT ROWID;
+"#;
+
 /// Opens (creating if needed) a database file and prepares the connection.
 pub(crate) fn open_file(path: &Path, busy_timeout: Duration) -> Result<Connection> {
     if let Some(dir) = path.parent()
@@ -365,6 +387,17 @@ mod tests {
                 )
                 .unwrap();
             }
+            3 => {
+                seed_fixture(conn, 2);
+                conn.execute_batch(
+                    "INSERT INTO category_prefs (profile_id, kind, category_id, hidden, position)
+                     VALUES ('00000000-0000-4000-8000-000000000001', 'live', '7', 1, NULL),
+                            ('00000000-0000-4000-8000-000000000001', 'live', '3', 0, 0);
+                     INSERT INTO category_regions (profile_id, kind, tag)
+                     VALUES ('00000000-0000-4000-8000-000000000001', 'live', 'FR');",
+                )
+                .unwrap();
+            }
             v => panic!("add a fixture for schema version {v}"),
         }
     }
@@ -416,6 +449,44 @@ mod tests {
                     .unwrap();
                 assert_eq!(n, 1, "data survives the upgrade from v{start}");
             }
+        }
+    }
+
+    #[test]
+    fn version_3_adds_category_tables_that_cascade() {
+        let mut conn = open_memory().unwrap();
+        migrate_to(&mut conn, 2).unwrap();
+        seed_fixture(&conn, 2);
+        migrate(&mut conn).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        conn.execute_batch(
+            "INSERT INTO category_prefs (profile_id, kind, category_id, hidden)
+             VALUES ('00000000-0000-4000-8000-000000000001', 'movie', '101', 1);
+             INSERT INTO category_regions (profile_id, kind, tag)
+             VALUES ('00000000-0000-4000-8000-000000000001', 'movie', '');",
+        )
+        .unwrap();
+        // Kinds and flags are checked by the schema.
+        assert!(
+            conn.execute_batch(
+                "INSERT INTO category_prefs (profile_id, kind, category_id, hidden)
+                 VALUES ('00000000-0000-4000-8000-000000000001', 'radio', '1', 1);"
+            )
+            .is_err()
+        );
+        assert!(
+            conn.execute_batch(
+                "INSERT INTO category_prefs (profile_id, kind, category_id, hidden)
+                 VALUES ('00000000-0000-4000-8000-000000000001', 'live', '1', 2);"
+            )
+            .is_err()
+        );
+        conn.execute_batch("DELETE FROM profiles").unwrap();
+        for table in ["category_prefs", "category_regions"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table} rows cascade with their profile");
         }
     }
 

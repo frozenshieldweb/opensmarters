@@ -67,6 +67,18 @@ fn export_contains_no_secrets_and_round_trips() {
     src.parental()
         .set_category_lock(x.id, ContentKind::Live, "77", Some(CategoryLock::Locked))
         .unwrap();
+    src.categories()
+        .set_hidden_many(x.id, ContentKind::Live, &["77", "5"], true)
+        .unwrap();
+    src.categories()
+        .set_order(x.id, ContentKind::Live, &["9", "5"])
+        .unwrap();
+    src.categories()
+        .set_regions(x.id, ContentKind::Live, &["FR", ""])
+        .unwrap();
+    src.categories()
+        .set_hidden(x.id, ContentKind::Movie, "101", true)
+        .unwrap();
     src.playback()
         .record_progress(
             x.id,
@@ -98,6 +110,11 @@ fn export_contains_no_secrets_and_round_trips() {
     assert_eq!(summary.needs_secrets, vec![x.id, m.id]);
     assert_eq!(summary.favourites_added, 4);
     assert_eq!(summary.category_locks_added, 1);
+    assert_eq!(
+        summary.category_prefs_added, 4,
+        "77, 5 (hidden + ordered), 9, movie 101"
+    );
+    assert_eq!(summary.category_regions_added, 2);
     assert_eq!(summary.keywords_added, 1);
 
     let a = src.profiles().list().unwrap();
@@ -138,6 +155,13 @@ fn export_contains_no_secrets_and_round_trips() {
             .unwrap()
             .contains(&"late night".to_owned())
     );
+    for kind in ContentKind::ALL {
+        assert_eq!(
+            dst.categories().prefs(x.id, kind).unwrap(),
+            src.categories().prefs(x.id, kind).unwrap(),
+            "category choices round-trip ({kind:?})"
+        );
+    }
     assert!(!dst.parental().is_pin_set().unwrap(), "PIN is not exported");
     assert!(dst.profiles().password(x.id).unwrap().is_none());
     assert!(dst.playback().history(x.id, 10).unwrap().is_empty());
@@ -148,6 +172,82 @@ fn export_contains_no_secrets_and_round_trips() {
     assert!(again.profiles_added.is_empty());
     assert_eq!(again.profiles_skipped, 3);
     assert_eq!(again.favourites_added, 0);
+    assert_eq!(again.category_prefs_added, 0);
+    assert_eq!(again.category_regions_added, 0);
+}
+
+#[test]
+fn old_backups_without_category_choices_still_import() {
+    let src_env = Env::new();
+    let src = src_env.open();
+    let x = src.profiles().create(xtream("Old", "pw")).unwrap();
+    let json = src.export_json().unwrap();
+    // A backup from before category management: the fields don't exist.
+    let mut doc: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let profile = doc["profiles"][0].as_object_mut().unwrap();
+    assert!(profile.remove("category_prefs").is_some());
+    assert!(profile.remove("category_regions").is_some());
+    let dst_env = Env::new();
+    let dst = dst_env.open();
+    let summary = dst.import_json(&doc.to_string()).unwrap();
+    assert_eq!(summary.profiles_added, vec![x.id]);
+    assert_eq!(summary.category_prefs_added, 0);
+    assert!(
+        dst.categories()
+            .prefs(x.id, ContentKind::Live)
+            .unwrap()
+            .is_default()
+    );
+}
+
+#[test]
+fn hostile_category_choices_abort_the_import() {
+    let env = Env::new();
+    let store = env.open();
+    let good = {
+        let src_env = Env::new();
+        let src = src_env.open();
+        src.profiles().create(xtream("Ok", "pw")).unwrap();
+        src.export_json().unwrap()
+    };
+    let with = |field: &str, value: serde_json::Value| {
+        let mut doc: serde_json::Value = serde_json::from_str(&good).unwrap();
+        doc["profiles"][0][field] = value;
+        doc.to_string()
+    };
+    for (field, value) in [
+        (
+            "category_prefs",
+            serde_json::json!([{"kind": "live", "category_id": "http://h.example.invalid/x",
+                                "hidden": true}]),
+        ),
+        (
+            "category_prefs",
+            serde_json::json!([{"kind": "radio", "category_id": "1", "hidden": true}]),
+        ),
+        (
+            "category_regions",
+            serde_json::json!([{"kind": "live", "tag": "not a tag"}]),
+        ),
+    ] {
+        assert!(store.import_json(&with(field, value)).is_err(), "{field}");
+        assert!(
+            store.profiles().list().unwrap().is_empty(),
+            "nothing written"
+        );
+    }
+    // More rows than a section may hold.
+    let rows: Vec<serde_json::Value> = (0..=opensmarters_store::categories::MAX_CATEGORY_ROWS)
+        .map(
+            |i| serde_json::json!({"kind": "live", "category_id": format!("c{i}"), "hidden": true}),
+        )
+        .collect();
+    assert!(matches!(
+        store.import_json(&with("category_prefs", serde_json::Value::Array(rows))),
+        Err(StoreError::Invalid { .. })
+    ));
+    assert!(store.profiles().list().unwrap().is_empty());
+    assert!(store.import_json(&good).is_ok());
 }
 
 #[test]

@@ -3,7 +3,9 @@
 //! connection budget allows. The tile players and their rules (budget, staggered starts,
 //! sound) live in [`crate::playback::multi`] (`cx.multi`); this screen draws them and
 //! handles the keys. Layouts: 1×2 for two slots, 2×2 for three or four, and "enlarged"
-//! (one tile big, the others in a column).
+//! (one tile big, the others in a column). Two playing tiles stay side by side: the grid
+//! only grows when the user adds another channel ("Add channel" or A), and shrinks back if
+//! they cancel.
 //!
 //! Opened with [`open`] from Live TV ([`live_button`], next to Fullscreen/Guide) and the
 //! player's OSD ([`osd_button`]): the main player stops, freeing its connection, and its
@@ -22,8 +24,9 @@
 //! | Enter | empty slot: choose a channel · playing tile: enlarge it / back to all tiles · stopped or failed tile: play it again |
 //! | PageUp / PageDown | channel up / down in the focused tile |
 //! | 0–9 | channel number for the focused tile (after 1.5 s or Enter); on the empty slot it adds that channel |
+//! | A | add a channel (one more slot, with the picker) while the budget allows |
 //! | M / F / I | mute / window fullscreen / show or hide the channel banners |
-//! | Esc, Backspace | close the picker, then leave the enlarged view, then leave multiscreen (every tile stops and frees its connection) |
+//! | Esc, Backspace | close the picker (cancelling an add), then leave the enlarged view, then leave multiscreen (every tile stops and frees its connection) |
 
 mod layout;
 mod picker;
@@ -164,6 +167,19 @@ fn activate_action(empty: bool, stopped: bool, status: Option<&PlaybackStatus>) 
     }
 }
 
+/// Whether one more tile fits the connection budget.
+fn can_add(tiles: usize, capacity: usize) -> bool {
+    tiles < capacity.min(multi::MAX_TILES)
+}
+
+/// The budget's tile capacity for `cx`'s session (0 when multiscreen isn't allowed).
+fn tile_capacity(cx: &AppCtx<'_>) -> usize {
+    cx.session().map_or(0, |s| {
+        let budget = s.connections();
+        multi::capacity(budget.limit(), &budget.holders()).unwrap_or(0)
+    })
+}
+
 fn tile_settings(cx: &AppCtx<'_>) -> TileSettings {
     TileSettings {
         egui: cx.egui.clone(),
@@ -202,6 +218,9 @@ pub struct MultiscreenScreen {
     /// The main player's channel, placed in tile 1 once the locks are known.
     carried: Option<(Arc<Session>, PlaybackRequest)>,
     picker: Option<Picker>,
+    /// While the user adds a channel past the first two tiles: the slot focused before (the
+    /// grid shows one more, empty slot until the pick, or goes back if they cancel).
+    adding: Option<usize>,
     enlarged: Option<usize>,
     /// The focused slot (kept while the focus is on a header button).
     focused: usize,
@@ -226,6 +245,7 @@ impl MultiscreenScreen {
             data: None,
             carried: None,
             picker: None,
+            adding: None,
             enlarged: None,
             focused: 0,
             focus_request: None,
@@ -341,6 +361,21 @@ impl MultiscreenScreen {
         self.picker = Some(Picker::new(slot, cx.multi.channel_key(slot)));
         self.number_entry = None;
     }
+
+    /// "Add channel" (header button or A): the picker for one more slot. Past two tiles the
+    /// grid grows by an empty slot only now, so two tiles stay side by side until then.
+    fn start_adding(&mut self, cx: &AppCtx<'_>) {
+        let tiles = cx.multi.len();
+        if !can_add(tiles, tile_capacity(cx)) {
+            return;
+        }
+        if tiles >= 2 {
+            self.adding = Some(self.focused.min(tiles - 1));
+        }
+        self.enlarged = None;
+        self.focused = tiles;
+        self.open_picker(cx, tiles);
+    }
 }
 
 impl Screen for MultiscreenScreen {
@@ -368,6 +403,7 @@ impl Screen for MultiscreenScreen {
             self.carried = cx.multi.take_carried();
             cx.multi.clear();
             self.focused = 0;
+            self.adding = None;
         }
         // A PIN unlock in Live TV may have changed the locks.
         self.data = None;
@@ -386,6 +422,9 @@ impl Screen for MultiscreenScreen {
             );
         }
         self.picker = None;
+        if let Some(prev) = self.adding.take() {
+            self.focused = prev;
+        }
         self.number_entry = None;
         let fs = cx.egui.input(|i| i.viewport().fullscreen.unwrap_or(false));
         if fs {
@@ -408,7 +447,13 @@ impl Screen for MultiscreenScreen {
                     return true;
                 }
                 if let Some(p) = self.picker.take() {
-                    self.focus_request = Some(p.slot());
+                    // Cancelling an add: the grid goes back to the tiles that play.
+                    let back_to = match self.adding.take() {
+                        Some(prev) if p.slot() >= cx.multi.len() => prev,
+                        _ => p.slot(),
+                    };
+                    self.focused = back_to;
+                    self.focus_request = Some(back_to);
                 }
                 true
             }
@@ -457,6 +502,10 @@ impl Screen for MultiscreenScreen {
         if consume(Key::I) {
             let shown = self.banners_forced.unwrap_or(true);
             self.banners_forced = Some(!shown);
+        }
+        if consume(Key::A) {
+            self.start_adding(cx);
+            return;
         }
         let slot = self.focused;
         let playing = slot < cx.multi.len();
@@ -507,7 +556,8 @@ impl Screen for MultiscreenScreen {
         let budget = Arc::clone(session.connections());
         let capacity = multi::capacity(budget.limit(), &budget.holders());
         let tiles = cx.multi.len();
-        let slots = multi::slot_count(tiles, capacity.as_ref().map_or(0, |c| *c));
+        let cap = capacity.as_ref().map_or(0, |c| *c);
+        let slots = multi::slot_count(tiles, cap, self.adding.is_some());
         let screen = cx.layout.screen;
         let safe = cx.layout.safe_area();
         let m = cx.layout.margin;
@@ -584,7 +634,8 @@ impl Screen for MultiscreenScreen {
                 ))
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
-        let (change, remove) = focus::scope(&mut child, Id::unique("multi.actions"), |ui| {
+        let addable = can_add(tiles, cap);
+        let (add, change, remove) = focus::scope(&mut child, Id::unique("multi.actions"), |ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
             let remove = Button::ghost("Remove")
                 .icon(icons::X)
@@ -599,8 +650,18 @@ impl Screen for MultiscreenScreen {
                 .id(Id::unique("multi.change"))
                 .show(ui)
                 .activated;
-            (change, remove)
+            let add = Button::secondary("Add channel")
+                .icon(icons::PLUS)
+                .small()
+                .enabled(addable)
+                .id(Id::unique("multi.add"))
+                .show(ui)
+                .activated;
+            (add, change, remove)
         });
+        if add {
+            self.start_adding(cx);
+        }
         if change {
             self.open_picker(cx, self.focused);
         }
@@ -615,7 +676,7 @@ impl Screen for MultiscreenScreen {
         // Tiles.
         let area = Rect::from_min_max(pos2(left, screen.top() + 104.0), pos2(right, bottom - 56.0));
         let tiles = cx.multi.len();
-        let slots = multi::slot_count(tiles, capacity.as_ref().map_or(0, |c| *c));
+        let slots = multi::slot_count(tiles, cap, self.adding.is_some());
         let rects = layout::tile_rects(area, slots, self.enlarged);
         let recent = self.last_activity.elapsed() < BANNER_FOR;
         let banners = self.banners_forced.unwrap_or(recent);
@@ -708,6 +769,9 @@ impl Screen for MultiscreenScreen {
         } else if self.enlarged.is_some() {
             "Enter: back to all tiles \u{b7} PageUp/PageDown or a number: change channel \u{b7} \
              M: mute \u{b7} F: full screen \u{b7} Esc: back to all tiles"
+        } else if can_add(tiles, cap) {
+            "Enter: enlarge \u{b7} PageUp/PageDown or a number: change channel \u{b7} A: add a \
+             channel \u{b7} M: mute \u{b7} F: full screen \u{b7} Esc: leave multiscreen"
         } else {
             "Enter: enlarge \u{b7} PageUp/PageDown or a number: change channel \u{b7} M: mute \
              \u{b7} F: full screen \u{b7} Esc: leave multiscreen"
@@ -780,6 +844,8 @@ impl Screen for MultiscreenScreen {
             match (p.show(cx, &session, channels, &keys), &data) {
                 (Some((_, zap)), Some(d)) => {
                     let slot = p.slot();
+                    // The add is over, whether the channel was placed or refused.
+                    self.adding = None;
                     self.place(cx, &session, slot, zap, &d.locks);
                 }
                 _ => self.picker = Some(p),
@@ -1077,6 +1143,18 @@ mod tests {
         assert_eq!(back_step(false, true, true), Back::CancelNumber);
         assert_eq!(back_step(false, false, true), Back::LeaveEnlarged);
         assert_eq!(back_step(false, false, false), Back::Leave);
+    }
+
+    #[test]
+    fn a_tile_can_be_added_while_the_budget_allows() {
+        assert!(can_add(1, 2));
+        assert!(can_add(2, 3));
+        assert!(!can_add(2, 2));
+        assert!(!can_add(3, 3));
+        assert!(can_add(3, 4));
+        // Never past MAX_TILES, nor on a refused budget.
+        assert!(!can_add(4, 9));
+        assert!(!can_add(0, 0));
     }
 
     #[test]

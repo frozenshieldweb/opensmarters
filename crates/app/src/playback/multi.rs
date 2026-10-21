@@ -120,11 +120,12 @@ pub fn capacity(limit: u32, holders: &[Purpose]) -> Result<usize, Refusal> {
     Ok(usize::try_from(free).unwrap_or(MAX_TILES).min(MAX_TILES))
 }
 
-/// How many slots the screen shows: the tiles plus one empty "add a channel" slot while
-/// the budget allows another tile, at least two (1×2), never more than the budget or
-/// [`MAX_TILES`]. Tiles already playing are never hidden, even if the budget shrank.
-pub fn slot_count(tiles: usize, capacity: usize) -> usize {
-    (tiles + 1)
+/// How many slots the screen shows: the tiles, at least two (1×2, the rest "add a channel"
+/// slots), plus one empty slot while `adding` (the user asked for another tile), never more
+/// than the budget or [`MAX_TILES`]. Two tiles therefore stay side by side until a third is
+/// asked for. Tiles already playing are never hidden, even if the budget shrank.
+pub fn slot_count(tiles: usize, capacity: usize, adding: bool) -> usize {
+    (tiles + usize::from(adding))
         .max(2)
         .min(capacity.max(tiles))
         .min(MAX_TILES.max(tiles))
@@ -839,19 +840,24 @@ mod tests {
     }
 
     #[test]
-    fn slots_offer_one_more_tile_within_the_budget() {
-        // Nothing playing yet: 1×2 with two empty slots.
-        assert_eq!(slot_count(0, 4), 2);
-        assert_eq!(slot_count(1, 2), 2);
-        assert_eq!(slot_count(2, 2), 2, "full: no empty slot");
-        assert_eq!(slot_count(2, 3), 3);
-        assert_eq!(slot_count(3, 3), 3);
-        assert_eq!(slot_count(3, 4), 4);
-        assert_eq!(slot_count(4, 4), 4);
+    fn slots_grow_only_when_a_tile_is_being_added() {
+        // Nothing or one tile playing: 1×2, the rest empty slots.
+        assert_eq!(slot_count(0, 4, false), 2);
+        assert_eq!(slot_count(1, 3, false), 2);
+        assert_eq!(slot_count(1, 2, true), 2);
+        // Two tiles stay side by side (1×2) until the user adds a third.
+        assert_eq!(slot_count(2, 3, false), 2);
+        assert_eq!(slot_count(2, 3, true), 3);
+        assert_eq!(slot_count(3, 4, false), 3);
+        assert_eq!(slot_count(3, 4, true), 4);
+        // Full: adding shows no empty slot.
+        assert_eq!(slot_count(2, 2, true), 2);
+        assert_eq!(slot_count(3, 3, true), 3);
+        assert_eq!(slot_count(4, 4, true), 4);
         // The budget shrank (a setting changed): playing tiles stay, no empty slot.
-        assert_eq!(slot_count(3, 2), 3);
+        assert_eq!(slot_count(3, 2, true), 3);
         // Refused: nothing to show.
-        assert_eq!(slot_count(0, 0), 0);
+        assert_eq!(slot_count(0, 0, false), 0);
     }
 
     #[test]

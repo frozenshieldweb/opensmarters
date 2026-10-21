@@ -311,6 +311,25 @@ pub fn record_until_stopped(
     )
 }
 
+/// The PC is kept awake this long before a scheduled recording starts, so it doesn't fall
+/// asleep just before (it can't wake up for one: that needs a wake timer).
+pub const AWAKE_BEFORE_START: Duration = Duration::from_secs(15 * 60);
+
+/// Whether jobs (each job's state and start) need the PC awake: a recording or download
+/// that runs or waits for a connection, or a scheduled recording that starts within
+/// [`AWAKE_BEFORE_START`].
+pub fn needs_pc_awake(
+    jobs: impl IntoIterator<Item = (RecordingState, Option<Timestamp>)>,
+    now: Timestamp,
+) -> bool {
+    let soon = now.saturating_add(AWAKE_BEFORE_START);
+    jobs.into_iter().any(|(state, start)| match state {
+        RecordingState::Active | RecordingState::Queued => true,
+        RecordingState::Scheduled => start.is_some_and(|t| t <= soon),
+        _ => false,
+    })
+}
+
 /// True for a live recording started "until I stop" (no programme, no padding).
 pub fn is_until_stopped(r: &Recording) -> bool {
     match (r.start_at, r.end_at) {
@@ -754,6 +773,36 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 10, 20, h, 0, 0)
             .single()
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn running_and_imminent_jobs_keep_the_pc_awake() {
+        let now = Timestamp::from_unix_secs(1_800_000_000);
+        let in_min = |m: i64| Some(Timestamp::from_unix_secs(1_800_000_000 + m * 60));
+        assert!(!needs_pc_awake([], now));
+        assert!(needs_pc_awake([(RecordingState::Active, None)], now));
+        assert!(needs_pc_awake([(RecordingState::Queued, None)], now));
+        assert!(needs_pc_awake(
+            [(RecordingState::Scheduled, in_min(10))],
+            now
+        ));
+        assert!(needs_pc_awake(
+            [(RecordingState::Scheduled, in_min(-5))],
+            now
+        ));
+        assert!(!needs_pc_awake(
+            [(RecordingState::Scheduled, in_min(60))],
+            now
+        ));
+        assert!(!needs_pc_awake([(RecordingState::Scheduled, None)], now));
+        for done in [
+            RecordingState::Paused,
+            RecordingState::Done,
+            RecordingState::Failed,
+            RecordingState::Cancelled,
+        ] {
+            assert!(!needs_pc_awake([(done, in_min(1))], now), "{done:?}");
+        }
     }
 
     #[test]

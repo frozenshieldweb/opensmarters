@@ -6,6 +6,7 @@ All notable changes to opensmarters. Versions follow [Semantic Versioning](https
 
 ### Fixed
 - **Multiscreen:** two channels now stay side by side (1×2) at full size. The grid only grows to 2×2 when you add a third channel, with the new **Add channel** button or the A key, and goes back if you cancel. Before, an empty "Add a channel" slot forced 2×2 as soon as two channels played.
+- **The display no longer turns off during a film.** While video plays the display stays on (and the PC awake). While a recording or download runs, or a scheduled recording starts within 15 minutes, the PC stays awake but the display may turn off. Paused or stopped, Windows' normal power settings apply.
 
 ## [0.2.0] - 2026-10-21
 

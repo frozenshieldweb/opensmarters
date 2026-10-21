@@ -137,6 +137,17 @@ pub enum PlaybackStatus {
     Unavailable(String),
 }
 
+impl PlaybackStatus {
+    /// A stream is opening, playing, buffering or reconnecting (not paused, finished,
+    /// failed or idle): the display should stay on.
+    pub fn is_running(&self) -> bool {
+        matches!(
+            self,
+            Self::Opening | Self::Playing | Self::Buffering | Self::Reconnecting { .. }
+        )
+    }
+}
+
 /// The zap banner's state ([`PlaybackController::banner`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Banner {

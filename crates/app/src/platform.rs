@@ -9,10 +9,49 @@
 //!   the browser through the system launcher ([`launcher`]: Explorer, `open`,
 //!   `xdg-open`), always started by **absolute path** (never resolved through the current
 //!   directory or `PATH`), with the path/URL as a single argument, never through a shell.
+//! - [`awake_need`] / [`KeepAwake`]: keep the display on while video plays and the PC
+//!   awake while a recording or download runs (the call itself is the player crate's
+//!   [`opensmarters_player::set_awake`]).
 
 use std::path::{Path, PathBuf};
 
 pub use afterglow::system_motion::{MOTION_POLL_EVERY, SystemMotion, animations_enabled};
+pub use opensmarters_player::Awake;
+
+/// What the app needs from the power manager: the display on while video plays in a
+/// window that isn't minimised; only the PC awake while video plays minimised (the sound
+/// goes on) or `jobs` (recordings, downloads) need it; else nothing.
+pub fn awake_need(video_running: bool, window_visible: bool, jobs: bool) -> Awake {
+    if video_running && window_visible {
+        Awake::Display
+    } else if video_running || jobs {
+        Awake::System
+    } else {
+        Awake::Idle
+    }
+}
+
+/// Applies [`awake_need`] each frame, calling Windows only when the need changes.
+#[derive(Debug, Default)]
+pub struct KeepAwake {
+    applied: Option<Awake>,
+}
+
+impl KeepAwake {
+    /// Asks for `need` if it differs from the last request.
+    pub fn apply(&mut self, need: Awake) {
+        if self.applied == Some(need) {
+            return;
+        }
+        if opensmarters_player::set_awake(need) {
+            tracing::debug!(?need, "power request");
+        } else {
+            tracing::warn!(?need, "Windows refused the power request");
+        }
+        // Not retried every frame when refused: the next change asks again.
+        self.applied = Some(need);
+    }
+}
 
 /// The system "open this" launcher by **absolute path** (Explorer, `open`, `xdg-open`).
 ///
@@ -115,6 +154,27 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_keeps_the_display_on_and_jobs_keep_the_pc_awake() {
+        assert_eq!(awake_need(true, true, false), Awake::Display);
+        assert_eq!(awake_need(true, true, true), Awake::Display);
+        // Minimised: the sound goes on, the display may turn off.
+        assert_eq!(awake_need(true, false, false), Awake::System);
+        assert_eq!(awake_need(false, true, true), Awake::System);
+        assert_eq!(awake_need(false, false, true), Awake::System);
+        assert_eq!(awake_need(false, true, false), Awake::Idle);
+        assert_eq!(awake_need(false, false, false), Awake::Idle);
+    }
+
+    #[test]
+    fn keep_awake_releases_when_nothing_needs_it() {
+        let mut k = KeepAwake::default();
+        for need in [Awake::Display, Awake::Display, Awake::System, Awake::Idle] {
+            k.apply(need);
+            assert_eq!(k.applied, Some(need));
+        }
+    }
 
     #[test]
     fn open_folder_rejects_missing_dirs() {

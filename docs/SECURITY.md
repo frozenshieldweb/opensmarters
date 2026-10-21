@@ -519,7 +519,9 @@ without the PIN, and that a lockout survives a restart.
 ## 9. Reporting a vulnerability
 
 Please **do not open a public issue** for a security problem. Use GitHub's private
-vulnerability reporting on the repository (Security → *Report a vulnerability*). Include
+vulnerability reporting on the repository (Security → *Report a vulnerability*). If that
+button isn't there, open an issue titled "Security contact" with no details, and a
+maintainer will reply with a private channel. Include
 the opensmarters version or commit, Windows version, what an attacker controls (provider,
 playlist, network, local access) and the steps or a sample (synthetic data only — never
 send real provider credentials). We aim to acknowledge within 7 days and to fix or publish

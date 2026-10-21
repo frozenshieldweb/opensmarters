@@ -24,6 +24,14 @@ opensmarters ships with **no channels, no content and no provider**. It plays wh
   - audio and subtitle tracks, aspect and zoom presets;
   - stall detection with bounded reconnects;
   - respect for your provider's connection limit.
+- **Pause and rewind live TV**, per-stream buffering that tunes itself to each channel, and a stream details overlay (D).
+- **Recordings and downloads**:
+  - download films and episodes to watch offline; downloads resume, and step aside when you need the connection to watch;
+  - record live TV now, or on a schedule from the Guide or Search;
+  - save the last minutes of a live channel as a clip;
+  - a Recordings screen; saved items go to `Videos\opensmarters` and follow parental locks.
+- **Multiscreen** 1×2 and 2×2, with the sound following the focused tile, within your connection limit.
+- **Sleep timer** (after this episode, or 30/60 minutes, with a fade and "Still watching?") and **programme reminders** from the Guide (notify, or switch channel when it starts).
 - **Parental control**:
   - a 4–8 digit PIN, Argon2-hashed and rate-limited;
   - locked words matched as whole words ("Sussex" is fine);
@@ -54,11 +62,15 @@ The threat model, mitigations and review findings are in [docs/SECURITY.md](docs
 
 ## Install
 
+Get the latest version from [Releases](https://github.com/frozenshieldweb/opensmarters/releases/latest) or the [download page](https://frozenshieldweb.github.io/opensmarters/).
+
 Download `opensmarters-<version>-windows-x64-setup.exe` and run it. It installs for your Windows account only (no administrator rights) into `%LOCALAPPDATA%\Programs\opensmarters` and adds a Start menu shortcut; **Options** picks another folder or adds a desktop shortcut. Running a newer setup updates in place. Remove it from Windows Settings → Apps: your data and saved passwords stay unless you tick the boxes, and recordings in your Videos folder always stay. For scripted installs, `--quiet` (see `--help`).
 
 Or use the portable zip: download `opensmarters-<version>-windows-x64.zip`, unzip it anywhere and run `opensmarters.exe`, keeping `libmpv-2.dll` next to it.
 
 Windows 10/11 x64 with a current graphics driver is required. Builds are not signed yet, so Windows may warn about an unknown publisher.
+
+**Check a download.** Every release lists the SHA-256 of its files in `SHA256SUMS.txt` (`Get-FileHash <file>` in PowerShell). The files are built by GitHub Actions from the tagged source, with a signed build-provenance attestation you can check with the GitHub CLI: `gh attestation verify <file> --repo frozenshieldweb/opensmarters`.
 
 Your data lives in `%LOCALAPPDATA%\opensmarters\opensmarters\data`. Passwords are in Windows Credential Manager, under entries ending in `.opensmarters`.
 

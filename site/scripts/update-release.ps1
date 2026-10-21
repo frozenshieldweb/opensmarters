@@ -43,7 +43,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Dist = (Join-Path $PSScriptRoot '..\..\dist'),
+    [string]$Dist,
     [string]$Version,
     [string]$BaseUrl,
     [string]$Date,
@@ -52,6 +52,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# Not a param default: Windows PowerShell 5.1 leaves $PSScriptRoot empty there.
+if (-not $Dist) { $Dist = Join-Path $PSScriptRoot '..\..\dist' }
 
 $Site = Split-Path -Parent $PSScriptRoot
 $ReleaseJs = Join-Path $Site 'release.js'

@@ -20,9 +20,9 @@ export const CONTENT = {
     ogTitle: `${P}: a secure, open-source TV player`,
     ogDescription: "A free, open-source player for your own Xtream Codes or M3U subscription. Native and fast, made for the sofa, and private by design.",
     ogImageAlt: `The ${P} wordmark and the line "Make room for good stories." on a warm, dark background.`,
-    // TODO(owner): the public address of this page, e.g. "https://<org>.github.io/<repo>/".
-    // Open Graph wants absolute image URLs; until this is set they are relative.
-    siteUrl: "TODO (https://<site>/)",
+    // The public address of this page (GitHub Pages, deployed by .github/workflows/pages.yml).
+    // Open Graph wants absolute image URLs.
+    siteUrl: "https://frozenshieldweb.github.io/opensmarters/",
     manifestName: P,
     manifestDescription: "A secure, open-source TV player for your own subscription.",
   },

@@ -28,3 +28,6 @@ _reference/
 /tools/assets/raw/
 /tools/assets/.build/
 __pycache__/
+
+# Private reverse-engineering notes (not published; see docs/BUILD_PROMPT.md)
+/docs/REVERSE_ENGINEERING.md

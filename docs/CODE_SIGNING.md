@@ -1,6 +1,6 @@
 # Code signing policy
 
-> **Status:** opensmarters has applied to [SignPath Foundation](https://signpath.org)'s free
+> **Status:** opensmarters is applying to [SignPath Foundation](https://signpath.org)'s free
 > code signing program for open-source projects. Until the application is approved, the
 > Windows releases are **not signed** and Windows SmartScreen may warn about an unknown
 > publisher. This page describes how signing works once it is in place.

@@ -421,11 +421,21 @@ impl SettingsPageUi for CategoriesPage {
             return;
         }
         // Only look for the focused row when a move key is down.
+        // (The modifiers of the key event itself: scripted input carries them there.)
         let moving = ctx.input(|i| {
-            let m = i.modifiers;
-            ((m.command || m.shift)
-                && (i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::ArrowDown)))
-                || (m.command && i.key_pressed(Key::Home))
+            i.events.iter().any(|e| match e {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers: m,
+                    ..
+                } => match key {
+                    Key::ArrowUp | Key::ArrowDown => m.command || m.shift,
+                    Key::Home => m.command,
+                    _ => false,
+                },
+                _ => false,
+            })
         });
         if !moving {
             return;

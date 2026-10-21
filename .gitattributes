@@ -1,0 +1,4 @@
+# Binary assets copied from the launch-asset pipeline
+*.woff2 binary
+*.avif binary
+*.webp binary

@@ -97,8 +97,11 @@ pub fn is_ours(lnk: &Path, install_dir: &Path) -> bool {
         return false;
     }
     let hay: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .copied()
+        .map(u16::from_le_bytes)
         .collect();
     let lower = |u: u16| -> u16 {
         if (u16::from(b'A')..=u16::from(b'Z')).contains(&u) {
@@ -111,8 +114,11 @@ pub fn is_ours(lnk: &Path, install_dir: &Path) -> bool {
     let hay_odd: Vec<u16> = bytes
         .get(1..)
         .unwrap_or(&[])
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .copied()
+        .map(u16::from_le_bytes)
         .collect();
     [hay, hay_odd].iter().any(|h| {
         h.windows(needle.len())

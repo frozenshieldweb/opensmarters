@@ -159,21 +159,17 @@ impl ManualClock {
     /// Moves the clock forward by `d`.
     pub fn advance(&self, d: Duration) {
         let delta = duration_to_millis(d);
-        let _ = self
-            .ms
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |ms| {
-                Some(ms.saturating_add(delta))
-            });
+        self.ms.update(Ordering::SeqCst, Ordering::SeqCst, |ms| {
+            ms.saturating_add(delta)
+        });
     }
 
     /// Moves the clock backward by `d` (to simulate a user changing the system time).
     pub fn rewind(&self, d: Duration) {
         let delta = duration_to_millis(d);
-        let _ = self
-            .ms
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |ms| {
-                Some(ms.saturating_sub(delta))
-            });
+        self.ms.update(Ordering::SeqCst, Ordering::SeqCst, |ms| {
+            ms.saturating_sub(delta)
+        });
     }
 }
 

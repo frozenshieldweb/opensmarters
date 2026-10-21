@@ -16,7 +16,7 @@ These rules apply to every contributor, human or agent. Read [BUILD_PROMPT.md](B
 
 ## Rules
 
-- **Toolchain:** Rust stable 1.97, edition 2024.
+- **Toolchain:** Rust 1.99.1, pinned in `rust-toolchain.toml` and the workflows (bump them together); edition 2024. The MSRV is 1.95 (`rust-version`).
 - **Gates:** before you report done, run `cargo fmt`, then `cargo clippy -p <crate> --all-targets -- -D warnings` and `cargo test -p <crate>`. All must pass.
 - **Errors:** use `thiserror` in libraries and `anyhow` only in binaries.
   - Do not `unwrap()` or `expect()` outside tests. Where a case is truly unreachable, say why in an `expect("…")` message.

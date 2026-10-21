@@ -166,7 +166,7 @@ impl Session {
                 if let Err(status) = info.check(Utc::now()) {
                     return Err(OpenFailure {
                         error: AppError::Provider(opensmarters_core::Error::Auth { status }),
-                        account: Some(AccountSummary::from_login(&info)),
+                        account: Some(Box::new(AccountSummary::from_login(&info))),
                     });
                 }
                 self.offline.store(false, Ordering::Relaxed);

@@ -195,7 +195,7 @@ fn decode_hex32(s: &str) -> Option<Zeroizing<[u8; 32]>> {
         _ => None,
     };
     let mut out = Zeroizing::new([0u8; 32]);
-    for (i, pair) in s.chunks_exact(2).enumerate() {
+    for (i, pair) in s.as_chunks::<2>().0.iter().enumerate() {
         out[i] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
     }
     Some(out)

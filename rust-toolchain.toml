@@ -1,3 +1,5 @@
 [toolchain]
-channel = "stable"
+# Pinned so local, CI and release builds use the same compiler (new clippy lints arrive
+# with each stable release). Bump it here and in .github/workflows/*.yml together.
+channel = "1.99.1"
 components = ["rustfmt", "clippy"]

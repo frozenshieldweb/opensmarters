@@ -307,7 +307,7 @@ fn decode_input(input: &[u8]) -> Cow<'_, str> {
 }
 
 fn decode_utf16(bytes: &[u8], to_u16: fn([u8; 2]) -> u16) -> String {
-    let units = bytes.chunks_exact(2).map(|c| to_u16([c[0], c[1]]));
+    let units = bytes.as_chunks::<2>().0.iter().copied().map(to_u16);
     char::decode_utf16(units)
         .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect()

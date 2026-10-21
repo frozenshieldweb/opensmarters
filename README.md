@@ -91,7 +91,7 @@ Your data lives in `%LOCALAPPDATA%\opensmarters\opensmarters\data`. Passwords ar
 
 Requirements:
 - Windows 10/11 x64
-- Rust stable 1.95 or newer (MSVC toolchain)
+- Rust 1.95 or newer (MSVC toolchain); `rust-toolchain.toml` pins 1.99.1, which rustup installs automatically
 - PowerShell
 
 ```powershell

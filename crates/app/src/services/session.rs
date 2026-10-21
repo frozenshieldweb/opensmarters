@@ -206,8 +206,9 @@ impl AccountSummary {
 pub struct OpenFailure {
     /// The error (plain-language via [`AppError::user_message`]).
     pub error: AppError,
-    /// Account info, when the provider answered (expired/banned accounts).
-    pub account: Option<AccountSummary>,
+    /// Account info, when the provider answered (expired/banned accounts). Boxed to keep
+    /// `Result<_, OpenFailure>` small.
+    pub account: Option<Box<AccountSummary>>,
 }
 
 impl From<AppError> for OpenFailure {
@@ -471,7 +472,7 @@ impl Session {
                                 error: AppError::Provider(opensmarters_core::Error::Auth {
                                     status,
                                 }),
-                                account: Some(summary),
+                                account: Some(Box::new(summary)),
                             });
                         }
                         account = Some(summary);
@@ -1699,7 +1700,7 @@ pub async fn test_xtream_login(
     if let Err(status) = info.check(Utc::now()) {
         return Err(OpenFailure {
             error: AppError::Provider(opensmarters_core::Error::Auth { status }),
-            account: Some(AccountSummary::from_login(&info)),
+            account: Some(Box::new(AccountSummary::from_login(&info))),
         });
     }
     Ok(info)

@@ -203,7 +203,7 @@ export const RELEASE = {
     sumsUrl: "TODO",
   },
   requirements: "Windows 10/11 x64 with a current graphics driver",
-  sourceUrl: "TODO (github.com/<org>/<repo>)",
+  sourceUrl: "https://github.com/frozenshieldweb/opensmarters",
   licence: "GPL-3.0-or-later",
   features: [
     { id: "live",     label: "Live TV and guide",            since: "0.1.0" },

@@ -52,7 +52,7 @@ Open <http://localhost:8000/>. Serve over HTTP: browsers don't run ES modules fr
 
    ```powershell
    powershell -ExecutionPolicy Bypass -File site\scripts\update-release.ps1 `
-       -BaseUrl "https://github.com/<org>/<repo>/releases/download/v{version}"
+       -BaseUrl "https://github.com/frozenshieldweb/opensmarters/releases/download/v{version}"
    ```
 
    It reads `dist/` (or `-Dist <folder>`): `opensmarters-<v>-windows-x64.zip`, and once
@@ -60,7 +60,8 @@ Open <http://localhost:8000/>. Serve over HTTP: browsers don't run ES modules fr
    every SHA-256, checks them against `SHA256SUMS.txt` / `*.sha256` (a mismatch stops it),
    reads the Authenticode status, writes `release.js` and rebuilds `index.html`.
    Without `-BaseUrl` the URLs stay `TODO`.
-3. Upload the same files to the place `-BaseUrl` points at, and commit `site/`.
+3. Upload the same files to the place `-BaseUrl` points at (the GitHub Release `v<version>`),
+   and commit `site/`.
 
 With an installer, the primary button downloads it and the zip becomes a secondary link.
 Without one (0.1.0), the primary button downloads the zip and says so. While `signed` is
@@ -87,14 +88,14 @@ GitHub Pages can't set headers, so there the page can be framed by another site.
 
 ## Before publishing (TODO for the owner)
 
-- `release.js`: `sourceUrl` (the public repository) and the download URLs (`-BaseUrl`).
-  Until they're set, the page shows a small "Links not set yet" notice and the links explain
-  themselves instead of going nowhere.
+- `release.js`: the download URLs (`-BaseUrl`, once the GitHub Release exists). Until
+  they're set, the page shows a small "Links not set yet" notice and the links explain
+  themselves instead of going nowhere. `sourceUrl` is set (`https://github.com/frozenshieldweb/opensmarters`).
 - `content.js`: `meta.siteUrl`, the page's public address (Open Graph wants absolute image
   URLs; until then they're relative and `og:url`/canonical are left out).
 - The "Licence", "Security" and "Build from source" links are derived from `sourceUrl`
   (`/blob/main/LICENSE`, `/blob/main/docs/SECURITY.md`, `#build-from-source`); check them
-  once the repository is public.
+  once `main` is pushed.
 
 ## Checks used while building it (dev tooling, not needed by the page)
 

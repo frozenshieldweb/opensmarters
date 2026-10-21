@@ -16,9 +16,9 @@ export const RELEASE = {
   },
   // END generated
   requirements: "Windows 10/11 x64 with a current graphics driver",
-  // TODO(owner): the public repository, e.g. "https://github.com/<org>/<repo>" (the README's
-  // "Build from source" section, the licence and SECURITY.md links are derived from it).
-  sourceUrl: "TODO (github.com/<org>/<repo>)",
+  // The public repository (the README's "Build from source" section, the licence and
+  // SECURITY.md links are derived from it).
+  sourceUrl: "https://github.com/frozenshieldweb/opensmarters",
   licence: "GPL-3.0-or-later",
   // Which version first ships each feature. A feature shows on the page (and responds in
   // the preview) only if since <= version. Labels live in content.js.

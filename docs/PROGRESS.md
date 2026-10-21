@@ -63,4 +63,4 @@ Workspace gates at the end of Phase 6: `cargo fmt`, clippy (`-D warnings`, with 
   - Builds are not Authenticode-signed.
   - CI actions are pinned by tag, not SHA.
   - The libmpv DLL comes from the pinned shinchiro build (see `docs/LIBMPV.md`).
-  - The repository URL in `Cargo.toml` and `packaging/THIRD_PARTY.md` (`github.com/opensmarters/opensmarters`) is a placeholder until the project is published.
+  - The public repository is <https://github.com/frozenshieldweb/opensmarters> (`Cargo.toml` `repository`, shown in Settings → About, and `packaging/THIRD_PARTY.md`). Builds made before this was set, including the 0.1.0 zip in `dist/`, still name the old placeholder `github.com/opensmarters/opensmarters`: rebuild before publishing.

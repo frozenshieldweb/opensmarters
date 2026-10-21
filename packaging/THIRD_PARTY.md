@@ -1,7 +1,7 @@
 # Third-party components bundled with opensmarters
 
 opensmarters is free software under the **GNU General Public License v3.0 or later**. See `LICENSE`.
-Its full source code is at <https://github.com/opensmarters/opensmarters>.
+Its full source code is at <https://github.com/frozenshieldweb/opensmarters>.
 
 ## libmpv (`libmpv-2.dll`): mpv, FFmpeg and libraries
 

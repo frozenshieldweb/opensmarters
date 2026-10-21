@@ -27,7 +27,7 @@
 
 .PARAMETER BaseUrl
     Where the files will be downloadable, e.g.
-    "https://github.com/<org>/<repo>/releases/download/v{version}". Default: TODO.
+    "https://github.com/frozenshieldweb/opensmarters/releases/download/v{version}". Default: TODO.
 
 .PARAMETER Date
     Release date (yyyy-MM-dd). Default: the release file's last-write date (UTC).
@@ -39,7 +39,7 @@
     powershell -ExecutionPolicy Bypass -File site\scripts\update-release.ps1
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File site\scripts\update-release.ps1 -Dist D:\builds\dist `
-        -BaseUrl "https://github.com/<org>/<repo>/releases/download/v{version}"
+        -BaseUrl "https://github.com/frozenshieldweb/opensmarters/releases/download/v{version}"
 #>
 [CmdletBinding()]
 param(

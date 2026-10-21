@@ -24,11 +24,11 @@ cargo fmt; cargo clippy -p opensmarters --all-targets --all-features -- -D warni
 | `src/app.rs` | `OpensmartersApp` (the `eframe::App`): frame loop, router, lifecycle hooks, zoom/TV mode, harness hook |
 | `src/screens/` | **One module per screen** + the [`Screen`](#3-the-screen-contract) trait and `AppCtx` (`screens/mod.rs`) |
 | `src/screens/shell.rs` | Side rail (§6.1; profile menu: Switch / Manage profiles, closed by `shell::close_menus`), `status_cluster` (clock, offline, a quiet unencrypted lock with a tooltip, "Not verified" account notice), `page_title` |
-| `src/screens/common/` | Logic shared by screens: `locks` (an item is locked when any of its categories is), `channel_list` (unlocked + sorted channel lists), `profile_data::delete_profile` (also forgets the profile's recent searches and remembered categories; use it wherever a profile is deleted), `unlock::UnlockFlow` (after a request builder's `AppError::Locked`: `verify_item` when the categories are unknown, then the PIN, `unlock_category`/`unlock_item`, retry; Home and Detail use it) |
+| `src/screens/common/` | Logic shared by screens: `categories` (Edit categories, H to hide with an undo toast, the region note; §5 Category management), `locks` (an item is locked when any of its categories is), `channel_list` (unlocked + sorted channel lists), `profile_data::delete_profile` (also forgets the profile's recent searches and remembered categories; use it wherever a profile is deleted), `unlock::UnlockFlow` (after a request builder's `AppError::Locked`: `verify_item` when the categories are unknown, then the PIN, `unlock_category`/`unlock_item`, retry; Home and Detail use it) |
 | `src/nav/` | `Route` (typed routes, `--route` syntax, `back_label`), `Router` (back stack), `Navigator` (`cx.nav`), `nav::back_label(ctx)` (what the page below is called: "‹ Movies" back buttons) |
 | `src/focus/` | The spatial focus engine (`engine.rs`, pure + unit-tested) and its egui glue (`mod.rs`) |
 | `src/ui/` | Design system: `theme` (tokens, fonts, visuals), `icons` (Phosphor), `paint` (focus ring/glow, scrims, cover-fit), `text` (capping, truncation, timecodes), `motion`, `layout` (breakpoints), `assets` (bundled art), `widgets/`. `theme`, `icons`, `paint` and `motion` live in the shared **`crates/afterglow`** crate (also used by the installer, ADR 0002) and are re-exported here unchanged |
-| `src/services/` | `Services` (runtime, store, redactor, images, paths, background-error queue, FIFO store writer `writer`), `fetch_queue` (bounded "what is on screen" request queue), `Session` (provider: catalogue, EPG, favourites, parental, playback requests; Phase-4 additions in child modules `session/*.rs`; parental locks at the point of use in `session/locks.rs`), `catalog` (`LiveChannel`, `LiveCatalog`, `Programme`), `images`, `epg`, `prefs` (app-wide preferences), `parental` (PIN length, lockout/wrong-PIN texts, "forgot PIN" check with a limiter persisted in the store: `forgot_pin_attempt`), `backup` (export/import without secrets or machine-local settings), `search_history` (recent searches per profile), `connections` (connection budget, Phase 7), `alerts` (app-wide prompts, §7.2), `reminders` (programme reminders and actions, §7.3), `demo` |
+| `src/services/` | `Services` (runtime, store, redactor, images, paths, background-error queue, FIFO store writer `writer`), `fetch_queue` (bounded "what is on screen" request queue), `Session` (provider: catalogue, EPG, favourites, parental, playback requests; Phase-4 additions in child modules `session/*.rs`; parental locks at the point of use in `session/locks.rs`), `catalog` (`LiveChannel`, `LiveCatalog`, `Programme`), `categories` (category management rules: `arrange`, `HiddenCategories`, regions; §5), `images`, `epg`, `prefs` (app-wide preferences), `parental` (PIN length, lockout/wrong-PIN texts, "forgot PIN" check with a limiter persisted in the store: `forgot_pin_attempt`), `backup` (export/import without secrets or machine-local settings), `search_history` (recent searches per profile), `connections` (connection budget, Phase 7), `alerts` (app-wide prompts, §7.2), `reminders` (programme reminders and actions, §7.3), `demo` |
 | `src/platform.rs` | Safe OS queries: Windows *Animation effects* (`UISettings.AnimationsEnabled` via the `windows` crate's WinRT projection) for reduced motion; `open_folder` / `open_url` through `launcher()` — the system launcher by **absolute path** (`%SystemRoot%\explorer.exe`, `/usr/bin/open`, `xdg-open`), never a bare name resolved via the current directory or `PATH` (SR-16) |
 | `src/window_state.rs` | Window size/position/maximised remembered between runs (store setting `app.window`, physical px, debounced; never for `--ephemeral`/`--window-size`) |
 | `src/playback/tracks.rs` | Preferred audio/subtitle languages (ISO 639 normalisation, track choice) |
@@ -135,6 +135,7 @@ back. `ui` receives a `Ui` whose max rect is `cx.layout.content` (right of the r
 |---|---|---|
 | Account | `settings/account.rs` | "Edit account" asks for the PIN |
 | Profiles | `settings/profiles.rs` | switch / add / edit / delete (PIN) |
+| Categories | `settings/categories.rs` | this profile, per section (Live TV; Movies and Series on Xtream): region chips, Show all / Hide all / Reset (confirm), filter, every category in the viewer's order (Enter shows/hides, Ctrl/Shift+↑/↓ and Ctrl+Home or the ⤒ ▲ ▼ buttons reorder, padlock on locked ones, "Hidden by region"); applied at once, last change undoable (Undo or Ctrl+Z). Browse screens open it on their section |
 | Playback | `settings/playback.rs` | this profile (save + reconnect); simultaneous streams for this profile (Auto = the account's limit, or 1–4; applied at once to `session.connections()`); every profile: languages, hardware decoding, Buffering (Auto/Small/Standard/Large), Rewind live TV (Off/15/30/60 min), reset the extra buffering of channels that stalled (all applied at once) |
 | Parental control | `settings/parental.rs`, `pin_flow.rs` | the page opens only with the PIN; set/change (4–8 digits, confirm) / turn off; locked words; per-category Auto/Lock/Allow; forgot PIN |
 | Appearance | `settings/appearance.rs` | TV mode, UI size (desktop), motion (Follow Windows / Reduced / Full) |
@@ -155,7 +156,7 @@ no profile shows `Route::Welcome` (explanation → onboarding, or restore a back
 `--route` and `Route::parse` share one syntax: `home`, `live`, `live:category=<id|all|favourites>`,
 `guide`, `movies[:category=<id>]`, `series[:category=<id>]`, `detail:movie=<id>`,
 `detail:series=<id>`, `catchup[:stream=<id>]`, `search[:q=<text>]`, `favourites`,
-`settings[:account|profiles|playback|parental|appearance|language|storage|privacy|about]`, `welcome`, `onboarding`,
+`settings[:account|profiles|playback|categories|parental|appearance|language|storage|privacy|about]`, `welcome`, `onboarding`,
 `profiles`, `player:live=<channel id or number>`, `multiscreen`.
 
 Rules (unit-tested in `nav/router.rs`):
@@ -180,6 +181,7 @@ Rules (unit-tested in `nav/router.rs`):
 | Requests | `live_request(&channel, Option<ZapContext>)`, `movie_request(..)`, `episode_request(..)`, `catchup_request(&channel, &ArchiveProgramme, resume)`, `resume_request(&PlaybackProgress)` — all return `AppError::Locked(LockedItem)` for items of locked categories (see Parental) |
 | Favourites | `is_favourite(kind, id)`, `favourites(kind)` → `Arc<HashSet<String>>` (shared, no copy), `favourites_len(kind)`, `favourites_generation()` (bumped on every change: use it to know when to rebuild a filtered list), `toggle_favourite(kind, id, snapshot)` (optimistic, persisted in order), `reload_favourites()`. `favourite_ids(kind)` copies the set: kept for compatibility, don't call it every frame |
 | Parental | `parental_enabled()`, `pin_length()` (4–8: create PIN pads with `PinPad::new(id, session.pin_length())`, or use `widgets::PinPrompt`), `is_category_locked(kind, &id, name)`, `is_selection_locked(..)`, `unlock_category(..)`, `reload_parental()` (call after Settings → Parental changes; wipes the image disk cache when a PIN was just set). **Items** (`session/locks.rs`): `is_item_locked(kind, &[CategoryId])` (every category counts), `categories_lock(kind, &cats)` / `item_lock(kind, id, Option<&cats>)` → `ItemLock::{Unlocked, Locked{category, name}, Unknown}`, `locked_category(..)`, `is_locked(&item)`, `filter_unlocked(items)`, `retain_unlocked(&mut vec)` for any `Lockable` (channels, films, series, favourites, resume points, recent channels), `check_unlocked(..)`, `verify_item(kind, id).await`, `unlock_item(kind, id)`, `relock_all()`, `note_activity()`, `category_name(kind, &id)` |
+| Categories (`session/categories.rs`) | `category_prefs(kind)` → `Arc<CategoryPrefs>` (shared, no copy), `category_prefs_generation()` (bumped on every change: rebuild filtered lists when it moves), `hidden_categories(kind, &cats)` → `HiddenCategories`, `change_category_prefs(kind, what, change, write)` (in memory at once, store write on the FIFO writer, then read back), `reload_category_prefs()` |
 | Cache | `cached(key, ttl, fetch)` (generic SWR), `refresh()` (drop everything; `SessionManager::reopen_fresh(&services, &session)` awaits it and then reopens the profile — use that for "Refresh") |
 | Movies / series (`session/vod.rs`) | `movie_progress(id)`, `movie_progress_map()`, `series_watch(id)` → `SeriesWatch`, `set_episode_watched(..)`, `series_episode_request(..)` (title "Series · Episode", season/number from the info), `last_vod_category(kind)` / `remember_vod_category(kind, id)`, `resume_thresholds()` |
 
@@ -207,6 +209,34 @@ set (fail closed). Lists use `filter_unlocked`/`retain_unlocked` (Home rails, Fa
 same rule. **Re-lock policy:** unlocks are never stored; they end with the session
 (profile switch, restart) and expire after 30 min without user input
 (`SessionManager::poll` reports input every frame); `relock_all()` locks at once.
+
+### Category management (Settings › Categories)
+
+Per profile and section (Live TV, Movies, Series) the viewer can **hide** categories,
+**reorder** them and **filter by region** (the tag of the category name, `split_tag`:
+"FR | Sports" → `FR`; untagged = "No tag"). Defaults change nothing. Stored in
+`category_prefs` / `category_regions` (`store.categories()`, schema v3; ids validated like
+every item id, at most 5 000 rows per section, included in backups), cached by the session
+(above). The rules are one pure module, `services::categories`:
+
+- `arrange(categories, prefs)`: the viewer's ordered ids first, then provider order (new
+  provider categories appear at the end), without hidden ones and, while a region filter
+  is set, without other regions. `editor_order` keeps every category (the editor).
+- `HiddenCategories` / `hides_item`: an item is hidden only when it has a category and
+  **every** one of them is hidden (a channel in a hidden and a visible category stays).
+
+| Where | Effect |
+|---|---|
+| Live TV, Guide chips, multiscreen picker | arranged categories; "All" (and its count, number entry, tile lists) leaves hidden-only channels out; Favourites unchanged; a hidden selection falls back to All |
+| Movies / Series | arranged column/chips; "All" leaves hidden-only items out; a hidden route or remembered category falls back like a locked one |
+| Catch-up, Search, Home | channels and results only in hidden categories are left out; Home's "first few categories" are the first visible ones |
+| Favourites, Recordings, Settings › Parental | unchanged |
+
+Shortcuts (`screens::common::categories`): **H** on a focused category row or chip hides
+it at once (`widgets::UndoToast` for 8 s, Ctrl+Z), **Edit categories** at the end of the
+list opens the editor on that section, and while a region filter is set a quiet
+"Showing FR, CA · Edit" line sits under the column header. Hidden is a viewing choice, not
+a lock: parental checks never read it (a hidden locked category simply isn't listed).
 
 ### Real-provider scale (measured on a real panel — design for it)
 
@@ -581,7 +611,7 @@ Dev-only environment switches for `--demo`:
 
 | Variable | Effect |
 |---|---|
-| `OPENSMARTERS_DEMO_QUIRKS=huge,timeshift-smarters-only` | fake-panel quirks (`slow` = 0–3 s per request, to see loading skeletons; `huge` = 50 000 channels; `timeshift-503` = every catch-up stream fails like the real panel; `timeshift-smarters-only` = only the Smarters start format plays, to exercise the fallback; `stall` = live `.ts` streams send 40 % of the clip then hang open, to exercise stall detection) |
+| `OPENSMARTERS_DEMO_QUIRKS=huge,timeshift-smarters-only` | fake-panel quirks (`slow` = 0–3 s per request, to see loading skeletons; `huge` = 50 000 channels; `timeshift-503` = every catch-up stream fails like the real panel; `timeshift-smarters-only` = only the Smarters start format plays, to exercise the fallback; `stall` = live `.ts` streams send 40 % of the clip then hang open, to exercise stall detection; `tagged-categories` = most category names carry a region tag, "UK \| News", "[CA] Kids", "DE: Kino", to try category management) |
 | `OPENSMARTERS_DEMO_FAVOURITES=1` | seeds a few synthetic favourites (live, films, series) |
 | `OPENSMARTERS_DEMO_XMLTV=1` | sets the demo profile's EPG URL override to the panel's `xmltv.xml.gz` (guide on the XMLTV path) |
 | `OPENSMARTERS_DEMO_REMINDERS=notify:70,switch:25,missed:300` | sets synthetic reminders on the first demo channels, starting that many seconds from now (`missed:` = started that long ago), to see the prompts fire |
@@ -606,7 +636,7 @@ Tokens, icons, paint and motion come from `crates/afterglow` (re-exported as `cr
   (truncate with ellipsis to N rows), `overline`, `timecode`, `duration_short`, `remaining`.
 - **Widgets** (`ui::widgets`): `Button` (primary/secondary/ghost/danger, large/small, icon,
   trailing, `scroll_margin` to bring surroundings into view on focus), `IconButton` (round; `.primary()` for the OSD play), `Chip`, `Segmented`,
-  `Toggle`, `Tabs`, `chip::tag`, `chip::ChipRow` (sideways chip row with edge fades), `TextField` (label, password + reveal, error; it lays out
+  `Toggle`, `Tabs`, `chip::tag`, `chip::ChipRow` (sideways chip row with edge fades), `UndoToast` (a toast-styled card with an Undo button that the screen draws), `TextField` (label, password + reveal, error; it lays out
   label + field vertically, so wrap it in `ui.vertical` inside a horizontal row),
   `SearchField`, `Callout` (+ `Callout::unencrypted()`), `Badge::{live, live_dot, pill}`,
   `PosterCard`, `BackdropCard`, `ChannelTile`, `ChannelLogo` (plate / monogram / fallback),

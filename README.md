@@ -20,6 +20,7 @@ opensmarters ships with **no channels, no content and no provider**. It plays wh
   - detail pages and seasons;
   - **resume**, **Continue watching**, and **next episode**.
 - **Search** across channels, films, series and cached programmes, plus **Favourites** with reordering.
+- **Category management**: per profile, hide the categories you never watch, put the rest in your own order, and show only some regions ("FR | Sports", "[UK] News"). Press H on a category to hide it, or open Settings › Categories.
 - **Player** (libmpv, hardware decoding):
   - audio and subtitle tracks, aspect and zoom presets;
   - stall detection with bounded reconnects;

@@ -151,3 +151,29 @@ rename_from = "Source"
 unicodes = "latin"
 licence = "assets/fonts/OFL-SourceSans3.txt"
 exports = [{ path = "web/fonts/afterglow-sans-latin.woff2", max_kb = 70 }]
+
+# --- Landing page (site/): Phosphor icon subsets -----------------------------------------
+# BEGIN site icons (added for docs/LAUNCH_PROMPT.md Part A; owner: the landing page)
+# Phosphor (MIT, the app's icon set, DESIGN.md §4.8): only the glyphs the page uses, as two
+# WOFF2 subsets (Regular at rest, Fill for on/selected states). No renaming needed (MIT, no
+# reserved name). Code points come from crates/app/src/ui/icons/glyphs.rs; the page maps
+# them by name in site/icons.js.
+
+[[output]]
+kind = "font"
+id = "icons-web-regular"
+src = "assets/fonts/Phosphor.ttf"
+family = "Phosphor"
+unicodes = "U+E036,U+E038,U+E092,U+E0A2,U+E0AE,U+E0F2,U+E136,U+E138,U+E13A,U+E13C,U+E182,U+E184,U+E1A0,U+E1A8,U+E1BC,U+E1CA,U+E20C,U+E224,U+E272,U+E2A8,U+E2C2,U+E2CE,U+E2D6,U+E2D8,U+E2E2,U+E308,U+E30C,U+E330,U+E39E,U+E3D0,U+E3EE,U+E40C,U+E44A,U+E45A,U+E464,U+E4E0,U+E4F6,U+E58C,U+E5A2,U+E610,U+E626,U+E628,U+E6A8,U+E792,U+E958,U+EAE6,U+EAE8"
+licence = "assets/fonts/LICENSE-Phosphor.txt"
+exports = [{ path = "web/fonts/phosphor-regular-subset.woff2", max_kb = 16 }]
+
+[[output]]
+kind = "font"
+id = "icons-web-fill"
+src = "assets/fonts/Phosphor-Fill.ttf"
+family = "Phosphor-Fill"
+unicodes = "U+E2A8,U+E308,U+E39E,U+E3D0,U+E3EE,U+E44A,U+E5A2,U+EAE6"
+licence = "assets/fonts/LICENSE-Phosphor.txt"
+exports = [{ path = "web/fonts/phosphor-fill-subset.woff2", max_kb = 6 }]
+# END site icons

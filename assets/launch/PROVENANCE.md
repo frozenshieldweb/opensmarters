@@ -25,5 +25,7 @@ No asset contains text except the typeset social image (set from the OFL fonts, 
 | `assets/launch/web/favicon.svg` | n/a | 1 | `assets/icon/icon.svg` | copy of `assets/icon/icon.svg` |
 | `assets/launch/web/fonts/fraunces-latin.woff2` | n/a | 63 | `assets/fonts/Fraunces-Variable.ttf` | pinned SOFT=100, WONK=0; subset latin, hinting removed; WOFF2 |
 | `assets/launch/web/fonts/afterglow-sans-latin.woff2` | n/a | 47 | `assets/fonts/SourceSans3-Variable.ttf` | subset latin, hinting removed; renamed to “Afterglow Sans” (Reserved Font Name “Source” removed); WOFF2 |
+| `assets/launch/web/fonts/phosphor-regular-subset.woff2` | n/a | 5 | `assets/fonts/Phosphor.ttf` | subset U+E036,U+E038,U+E092,U+E0A2,U+E0AE,U+E0F2,U+E136,U+E138,U+E13A,U+E13C,U+E182,U+E184,U+E1A0,U+E1A8,U+E1BC,U+E1CA,U+E20C,U+E224,U+E272,U+E2A8,U+E2C2,U+E2CE,U+E2D6,U+E2D8,U+E2E2,U+E308,U+E30C,U+E330,U+E39E,U+E3D0,U+E3EE,U+E40C,U+E44A,U+E45A,U+E464,U+E4E0,U+E4F6,U+E58C,U+E5A2,U+E610,U+E626,U+E628,U+E6A8,U+E792,U+E958,U+EAE6,U+EAE8, hinting removed; WOFF2 |
+| `assets/launch/web/fonts/phosphor-fill-subset.woff2` | n/a | 1 | `assets/fonts/Phosphor-Fill.ttf` | subset U+E2A8,U+E308,U+E39E,U+E3D0,U+E3EE,U+E44A,U+E5A2,U+EAE6, hinting removed; WOFF2 |
 
 Fonts: `fraunces-latin.woff2` is a subset of Fraunces (SIL OFL 1.1, no Reserved Font Name). `afterglow-sans-latin.woff2` is a **Modified Version of Source Sans 3** (SIL OFL 1.1): subset and renamed, because Source Sans 3 reserves the name “Source”. Both licence texts ship next to the WOFF2 files.

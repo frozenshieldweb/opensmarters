@@ -69,3 +69,4 @@ Every export has a `max_kb` budget. The build lists everything over budget and e
 | Installer | `installer/panel@1x.jpg`, `panel@2x.jpg` (right-hand art for the 720×460 pt window), `installer/ready.png` |
 | Web | `web/hero-{1920,1280,768}.{avif,webp,jpg}`, `web/og-image.jpg` (1200×630), `web/ready.png`, `web/favicon.svg`, `web/favicon-32.png`, `web/apple-touch-icon.png`, `web/icon-512-maskable.png` |
 | Web fonts | `web/fonts/fraunces-latin.woff2`, `web/fonts/afterglow-sans-latin.woff2` (+ OFL texts) |
+| Web icons | `web/fonts/phosphor-regular-subset.woff2`, `web/fonts/phosphor-fill-subset.woff2` (+ MIT licence): only the Phosphor glyphs the landing page uses |

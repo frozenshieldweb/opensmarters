@@ -10,8 +10,10 @@ export const RELEASE = {
   date: "2026-10-21",
   signed: false,
   downloads: {
-    sumsFile: "TODO",
-    sumsUrl: "TODO",
+    installer: { file: "opensmarters-0.2.0-windows-x64-setup.exe", url: "https://github.com/frozenshieldweb/opensmarters/releases/download/v0.2.0/opensmarters-0.2.0-windows-x64-setup.exe", sizeMB: 54, sha256: "38ab9991d3c94160e5d6ef5179e51d15305c6af7c5adc53e24c5236a11710eb9" },
+    portable: { file: "opensmarters-0.2.0-windows-x64.zip", url: "https://github.com/frozenshieldweb/opensmarters/releases/download/v0.2.0/opensmarters-0.2.0-windows-x64.zip", sizeMB: 59.9, sha256: "7416652be6b2b555a5ecdf583dea1c18240150f882d1a0d8bd10c325154a77d9" },
+    sumsFile: "SHA256SUMS.txt",
+    sumsUrl: "https://github.com/frozenshieldweb/opensmarters/releases/download/v0.2.0/SHA256SUMS.txt",
   },
   // END generated
   requirements: "Windows 10/11 x64 with a current graphics driver",

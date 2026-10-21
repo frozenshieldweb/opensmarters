@@ -22,7 +22,7 @@ url = "2.5.4"
 egui = { version = "0.37", default-features = false, optional = true }
 egui_glow = { version = "0.37", default-features = false, optional = true }
 # Must match the glow version egui_glow 0.37 uses.
-glow = { version = "0.17", optional = true }
+glow = { version = "0.18", optional = true }
 
 [dev-dependencies]
 anyhow = "1"

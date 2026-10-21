@@ -123,7 +123,7 @@ def generate(ids: list[str], count: int | None) -> None:
         log = out_dir / f"{stamp}-codex.log"
         print(f"[{job['id']}] codex exec ({version}), {n} candidates…", flush=True)
         start = time.time()
-        with open(log, "w", encoding="utf-8") as lf:
+        with open(log, "w", encoding="utf-8", newline="\n") as lf:
             proc = subprocess.run(
                 [exe, "exec", "--skip-git-repo-check", "--sandbox", "read-only",
                  *EXTRA_ARGS, "-C", str(scratch), "-"],
@@ -143,7 +143,7 @@ def generate(ids: list[str], count: int | None) -> None:
             "candidates": [c.name for c in copies],
             "originals": [str(p) for p in images],
         }
-        (out_dir / f"{stamp}-meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        (out_dir / f"{stamp}-meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8", newline="\n")
         if copies:
             sheet = out_dir / f"{stamp}-contact.jpg"
             contact_sheet(copies, sheet)
@@ -180,7 +180,7 @@ def choose(asset_id: str, candidate: str) -> None:
         "brief_sha256": meta.get("brief_sha256"),
         "chosen": dt.date.today().isoformat(),
     }
-    dst.with_suffix(".json").write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+    dst.with_suffix(".json").write_text(json.dumps(sidecar, indent=2), encoding="utf-8", newline="\n")
     print(f"chose {src.name} → {dst.relative_to(ROOT)} (+ provenance sidecar)")
 
 

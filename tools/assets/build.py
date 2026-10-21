@@ -204,7 +204,7 @@ def build_html(o: dict, out: Path, m: dict) -> tuple[list[Path], str]:
         html = html.replace(k, v)
     BUILD.mkdir(parents=True, exist_ok=True)
     page = BUILD / f"{o['id']}.html"
-    page.write_text(html, encoding="utf-8")
+    page.write_text(html, encoding="utf-8", newline="\n")
     shot = BUILD / f"{o['id']}.png"
     if shot.exists():
         shot.unlink()
@@ -259,10 +259,12 @@ def build_font(o: dict, out: Path) -> tuple[list[Path], str]:
     from fontTools.ttLib import TTFont
     from fontTools.varLib import instancer
 
-    font = TTFont(ROOT / o["src"])
+    # recalcTimestamp=False keeps head.modified from the source: reproducible output.
+    font = TTFont(ROOT / o["src"], recalcTimestamp=False)
     steps = []
     if pin := o.get("pin"):
         font = instancer.instantiateVariableFont(font, dict(pin), inplace=False)
+        font.recalcTimestamp = False
         steps.append("pinned " + ", ".join(f"{k}={v}" for k, v in pin.items()))
     opts = subset.Options()
     opts.layout_features = ["*"]
@@ -411,7 +413,7 @@ def write_provenance(out: Path, m: dict, rows: list[tuple[str, ...]]) -> None:
         "licence texts ship next to the WOFF2 files.",
         "",
     ]
-    (out / "PROVENANCE.md").write_text("\n".join(lines), encoding="utf-8")
+    (out / "PROVENANCE.md").write_text("\n".join(lines), encoding="utf-8", newline="\n")
 
 
 if __name__ == "__main__":

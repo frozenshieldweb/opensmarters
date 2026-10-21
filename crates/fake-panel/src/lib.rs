@@ -52,6 +52,7 @@
 //! | `GET /timeshift/{u}/{p}/{minutes}/{start}/{id}.ts\|.m3u8` | `start` = `YYYY-MM-DD:HH-MM` **or** `YYYY-MM-DD:HH:MM:SS` |
 //! | `GET /streaming/timeshift.php?username&password&stream&start&duration` | Same, query form |
 //! | `GET /__debug/last-requests[?limit=&path_prefix=]`, `DELETE` to clear | [`RequestRecord`] JSON |
+//! | `GET /__updates/releases/latest[?tag=&status=&draft=&prerelease=&big=&delay_ms=]` | A GitHub-shaped "latest release" for the app's update check (default tag: this version with the minor bumped, e.g. `v0.3.0`); `status=429` answers with that error, `big=1` with ~1 MiB, `delay_ms` waits first |
 //!
 //! Stream URLs validate credentials (403), ids (404) and media availability (503 with a
 //! message, e.g. when ffmpeg is missing).
@@ -95,6 +96,7 @@ mod server;
 mod shape;
 mod streams;
 mod time;
+mod updates;
 pub mod users;
 
 use std::net::{Ipv4Addr, SocketAddr};

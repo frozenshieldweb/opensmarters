@@ -5,7 +5,8 @@
 //!
 //! On top of that the app:
 //! - drops machine-local settings ([`LOCAL_ONLY_KEYS`]: PIN length, window position,
-//!   search history, last profile) from exports, and ignores them in imported files, so
+//!   search history, last profile, update-check state) from exports, and ignores them in
+//!   imported files, so
 //!   a backup never changes how the local PIN pad works or where the window opens;
 //! - caps the file size ([`MAX_BACKUP_BYTES`]) before parsing;
 //! - lists the imported profiles that need a password / playlist address
@@ -25,6 +26,8 @@ pub const LOCAL_ONLY_KEYS: &[&str] = &[
     "app.window",
     "app.search_history",
     "last_profile",
+    // Update check: last check time, latest version seen, the version dismissed.
+    "app.updates",
 ];
 
 /// Largest backup file read (the store refuses more than 64 MiB anyway).
@@ -216,6 +219,20 @@ mod tests {
             .set(&crate::services::prefs::TV_MODE, &true)
             .unwrap();
         crate::services::search_history::record(&s, p.id, "late night quiz").unwrap();
+        s.settings()
+            .set(
+                &crate::services::updates::STATE,
+                &crate::services::updates::UpdateState {
+                    last_success: Some(1_800_000_000),
+                    latest_seen: Some("7.7.7".into()),
+                    dismissed: Some("7.7.7".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.settings()
+            .set(&crate::services::prefs::CHECK_UPDATES_AUTOMATICALLY, &true)
+            .unwrap();
         s.profiles().mark_used(p.id).unwrap();
         (s, p.id)
     }
@@ -235,9 +252,14 @@ mod tests {
             "app.parental.pin_length",
             "app.search_history",
             "last_profile",
+            "app.updates",
+            "7.7.7",
+            "1800000000",
         ] {
             assert!(!json.contains(secret), "export leaks {secret:?}");
         }
+        // The user's choice to check automatically is a preference: it travels.
+        assert!(json.contains("app.check_updates_automatically"));
         // Non-secret data is there.
         assert!(json.contains("Living room"));
         assert!(json.contains("News One"));
@@ -317,10 +339,19 @@ mod tests {
         assert!(import(&dst, r#"{"format":"something-else","version":1}"#).is_err());
         // Local-only keys in a hand-made file are ignored.
         let doc = r#"{"format":"opensmarters-export","version":1,"exported_at":0,
-            "settings":{"app.parental.pin_length":4,"app.window":{"x":1}},"profiles":[],
+            "settings":{"app.parental.pin_length":4,"app.window":{"x":1},
+                "app.updates":{"dismissed":"9.9.9"}},"profiles":[],
             "parental_keywords":[]}"#;
         let r = import(&dst, doc).unwrap();
         assert_eq!(r.settings_applied, 0);
         assert_eq!(pin_length(&dst), 6);
+        assert_eq!(
+            dst.settings()
+                .get(&crate::services::updates::STATE)
+                .unwrap()
+                .dismissed,
+            None,
+            "a backup can't dismiss an update"
+        );
     }
 }

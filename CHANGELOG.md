@@ -4,6 +4,9 @@ All notable changes to opensmarters. Versions follow [Semantic Versioning](https
 
 ## [Unreleased]
 
+### Added
+- **Check for updates** in Settings › About. It asks GitHub for the latest version number and, when there is a newer one, offers **Get the update** (opens the release page in your browser) or **Not now**. The app never downloads or installs anything: you run the new setup yourself, and it keeps your accounts, favourites and settings. A quiet **Update available** sign next to the clock leads to it. **Check automatically** (off by default) asks once a week. GitHub sees your IP address; nothing else is sent.
+
 ### Fixed
 - **Multiscreen:** two channels now stay side by side (1×2) at full size. The grid only grows to 2×2 when you add a third channel, with the new **Add channel** button or the A key, and goes back if you cancel. Before, an empty "Add a channel" slot forced 2×2 as soon as two channels played.
 - **The display no longer turns off during a film.** While video plays the display stays on (and the PC awake). While a recording or download runs, or a scheduled recording starts within 15 minutes, the PC stays awake but the display may turn off. Paused or stopped, Windows' normal power settings apply.

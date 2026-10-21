@@ -55,7 +55,7 @@ Everything a provider sends (names, artwork, EPG, playlists, stream links) is un
 - **Stream links are checked.** A scheme allowlist applies before anything reaches mpv, and the protocol whitelist covers HLS sub-requests.
 - **Secrets stay in Windows Credential Manager.** Passwords and playlist URLs never go in files or logs, and every log line is redacted.
 - **TLS is always verified.** `https`→`http` redirects are refused, and plain-HTTP accounts are flagged.
-- **No telemetry.** Movie-database (TMDB) lookups are off by default.
+- **No telemetry.** The app talks to your provider and nothing else, unless you ask: movie-database (TMDB) lookups are off by default, and GitHub is asked for the latest version number only when you choose **Check for updates** (or turn on the weekly check). GitHub sees your IP address; nothing else is sent, and nothing is downloaded or installed.
 - **Hostile input is bounded.** Size, memory and time limits apply to playlists, EPG and artwork. The parsers are fuzzed.
 
 The threat model, mitigations and review findings are in [docs/SECURITY.md](docs/SECURITY.md).
@@ -64,7 +64,7 @@ The threat model, mitigations and review findings are in [docs/SECURITY.md](docs
 
 Get the latest version from [Releases](https://github.com/frozenshieldweb/opensmarters/releases/latest) or the [download page](https://frozenshieldweb.github.io/opensmarters/).
 
-Download `opensmarters-<version>-windows-x64-setup.exe` and run it. It installs for your Windows account only (no administrator rights) into `%LOCALAPPDATA%\Programs\opensmarters` and adds a Start menu shortcut; **Options** picks another folder or adds a desktop shortcut. Running a newer setup updates in place. Remove it from Windows Settings → Apps: your data and saved passwords stay unless you tick the boxes, and recordings in your Videos folder always stay. For scripted installs, `--quiet` (see `--help`).
+Download `opensmarters-<version>-windows-x64-setup.exe` and run it. It installs for your Windows account only (no administrator rights) into `%LOCALAPPDATA%\Programs\opensmarters` and adds a Start menu shortcut; **Options** picks another folder or adds a desktop shortcut. Running a newer setup updates in place (Settings › About › **Check for updates** tells you when there is one; the app never downloads it for you). Remove it from Windows Settings → Apps: your data and saved passwords stay unless you tick the boxes, and recordings in your Videos folder always stay. For scripted installs, `--quiet` (see `--help`).
 
 Or use the portable zip: download `opensmarters-<version>-windows-x64.zip`, unzip it anywhere and run `opensmarters.exe`, keeping `libmpv-2.dll` next to it.
 

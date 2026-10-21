@@ -13,7 +13,7 @@
 //! | Storage & data | `storage.rs` | cache usage/clear/cap, history, backup export/import, data folder, logs |
 //! | Recordings & downloads | `recordings.rs` | recordings folder, padding, downloads, clips |
 //! | Privacy & security | `privacy.rs` | plain-language privacy facts, optional TMDB key |
-//! | About | `about.rs` (+ `licences.rs`) | versions, GPL notice, source, third-party licences |
+//! | About | `about.rs` (+ `licences.rs`) | check for updates (notify only), versions, GPL notice, source, third-party licences |
 //!
 //! Pages get [`SettingsPageUi::on_enter`] when shown and [`SettingsPageUi::on_leave`] when
 //! another page is chosen or Settings closes (the parental page locks itself again), and

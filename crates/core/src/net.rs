@@ -199,15 +199,43 @@ impl HttpClient {
     /// [`Error::InvalidUrl`], [`Error::Timeout`], [`Error::Network`],
     /// [`Error::Http`] for non-2xx statuses, [`Error::TooLarge`].
     pub async fn get_bytes(&self, url: &Url) -> Result<Vec<u8>, Error> {
+        self.fetch(url, None).await
+    }
+
+    /// Like [`HttpClient::get_bytes`], with an `Accept` header (e.g.
+    /// `application/vnd.github+json` for GitHub's API). Nothing else is added to the
+    /// request.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidConfig`] if `accept` isn't a valid header value, else as
+    /// [`HttpClient::get_bytes`].
+    pub async fn get_bytes_accept(&self, url: &Url, accept: &str) -> Result<Vec<u8>, Error> {
+        let value =
+            reqwest::header::HeaderValue::from_str(accept).map_err(|_| Error::InvalidConfig {
+                reason: "the Accept value contains characters that are not allowed in an HTTP \
+                         header"
+                    .into(),
+            })?;
+        self.fetch(url, Some(value)).await
+    }
+
+    async fn fetch(
+        &self,
+        url: &Url,
+        accept: Option<reqwest::header::HeaderValue>,
+    ) -> Result<Vec<u8>, Error> {
         if url.scheme() != "http" && url.scheme() != "https" {
             return Err(Error::invalid_url(
                 "only http and https URLs can be downloaded",
             ));
         }
         tracing::debug!(url = %self.redactor.redact(url.as_str()), "GET");
-        let mut response = self
-            .inner
-            .get(url.clone())
+        let mut request = self.inner.get(url.clone());
+        if let Some(accept) = accept {
+            request = request.header(reqwest::header::ACCEPT, accept);
+        }
+        let mut response = request
             .send()
             .await
             .map_err(|e| request_error(&e, &self.redactor))?;
@@ -337,6 +365,16 @@ mod tests {
             &u("http://b.example.com/")
         ));
         assert!(!HttpConfig::default().allow_https_downgrade);
+    }
+
+    #[tokio::test]
+    async fn rejects_a_bad_accept_value() {
+        let http = HttpClient::new(&HttpConfig::default(), Redactor::new()).unwrap();
+        let url = Url::parse("https://example.invalid/").unwrap();
+        assert!(matches!(
+            http.get_bytes_accept(&url, "a\r\nX-Injected: 1").await,
+            Err(Error::InvalidConfig { .. })
+        ));
     }
 
     #[test]

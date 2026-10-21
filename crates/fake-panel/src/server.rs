@@ -18,7 +18,7 @@ use crate::images::ImageCache;
 use crate::media::MediaLibrary;
 use crate::rng::mix;
 use crate::shape::Shape;
-use crate::{Quirks, api, debug, epg, images, m3u, streams, users};
+use crate::{Quirks, api, debug, epg, images, m3u, streams, updates, users};
 
 /// Everything a handler needs.
 #[derive(Debug)]
@@ -117,7 +117,8 @@ async fn index(AxState(st): AxState<AppState>) -> Response {
          GET /live/{u}/{p}/{id}.ts|.m3u8   /movie/{u}/{p}/{id}.{ext}   /series/{u}/{p}/{id}.{ext}\n\
          GET /timeshift/{u}/{p}/{minutes}/{YYYY-MM-DD:HH-MM | YYYY-MM-DD:HH:MM:SS}/{id}.ts|.m3u8\n\
          GET /streaming/timeshift.php?username=&password=&stream=&start=&duration=\n\
-         GET|DELETE /__debug/last-requests\n\nusers:\n",
+         GET|DELETE /__debug/last-requests\n\
+         GET /__updates/releases/latest[?tag=&status=&draft=&prerelease=&big=&delay_ms=]\n\nusers:\n",
     );
     for u in users::USERS {
         s.push_str(&format!(
@@ -164,6 +165,7 @@ pub(crate) fn router(state: AppState) -> Router {
             "/__debug/last-requests",
             get(debug::list).delete(debug::clear),
         )
+        .route("/__updates/releases/latest", get(updates::latest))
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(state.clone(), debug::record))
         .with_state(state)

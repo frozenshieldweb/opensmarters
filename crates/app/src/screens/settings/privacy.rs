@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Settings › Privacy & security: plain-language facts (where data lives, Credential
-//! Manager, no telemetry, what the HTTP warning means, how provider data is handled) and
+//! Manager, no telemetry, when GitHub is asked about updates, what the HTTP warning
+//! means, how provider data is handled) and
 //! the optional TMDB enrichment (off by default; the user's own API key, kept in the
 //! keychain; checked against TMDB only when the user asks).
 
@@ -258,7 +259,16 @@ impl SettingsPageUi for PrivacyPage {
                 "No tracking, ever.",
                 "No telemetry, analytics, ads or crash reports. opensmarters only connects to \
                  your provider's server, the stream and image addresses your provider gives, \
-                 and TMDB if you turn it on below."
+                 TMDB if you turn it on below, and GitHub when you check for updates."
+                    .to_owned(),
+            ),
+            (
+                CalloutKind::Info,
+                "Update checks:",
+                "opensmarters asks GitHub (api.github.com) for the latest version number only \
+                 when you choose Check for updates in Settings › About, or once a week if you \
+                 turn on Check automatically there (off by default). GitHub sees your IP \
+                 address; nothing else is sent, and nothing is downloaded or installed."
                     .to_owned(),
             ),
             (

@@ -41,6 +41,10 @@ pub fn start(rt: &tokio::runtime::Runtime, store: &Store, set_pin: bool) -> anyh
         ..fake_panel::Config::default()
     };
     let panel = rt.block_on(fake_panel::spawn(config))?;
+    // Dev only (harness builds): `OPENSMARTERS_UPDATE_URL=fake[?tag=v0.3.0]` points the
+    // update check at the panel's GitHub-shaped `/__updates/releases/latest`.
+    #[cfg(feature = "harness")]
+    crate::services::updates::set_demo_panel(panel.base_url());
     let profile = store.profiles().create(NewProfile {
         name: "Demo provider".into(),
         source: NewProfileSource::Xtream {

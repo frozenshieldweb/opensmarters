@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! App preferences (Settings → Appearance / Language / Playback) persisted in the store's
+//! App preferences (Settings → Appearance / Language / Playback / About) persisted in the store's
 //! settings table. Read once at startup; changes are written in the background.
 //!
 //! These are app-wide (every profile on this computer). Per-profile playback settings
@@ -42,6 +42,11 @@ pub const LIVE_REWIND: Setting<u8> = Setting::new("app.live_rewind", || 30);
 pub const CHANNEL_BUFFERING: Setting<std::collections::BTreeMap<String, (u8, u64)>> =
     Setting::new("app.channel_buffering", std::collections::BTreeMap::new);
 
+/// Settings › About › "Check automatically": ask GitHub for the latest version number
+/// about once a week (off by default; see [`crate::services::updates`]).
+pub const CHECK_UPDATES_AUTOMATICALLY: Setting<bool> =
+    Setting::new("app.check_updates_automatically", || false);
+
 /// UI size choices (Settings → Appearance), applied as an extra zoom in desktop mode.
 pub const UI_SCALES: [f32; 4] = [0.9, 1.0, 1.1, 1.25];
 
@@ -72,6 +77,8 @@ pub struct Prefs {
     pub buffering: u8,
     /// Live rewind window in minutes (0 = off).
     pub live_rewind: u8,
+    /// Check for updates about once a week (off by default).
+    pub check_updates_automatically: bool,
 }
 
 impl Default for Prefs {
@@ -89,6 +96,7 @@ impl Default for Prefs {
             hw_decoding: true,
             buffering: 0,
             live_rewind: 30,
+            check_updates_automatically: false,
         }
     }
 }
@@ -114,6 +122,7 @@ impl Prefs {
             hw_decoding: s.get(&HW_DECODING)?,
             buffering: s.get(&BUFFERING)?.min(3),
             live_rewind: crate::playback::sanitize_rewind(s.get(&LIVE_REWIND)?),
+            check_updates_automatically: s.get(&CHECK_UPDATES_AUTOMATICALLY)?,
         })
     }
 
@@ -136,6 +145,10 @@ impl Prefs {
         s.set(&HW_DECODING, &self.hw_decoding)?;
         s.set(&BUFFERING, &self.buffering)?;
         s.set(&LIVE_REWIND, &self.live_rewind)?;
+        s.set(
+            &CHECK_UPDATES_AUTOMATICALLY,
+            &self.check_updates_automatically,
+        )?;
         Ok(())
     }
 
@@ -212,6 +225,7 @@ mod tests {
             hw_decoding: false,
             buffering: 3,
             live_rewind: 60,
+            check_updates_automatically: true,
         };
         p.save(&store).unwrap();
         assert_eq!(Prefs::load(&store).unwrap(), p);

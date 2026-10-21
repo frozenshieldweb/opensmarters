@@ -578,6 +578,7 @@ impl eframe::App for OpensmartersApp {
             crate::dvr::on_frame(&mut cx);
             crate::playback::sleep::on_frame(&mut cx);
             crate::services::alerts::on_frame(&mut cx);
+            crate::services::updates::on_frame(&mut cx);
         }
         // The app draws the video itself, so mpv's screensaver blocking doesn't apply:
         // keep the display on while video plays, and the PC awake for recordings.

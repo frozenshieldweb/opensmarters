@@ -763,6 +763,16 @@ impl Screen for LiveScreen {
 
         let catalog = self.catalog.value().cloned();
         if let Some(cat) = &catalog {
+            // A hidden category (Settings › Categories, H, or the route) isn't browsed:
+            // back to All, like a category the viewer can't open (before any PIN).
+            if let CategorySelection::Category(id) = &self.selection
+                && session
+                    .hidden_categories(ContentKind::Live, &cat.categories)
+                    .contains(id)
+            {
+                self.selection = CategorySelection::All;
+                self.scroll_to = Some(0);
+            }
             if let Some(initial) = self.initial_category.take()
                 && let CategorySelection::Category(id) = &self.selection
                 && session.is_category_locked(
@@ -775,16 +785,6 @@ impl Screen for LiveScreen {
                 let name = cat.category_name(id).unwrap_or(&initial).to_owned();
                 let sel = std::mem::take(&mut self.selection);
                 self.select(cx, sel, &name);
-            }
-            // A hidden category (Settings › Categories, H, or the route) isn't browsed:
-            // back to All, like a category the viewer can't open.
-            if let CategorySelection::Category(id) = &self.selection
-                && session
-                    .hidden_categories(ContentKind::Live, &cat.categories)
-                    .contains(id)
-            {
-                self.selection = CategorySelection::All;
-                self.scroll_to = Some(0);
             }
             self.refresh_list(cx, &session, cat);
         }
@@ -993,11 +993,19 @@ impl Screen for LiveScreen {
             (Some(_), _) if self.visible.is_empty() && self.list_key.is_none() => {}
             (Some(_), _) if self.visible.is_empty() => {
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rows_rect));
+                // "All" can be empty because every category is hidden.
+                let all_hidden = self.selection == CategorySelection::All && !prefs.is_default();
                 let (ill, head, body) = if self.selection == CategorySelection::Favourites {
                     (
                         Illustration::EmptyFavourites,
                         "Nothing saved yet",
                         "Play a channel and press \u{2665} next to the preview to keep it here.",
+                    )
+                } else if all_hidden {
+                    (
+                        Illustration::EmptySearch,
+                        "Every category is hidden",
+                        "Show some again to see their channels here.",
                     )
                 } else {
                     (
@@ -1006,9 +1014,14 @@ impl Screen for LiveScreen {
                         "Your provider lists no channels in this category.",
                     )
                 };
-                let _ = EmptyState::new(Id::unique("live.empty"), ill, head, body)
-                    .illustration_size(160.0)
-                    .show(&mut child);
+                let mut empty = EmptyState::new(Id::unique("live.empty"), ill, head, body)
+                    .illustration_size(160.0);
+                if all_hidden {
+                    empty = empty.action("Edit categories", false);
+                }
+                if empty.show(&mut child).is_some_and(|f| f.activated) {
+                    cat_ui::open_editor(cx, ContentKind::Live);
+                }
             }
             (Some(_), _) => {
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rows_rect));

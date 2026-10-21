@@ -1073,6 +1073,25 @@ impl<K: BrowseKind> Browse<K> {
                         EmptyState::new(self.id("empty"), Illustration::EmptySearch, &head, &body)
                             .illustration_size(160.0)
                             .show(ui);
+                } else if indices.is_empty()
+                    && self.applied_query.is_empty()
+                    && !session.category_prefs(K::CONTENT).is_default()
+                {
+                    // Everything here sits in hidden (or locked) categories.
+                    if EmptyState::new(
+                        self.id("all-hidden"),
+                        Illustration::EmptySearch,
+                        "Nothing to show here",
+                        "These are all in hidden or locked categories. Show some categories \
+                         again to see them here.",
+                    )
+                    .action("Edit categories", false)
+                    .illustration_size(160.0)
+                    .show(ui)
+                    .is_some_and(|f| f.activated)
+                    {
+                        cat_ui::open_editor(cx, K::CONTENT);
+                    }
                 } else if indices.is_empty() {
                     if EmptyState::new(
                         self.id("no-match"),

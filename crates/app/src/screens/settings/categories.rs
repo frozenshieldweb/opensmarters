@@ -413,7 +413,10 @@ impl SettingsPageUi for CategoriesPage {
             return;
         }
         let Some(session) = cx.session() else { return };
-        if self.undo.is_some() && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z)) {
+        let kind = self.current_kind();
+        if self.undo.as_ref().is_some_and(|u| u.kind == kind)
+            && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z))
+        {
             self.undo_last(&session);
             return;
         }

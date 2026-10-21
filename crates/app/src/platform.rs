@@ -1,69 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Small platform queries and actions, all **safe Rust** (the app crate forbids `unsafe`):
 //!
-//! - [`animations_enabled`]: the OS "show animations" switch. On Windows this is
-//!   `Windows.UI.ViewManagement.UISettings.AnimationsEnabled` (Settings → Accessibility →
-//!   Visual effects → *Animation effects*, the same value as `SPI_GETCLIENTAREAANIMATION`),
-//!   read through the `windows` crate's WinRT projection, whose methods are safe. Other
-//!   platforms report `None` (unknown), and the manual setting applies.
-//! - [`SystemMotion`]: polls that value every few seconds so turning animations off in
-//!   Windows applies while the app runs.
+//! - [`animations_enabled`]: the OS "show animations" switch (Windows' *Animation
+//!   effects*), and [`SystemMotion`], which polls it every few seconds. Both live in the
+//!   shared `afterglow::system_motion` module (also used by the installer) and are
+//!   re-exported here.
 //! - [`open_folder`] / [`open_url`]: show a folder in the file manager or an https page in
 //!   the browser through the system launcher ([`launcher`]: Explorer, `open`,
 //!   `xdg-open`), always started by **absolute path** (never resolved through the current
 //!   directory or `PATH`), with the path/URL as a single argument, never through a shell.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
-/// How often [`SystemMotion::poll`] asks the OS again.
-pub const MOTION_POLL_EVERY: Duration = Duration::from_secs(3);
-
-/// Whether the OS wants animations (`Some(false)` = the user turned them off). `None` if
-/// unknown or unsupported.
-pub fn animations_enabled() -> Option<bool> {
-    #[cfg(windows)]
-    {
-        use windows::UI::ViewManagement::UISettings;
-        match UISettings::new().and_then(|s| s.AnimationsEnabled()) {
-            Ok(on) => Some(on),
-            Err(e) => {
-                tracing::debug!(error = %e, "UISettings.AnimationsEnabled unavailable");
-                None
-            }
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        None
-    }
-}
-
-/// Caches [`animations_enabled`] and refreshes it every [`MOTION_POLL_EVERY`].
-#[derive(Debug, Default)]
-pub struct SystemMotion {
-    checked: Option<Instant>,
-    value: Option<bool>,
-}
-
-impl SystemMotion {
-    /// The OS animation setting, re-read at most every [`MOTION_POLL_EVERY`].
-    pub fn poll(&mut self) -> Option<bool> {
-        if self
-            .checked
-            .is_none_or(|t| t.elapsed() >= MOTION_POLL_EVERY)
-        {
-            self.checked = Some(Instant::now());
-            self.value = animations_enabled();
-        }
-        self.value
-    }
-
-    /// The last value read (no OS call).
-    pub fn last(&self) -> Option<bool> {
-        self.value
-    }
-}
+pub use afterglow::system_motion::{MOTION_POLL_EVERY, SystemMotion, animations_enabled};
 
 /// The system "open this" launcher by **absolute path** (Explorer, `open`, `xdg-open`).
 ///
@@ -166,17 +115,6 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn system_motion_caches_between_polls() {
-        let mut m = SystemMotion::default();
-        let first = m.poll();
-        assert_eq!(m.last(), first);
-        // A second poll within the interval doesn't ask the OS again.
-        let t = m.checked;
-        let _ = m.poll();
-        assert_eq!(m.checked, t);
-    }
 
     #[test]
     fn open_folder_rejects_missing_dirs() {

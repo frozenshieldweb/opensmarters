@@ -10,6 +10,7 @@
 //!   images, progress bar, spinner.
 //! - [`motion`]: the reduced-motion flag (stored in the egui context) and animation
 //!   helpers that honour it.
+//! - [`system_motion`]: Windows' *Animation effects* switch (safe WinRT call), polled.
 //!
 //! ```ignore
 //! afterglow::theme::install(ctx);
@@ -19,11 +20,13 @@
 //! afterglow::paint::focus_ring(painter, rect, afterglow::theme::radius::SM, 1.0);
 //! ```
 //!
-//! The app re-exports these modules as `crate::ui::{icons, motion, paint, theme}`.
+//! The app re-exports these modules as `crate::ui::{icons, motion, paint, theme}` and
+//! `crate::platform::{SystemMotion, animations_enabled, MOTION_POLL_EVERY}`.
 
 #![forbid(unsafe_code)]
 
 pub mod icons;
 pub mod motion;
 pub mod paint;
+pub mod system_motion;
 pub mod theme;

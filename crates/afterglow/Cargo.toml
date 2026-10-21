@@ -16,6 +16,11 @@ path = "src/lib.rs"
 [dependencies]
 # Same egui as eframe 0.37 (the app and the installer); no extra features needed here.
 egui = { version = "0.37", default-features = false }
+tracing = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+# Safe WinRT projection: `UISettings.AnimationsEnabled` (reduced motion follows Windows).
+windows = { version = "0.62", default-features = false, features = ["UI_ViewManagement"] }
 
 [lints]
 workspace = true

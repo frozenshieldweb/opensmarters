@@ -3347,7 +3347,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "windows",
 ]
 
 [[package]]
@@ -3355,6 +3354,8 @@ name = "opensmarters-afterglow"
 version = "0.1.0"
 dependencies = [
  "egui",
+ "tracing",
+ "windows",
 ]
 
 [[package]]

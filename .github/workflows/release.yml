@@ -1,0 +1,104 @@
+# A version tag (vX.Y.Z, matching Cargo.toml) builds the release on a clean Windows runner,
+# attests each file's build provenance, publishes the GitHub Release with the notes from
+# CHANGELOG.md, then points the landing page at the new files and deploys it.
+name: release
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write      # create the release; push the landing-page update to main
+      id-token: write      # sign the provenance attestations
+      attestations: write  # store them
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - name: The tag matches the workspace version
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if ("v$v" -ne $env:GITHUB_REF_NAME) { throw "tag $env:GITHUB_REF_NAME does not match the workspace version $v" }
+          "VERSION=$v" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Install cargo-about
+        run: cargo install --locked cargo-about --version 0.9.2 --features cli
+      # Windows PowerShell 5.1, as on a developer machine (the script is tested there).
+      - name: Build and package (tools/package.ps1)
+        shell: powershell
+        run: ./tools/package.ps1
+      - name: Release notes from CHANGELOG.md
+        shell: pwsh
+        run: |
+          $lines = @(Get-Content -Encoding utf8 CHANGELOG.md)
+          $head = '^## \[' + [regex]::Escape($env:VERSION) + '\]'
+          $i = 0
+          while ($i -lt $lines.Count -and $lines[$i] -notmatch $head) { $i++ }
+          if ($i -ge $lines.Count) { throw "CHANGELOG.md has no section for $env:VERSION" }
+          $body = @()
+          for ($i++; $i -lt $lines.Count -and $lines[$i] -notmatch '^## |^\[[^\]]+\]: '; $i++) { $body += $lines[$i] }
+          $setup = "opensmarters-$env:VERSION-windows-x64-setup.exe"
+          $body += @(
+            '### Verify your download'
+            '- The SHA-256 of every file is in `SHA256SUMS.txt` (`Get-FileHash <file>` in PowerShell).'
+            "- These files were built by GitHub Actions from this tag. Check the signed build provenance with the GitHub CLI: ``gh attestation verify $setup --repo $env:GITHUB_REPOSITORY``."
+          )
+          ($body -join "`n").Trim() | Out-File -Encoding utf8 (Join-Path $env:RUNNER_TEMP 'notes.md')
+          Get-Content (Join-Path $env:RUNNER_TEMP 'notes.md')
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/opensmarters-${{ env.VERSION }}-windows-x64-setup.exe
+            dist/opensmarters-${{ env.VERSION }}-windows-x64.zip
+      - name: Publish the GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $name = "opensmarters-$env:VERSION-windows-x64"
+          gh release create $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --verify-tag `
+            --title "opensmarters $env:VERSION" --notes-file (Join-Path $env:RUNNER_TEMP 'notes.md') `
+            "dist/$name-setup.exe" "dist/$name.zip" "dist/SHA256SUMS.txt"
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
+
+      # The landing page: release.js from the files just published, committed to main.
+      - name: Check out main
+        shell: pwsh
+        run: |
+          git fetch --no-tags origin main
+          git checkout -B main origin/main
+          if ($LASTEXITCODE -ne 0) { throw "checkout of main failed" }
+      - name: Point the landing page at this release
+        shell: powershell
+        run: ./site/scripts/update-release.ps1 -Version $env:VERSION -BaseUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v{version}"
+      - name: Commit the landing page to main
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git add site/release.js site/index.html
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) { 'The page already shows this release.'; exit 0 }
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "site: release v$env:VERSION"
+          git push "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git" HEAD:main
+          if ($LASTEXITCODE -ne 0) { throw "push to main failed ($LASTEXITCODE)" }
+
+  # A push made with GITHUB_TOKEN starts no workflow, so deploy the page from here.
+  pages:
+    needs: release
+    permissions:
+      contents: write
+    uses: ./.github/workflows/pages.yml

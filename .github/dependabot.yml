@@ -1,0 +1,18 @@
+# Monthly, grouped: keeps the SHA-pinned actions and the crates current. cargo-deny in CI
+# catches advisories in between.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      crates:
+        patterns: ['*']

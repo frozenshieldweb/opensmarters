@@ -1,0 +1,59 @@
+# Publishes site/ (the landing page) to the gh-pages branch, which GitHub Pages serves at
+# https://frozenshieldweb.github.io/opensmarters/. Runs when site/ changes on main, by hand,
+# and from the release workflow after it updates the page.
+name: pages
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # push the gh-pages branch
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main  # the release workflow calls this right after pushing the page to main
+          persist-credentials: false
+      - name: index.html and the copied assets are up to date
+        run: node site/scripts/build.mjs --check
+      # Never publish a page whose download links aren't set (between a version bump and
+      # its release, release.js has no files yet).
+      - name: The download links are set
+        id: links
+        run: |
+          if grep -Eq '(url|sumsUrl): "TODO"' site/release.js || ! grep -Eq '^    (installer|portable): \{' site/release.js; then
+            echo "::notice::site/release.js lists no published files yet, so the page is not deployed."
+            echo "set=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "set=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish site/ to gh-pages
+        if: steps.links.outputs.set == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          src="$(git rev-parse HEAD)"
+          out="$RUNNER_TEMP/pages"
+          mkdir -p "$out"
+          cp -R site/. "$out/"
+          rm -rf "$out/scripts" "$out/README.md" "$out/package.json"
+          touch "$out/.nojekyll"
+          cd "$out"
+          git init -q -b gh-pages
+          git add -A
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -q -m "site from $src"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages

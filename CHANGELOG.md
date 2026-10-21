@@ -2,7 +2,7 @@
 
 All notable changes to opensmarters. Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.1] - 2026-10-21
 
 ### Added
 - **Check for updates** in Settings › About. It asks GitHub for the latest version number and, when there is a newer one, offers **Get the update** (opens the release page in your browser) or **Not now**. The app never downloads or installs anything: you run the new setup yourself, and it keeps your accounts, favourites and settings. A quiet **Update available** sign next to the clock leads to it. **Check automatically** (off by default) asks once a week. GitHub sees your IP address; nothing else is sent.
@@ -56,4 +56,5 @@ The first public release.
 - Recording, downloads and multiscreen were tested against the built-in synthetic provider. How many streams a real panel allows at once, and how quickly it frees them, varies by provider.
 - Some providers refuse every catch-up link format; the app then says the programme isn't available.
 
+[0.2.1]: https://github.com/frozenshieldweb/opensmarters/releases/tag/v0.2.1
 [0.2.0]: https://github.com/frozenshieldweb/opensmarters/releases/tag/v0.2.0

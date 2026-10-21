@@ -459,7 +459,7 @@ against the fake panel and the real DLL (commands in §8).
 | SR-16 | Low | app | `explorer` is started by bare name (`platform.rs`, `trailer.rs`); no panic hook (panic text goes unredacted to stderr in debug builds) | Fixed (fix batches A, C1): `platform::launcher()` starts `%SystemRoot%\explorer.exe` / the URL opener by absolute path; a panic hook logs through the redacting `tracing` writer |
 | SR-17 | Info | store | Lockout can be shortened by moving the clock forward (admin); DB edits remove the PIN | Accepted (§5) |
 | SR-18 | Info | core parental | Keyword matching can be evaded by provider names using homoglyphs/zero-width characters | Accepted (§5) |
-| SR-19 | Info | supply chain | CI actions pinned by tag, not commit SHA; `fetch-libmpv.ps1` trusts an existing DLL when `VERSION.txt` matches (no DLL hash re-check); the libmpv build carries many unused C features; releases are not Authenticode-signed | Open (hardening) |
+| SR-19 | Info | supply chain | ~~CI actions pinned by tag~~ (fixed in 0.2.0: every action is pinned to a commit SHA, and release files carry build-provenance attestations); `fetch-libmpv.ps1` trusts an existing DLL when `VERSION.txt` matches (no DLL hash re-check); the libmpv build carries many unused C features; releases are not Authenticode-signed | Open (hardening) |
 | SR-20 | Info | platform | Credential Manager entries are readable by any process of the same user; exports contain server URLs and usernames | Accepted (§5) |
 
 Verified with no finding: TLS verification in both stacks (rustls; mpv/libcurl refuses a

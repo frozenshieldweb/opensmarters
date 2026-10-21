@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "fake-panel"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3366,7 +3366,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opensmarters"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3393,7 +3393,7 @@ dependencies = [
 
 [[package]]
 name = "opensmarters-afterglow"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "egui",
  "tracing",
@@ -3402,7 +3402,7 @@ dependencies = [
 
 [[package]]
 name = "opensmarters-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -3426,7 +3426,7 @@ dependencies = [
 
 [[package]]
 name = "opensmarters-installer"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3452,7 +3452,7 @@ dependencies = [
 
 [[package]]
 name = "opensmarters-player"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -3469,7 +3469,7 @@ dependencies = [
 
 [[package]]
 name = "opensmarters-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "argon2",
  "blake2",

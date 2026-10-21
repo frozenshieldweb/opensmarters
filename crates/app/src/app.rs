@@ -575,6 +575,7 @@ impl eframe::App for OpensmartersApp {
             crate::dvr::on_frame(&mut cx);
             crate::playback::sleep::on_frame(&mut cx);
             crate::services::alerts::on_frame(&mut cx);
+            crate::services::updates::on_frame(&mut cx);
         }
 
         // 1. Screen-owned keys, then the focus engine, then back.

@@ -25,6 +25,7 @@ pub mod prefs;
 pub mod reminders;
 pub mod search_history;
 pub mod session;
+pub mod updates;
 pub mod vod;
 pub mod writer;
 
@@ -89,6 +90,8 @@ pub struct Services {
     pub paths: Paths,
     /// True for `--ephemeral` (in-memory store, memory keychain).
     pub ephemeral: bool,
+    /// "Check for updates" (Settings › About, the header indicator; [`updates`]).
+    pub updates: updates::Updates,
     egui: egui::Context,
     errors: Arc<std::sync::Mutex<Vec<&'static str>>>,
     writer: writer::StoreWriter,
@@ -127,6 +130,7 @@ impl Services {
             images,
             paths,
             ephemeral,
+            updates: updates::Updates::new(),
             egui,
             errors: Arc::default(),
             writer,

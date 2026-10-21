@@ -55,6 +55,7 @@ jobs:
             '### Verify your download'
             '- The SHA-256 of every file is in `SHA256SUMS.txt` (`Get-FileHash <file>` in PowerShell).'
             "- These files were built by GitHub Actions from this tag. Check the signed build provenance with the GitHub CLI: ``gh attestation verify $setup --repo $env:GITHUB_REPOSITORY``."
+            "- How releases are built and signed: [Code signing policy](https://github.com/$env:GITHUB_REPOSITORY/blob/main/docs/CODE_SIGNING.md)."
           )
           ($body -join "`n").Trim() | Out-File -Encoding utf8 (Join-Path $env:RUNNER_TEMP 'notes.md')
           Get-Content (Join-Path $env:RUNNER_TEMP 'notes.md')

@@ -68,7 +68,7 @@ Download `opensmarters-<version>-windows-x64-setup.exe` and run it. It installs 
 
 Or use the portable zip: download `opensmarters-<version>-windows-x64.zip`, unzip it anywhere and run `opensmarters.exe`, keeping `libmpv-2.dll` next to it.
 
-Windows 10/11 x64 with a current graphics driver is required. Builds are not signed yet, so Windows may warn about an unknown publisher.
+Windows 10/11 x64 with a current graphics driver is required. Builds are not signed yet, so Windows may warn about an unknown publisher; signing is on its way ([code signing policy](docs/CODE_SIGNING.md)).
 
 **Check a download.** Every release lists the SHA-256 of its files in `SHA256SUMS.txt` (`Get-FileHash <file>` in PowerShell). The files are built by GitHub Actions from the tagged source, with a signed build-provenance attestation you can check with the GitHub CLI: `gh attestation verify <file> --repo frozenshieldweb/opensmarters`.
 

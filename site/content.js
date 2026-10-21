@@ -108,6 +108,7 @@ export const CONTENT = {
       "Independent open-source project, not affiliated with IPTV Smarters or WHMCS Smarters.",
     licence: "Licence",
     security: "Security",
+    signing: "Code signing policy",
     source: "Source",
   },
 

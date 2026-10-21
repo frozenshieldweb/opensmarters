@@ -64,6 +64,7 @@ export function repoLinks(release) {
     build: base && `${base}#build-from-source`,
     licence: base && `${base}/blob/main/LICENSE`,
     security: base && `${base}/blob/main/docs/SECURITY.md`,
+    signing: base && `${base}/blob/main/docs/CODE_SIGNING.md`,
   };
 }
 

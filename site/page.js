@@ -179,7 +179,8 @@ function footer(C, R) {
   return h("footer", { class: "footer" },
     h("p", { class: "fine" }, C.footer.line, " ",
       h("span", { class: "links" },
-        a(repo.licence, C.footer.licence), a(repo.security, C.footer.security), a(repo.source, C.footer.source))));
+        a(repo.licence, C.footer.licence), a(repo.security, C.footer.security),
+        a(repo.signing, C.footer.signing), a(repo.source, C.footer.source))));
 }
 
 function showcase(C) {

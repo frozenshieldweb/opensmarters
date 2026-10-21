@@ -104,7 +104,8 @@ GitHub Pages can't set headers, so there the page can be framed by another site.
 
 - `release.js`: `sourceUrl` is the repository; the "Licence", "Security" and "Build from
   source" links are derived from it (`/blob/main/LICENSE`, `/blob/main/docs/SECURITY.md`,
-  `#build-from-source`). The download URLs are written by `update-release.ps1`.
+  `#build-from-source`) and the "Code signing policy" link (`/blob/main/docs/CODE_SIGNING.md`).
+  The download URLs are written by `update-release.ps1`.
 - `content.js`: `meta.siteUrl` is the page's public address (canonical, `og:url`, absolute
   `og:image`).
 

@@ -65,6 +65,13 @@ impl Hidden {
     }
 }
 
+/// H was pressed this frame (not consumed; no text field focused): check it before doing
+/// the work of finding the focused category.
+pub fn hide_key_pressed(ctx: &egui::Context) -> bool {
+    !focus::text_input_focused(ctx)
+        && ctx.input(|i| i.key_pressed(Key::H) && !i.modifiers.ctrl && !i.modifiers.alt)
+}
+
 /// H pressed (no modifier, no text field focused): consumed only when `wanted`.
 pub fn take_hide_key(ctx: &egui::Context, wanted: bool) -> bool {
     wanted

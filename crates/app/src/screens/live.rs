@@ -433,6 +433,9 @@ impl LiveScreen {
     /// H on a category row or chip: hides it at once, moves the focus to its neighbour
     /// and offers Undo. Returns true when it did (the key is consumed only then).
     fn hide_focused(&mut self, cx: &mut AppCtx<'_>, ctx: &egui::Context) -> bool {
+        if !cat_ui::hide_key_pressed(ctx) {
+            return false;
+        }
         let (Some(session), Some(cat)) = (cx.session(), self.catalog.value().cloned()) else {
             return false;
         };

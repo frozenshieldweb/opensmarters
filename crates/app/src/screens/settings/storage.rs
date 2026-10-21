@@ -232,6 +232,7 @@ impl StoragePage {
                     cx.services.spawn(async move {
                         s.reload_parental().await;
                         s.reload_favourites().await;
+                        s.reload_category_prefs().await;
                         ctx.request_repaint();
                     });
                 }

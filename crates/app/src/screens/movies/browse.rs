@@ -222,6 +222,9 @@ pub(crate) struct Browse<K: BrowseKind> {
     scroll_to: Option<usize>,
     /// A category just hidden with H (Undo).
     hidden: Option<cat_ui::Hidden>,
+    /// Every category is hidden: nothing is opened (and "All", which can take a minute on
+    /// big panels, isn't loaded just to show nothing).
+    nothing_shown: bool,
     _kind: PhantomData<K>,
 }
 
@@ -262,6 +265,7 @@ impl<K: BrowseKind> Browse<K> {
             progress_epoch: 0,
             scroll_to: None,
             hidden: None,
+            nothing_shown: false,
             _kind: PhantomData,
         }
     }
@@ -365,10 +369,15 @@ impl<K: BrowseKind> Browse<K> {
         let unlocked = |id: &CategoryId, name: &str| {
             !hidden.contains(id) && !session.is_category_locked(K::CONTENT, id, name)
         };
-        let first_unlocked = categories::arrange(&cats, &prefs)
-            .into_iter()
+        let shown = categories::arrange(&cats, &prefs);
+        let first_unlocked = shown
+            .iter()
             .find(|c| unlocked(&c.id, &c.name))
             .map(|c| Selection::Category(c.id.clone()));
+        self.nothing_shown = shown.is_empty() && !cats.is_empty();
+        if self.nothing_shown && self.route_category.is_none() {
+            return;
+        }
         if let Some(route) = self.route_category.take() {
             if route.eq_ignore_ascii_case("all") {
                 self.apply_selection(cx, Selection::All);
@@ -377,8 +386,11 @@ impl<K: BrowseKind> Browse<K> {
             if let Some(c) = cats.iter().find(|c| c.id.as_str() == route) {
                 let (sel, name) = (Selection::Category(c.id.clone()), c.name.clone());
                 if hidden.contains(&c.id) {
-                    let sel = first_unlocked.unwrap_or(Selection::All);
-                    self.apply_selection(cx, sel);
+                    if let Some(sel) =
+                        first_unlocked.or((!self.nothing_shown).then_some(Selection::All))
+                    {
+                        self.apply_selection(cx, sel);
+                    }
                     return;
                 }
                 if !unlocked(&c.id, &c.name) {
@@ -390,6 +402,9 @@ impl<K: BrowseKind> Browse<K> {
                 self.select(cx, sel, &name);
                 return;
             }
+        }
+        if self.nothing_shown {
+            return;
         }
         let remembered = self
             .remembered
@@ -443,6 +458,9 @@ impl<K: BrowseKind> Browse<K> {
         }
         if cat_ui::take_undo_key(ctx, self.hidden.is_some()) {
             self.undo_hide(cx);
+            return;
+        }
+        if !cat_ui::hide_key_pressed(ctx) {
             return;
         }
         let (Some(session), Some(cats)) = (cx.session(), self.categories.value().cloned()) else {
@@ -1055,6 +1073,23 @@ impl<K: BrowseKind> Browse<K> {
             .is_some_and(|f| f.activated)
             {
                 self.load_categories(cx);
+            }
+            return;
+        }
+        // Every category is hidden: say so instead of loading "All" to show nothing.
+        if self.selection.is_none() && self.nothing_shown {
+            if EmptyState::new(
+                self.id("nothing-shown"),
+                Illustration::EmptySearch,
+                "Every category is hidden",
+                "Show some categories again to browse them here.",
+            )
+            .action("Edit categories", true)
+            .illustration_size(160.0)
+            .show(ui)
+            .is_some_and(|f| f.activated)
+            {
+                cat_ui::open_editor(cx, K::CONTENT);
             }
             return;
         }

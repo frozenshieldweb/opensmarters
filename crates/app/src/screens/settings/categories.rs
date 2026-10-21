@@ -420,6 +420,16 @@ impl SettingsPageUi for CategoriesPage {
             self.undo_last(&session);
             return;
         }
+        // Only look for the focused row when a move key is down.
+        let moving = ctx.input(|i| {
+            let m = i.modifiers;
+            ((m.command || m.shift)
+                && (i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::ArrowDown)))
+                || (m.command && i.key_pressed(Key::Home))
+        });
+        if !moving {
+            return;
+        }
         let Some(id) = self.focused_row(ctx) else {
             return;
         };

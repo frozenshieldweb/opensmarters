@@ -6,6 +6,7 @@ members = [
     "crates/player",
     "crates/app",
     "crates/fake-panel",
+    "crates/afterglow",
 ]
 
 [workspace.package]

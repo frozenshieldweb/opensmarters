@@ -2,12 +2,12 @@
 //! Painting helpers: the focus treatment (§5/§9.4), gradients and scrims (§4.6/§9.5),
 //! cover-fit images with rounded corners, shadows.
 
-use eframe::egui::{
+use egui::{
     self, Color32, CornerRadius, Mesh, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, TextureId,
     Vec2, epaint::RectShape, pos2, vec2,
 };
 
-use crate::ui::theme::{self, color};
+use crate::theme::{self, color};
 
 /// Paints the glow behind a focused element. Call **before** painting the element.
 /// `t` is the animated focus amount (0..1).

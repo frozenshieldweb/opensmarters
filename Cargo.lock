@@ -3336,6 +3336,7 @@ dependencies = [
  "fs4",
  "image",
  "lru",
+ "opensmarters-afterglow",
  "opensmarters-core",
  "opensmarters-player",
  "opensmarters-store",
@@ -3347,6 +3348,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows",
+]
+
+[[package]]
+name = "opensmarters-afterglow"
+version = "0.1.0"
+dependencies = [
+ "egui",
 ]
 
 [[package]]

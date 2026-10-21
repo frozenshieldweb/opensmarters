@@ -11,6 +11,7 @@ These rules apply to every contributor, human or agent. Read [BUILD_PROMPT.md](B
 | `crates/player` | `opensmarters-player` / `opensmarters_player` | Safe libmpv wrapper and egui video widget | allowed **only** here; every `unsafe` block needs a `// SAFETY:` comment |
 | `crates/app` | `opensmarters` (bin) | eframe/egui desktop app | forbidden |
 | `crates/fake-panel` | `fake-panel` (bin + lib) | Dev-only fake Xtream/M3U/XMLTV server with synthetic data and generated test streams | forbidden |
+| `crates/afterglow` | `opensmarters-afterglow` / `afterglow` | The Afterglow design system for egui (tokens, fonts, icons, focus/gradient painting, motion), shared by the app and the installer | forbidden |
 
 ## Rules
 

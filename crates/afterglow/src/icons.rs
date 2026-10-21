@@ -10,11 +10,11 @@
 //!   into ordinary text: `format!("{} Resume", icons::PLAY)`.
 //!
 //! ```ignore
-//! use crate::ui::icons::{self, Style};
+//! use afterglow::icons::{self, Style};
 //! icons::paint(&painter, center, icons::HEART, 20.0, Style::Fill, theme::color::ACCENT);
 //! ```
 
-use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Pos2, Rect};
+use egui::{self, Align2, Color32, FontFamily, FontId, Pos2, Rect};
 
 pub mod glyphs;
 pub use glyphs::*;
@@ -24,8 +24,8 @@ pub const FAMILY_REGULAR: &str = "ph";
 /// Font family name of Phosphor Fill.
 pub const FAMILY_FILL: &str = "ph-fill";
 
-pub(crate) const REGULAR_TTF: &[u8] = include_bytes!("../../../../assets/fonts/Phosphor.ttf");
-pub(crate) const FILL_TTF: &[u8] = include_bytes!("../../../../assets/fonts/Phosphor-Fill.ttf");
+pub(crate) const REGULAR_TTF: &[u8] = include_bytes!("../../../assets/fonts/Phosphor.ttf");
+pub(crate) const FILL_TTF: &[u8] = include_bytes!("../../../assets/fonts/Phosphor-Fill.ttf");
 
 /// Icon weight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

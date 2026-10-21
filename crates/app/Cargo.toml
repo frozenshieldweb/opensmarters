@@ -33,6 +33,8 @@ harness = []
 opensmarters-core = { path = "../core" }
 opensmarters-store = { path = "../store" }
 opensmarters-player = { path = "../player" }
+# The Afterglow theme (tokens, fonts, icons, focus/gradient painting), shared with the installer.
+opensmarters-afterglow = { path = "../afterglow" }
 fake-panel = { path = "../fake-panel", optional = true }
 
 anyhow = "1"

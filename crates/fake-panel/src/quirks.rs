@@ -59,6 +59,10 @@ pub struct Quirks {
     /// `media-playlist`: film and episode addresses answer `200 OK` with a text playlist
     /// pointing at local files (clients must not keep it or follow it).
     pub media_playlist: bool,
+    /// `tagged-categories`: most live, film and series categories carry a region tag in
+    /// their name (`"UK | News"`, `"FR | Sports"`, `"[CA] Kids"`, `"DE: Kino"`), like many
+    /// real panels (to try category management by region). Ids and contents don't change.
+    pub tagged_categories: bool,
 }
 
 impl Default for Quirks {
@@ -80,6 +84,7 @@ impl Default for Quirks {
             live_endless: false,
             media_html: false,
             media_playlist: false,
+            tagged_categories: false,
         }
     }
 }
@@ -103,6 +108,7 @@ impl Quirks {
         "live-endless",
         "media-html",
         "media-playlist",
+        "tagged-categories",
     ];
 
     /// No quirks at all (note: also turns `category-all-literal` off).
@@ -131,6 +137,7 @@ impl Quirks {
             "live-endless" => &mut self.live_endless,
             "media-html" => &mut self.media_html,
             "media-playlist" => &mut self.media_playlist,
+            "tagged-categories" => &mut self.tagged_categories,
             _ => return None,
         })
     }

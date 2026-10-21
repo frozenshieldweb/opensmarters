@@ -33,6 +33,8 @@ harness = []
 opensmarters-core = { path = "../core" }
 opensmarters-store = { path = "../store" }
 opensmarters-player = { path = "../player" }
+# The Afterglow theme (tokens, fonts, icons, focus/gradient painting), shared with the installer.
+opensmarters-afterglow = { path = "../afterglow" }
 fake-panel = { path = "../fake-panel", optional = true }
 
 anyhow = "1"
@@ -60,10 +62,6 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "registry", "ansi"] }
-
-[target.'cfg(windows)'.dependencies]
-# Safe WinRT projection: `UISettings.AnimationsEnabled` (reduced motion follows Windows).
-windows = { version = "0.62", default-features = false, features = ["UI_ViewManagement"] }
 
 [dev-dependencies]
 fake-panel = { path = "../fake-panel" }

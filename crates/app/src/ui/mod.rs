@@ -2,12 +2,12 @@
 //! The UI kit: design tokens ([`theme`]), Phosphor [`icons`], painting helpers
 //! ([`paint`]), text helpers ([`text`]), motion ([`motion`]), layout breakpoints
 //! ([`layout`]), bundled artwork ([`assets`]) and reusable [`widgets`].
+//!
+//! [`theme`], [`icons`], [`paint`] and [`motion`] live in the shared `afterglow` crate
+//! (`crates/afterglow`, also used by the installer) and are re-exported here unchanged.
 
 pub mod assets;
-pub mod icons;
+pub use afterglow::{icons, motion, paint, theme};
 pub mod layout;
-pub mod motion;
-pub mod paint;
 pub mod text;
-pub mod theme;
 pub mod widgets;

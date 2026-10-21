@@ -2,7 +2,7 @@
 //! Motion preferences (`docs/DESIGN.md` §7): the reduced-motion flag lives in egui's
 //! context data so every widget can read it.
 
-use eframe::egui::{Context, Id, emath::easing};
+use egui::{Context, Id, emath::easing};
 
 fn key() -> Id {
     Id::unique("opensmarters.reduced_motion")

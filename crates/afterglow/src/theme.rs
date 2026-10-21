@@ -4,23 +4,23 @@
 //! Use the tokens instead of literal colours and sizes:
 //!
 //! ```ignore
-//! use crate::ui::theme::{color, font, radius, space};
+//! use afterglow::theme::{color, font, radius, space};
 //! painter.rect_filled(rect, radius::MD, color::SURFACE_2);
 //! painter.text(pos, Align2::LEFT_TOP, "Live TV", font::title(), color::TEXT);
 //! ```
 
 use std::sync::Arc;
 
-use eframe::egui::{
+use egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, FontTweak, Shadow,
     Stroke, TextStyle, Theme, epaint::text::VariationCoords,
 };
 
-use crate::ui::icons;
+use crate::icons;
 
 /// Colour tokens (§4.1–4.3). Alpha tokens use unmultiplied sRGB, as the doc requires.
 pub mod color {
-    use eframe::egui::Color32;
+    use egui::Color32;
 
     /// App background, central panel.
     pub const BG: Color32 = Color32::from_rgb(0x14, 0x10, 0x13);
@@ -160,7 +160,7 @@ pub mod stroke {
 
 /// Elevation (§4.5).
 pub mod elevation {
-    use eframe::egui::{Color32, Shadow};
+    use egui::{Color32, Shadow};
 
     /// Focused/lifted cards.
     pub const E1: Shadow = Shadow {
@@ -213,7 +213,7 @@ pub mod family {
 
 /// Type ramp (§4.7) as [`FontId`]s for painter-based widgets.
 pub mod font {
-    use eframe::egui::{FontFamily, FontId};
+    use egui::{FontFamily, FontId};
 
     use super::family;
 
@@ -230,7 +230,7 @@ pub mod font {
         named(13.0, family::UI_600)
     }
     /// 12 pt, 600 + tracking, UPPERCASE: badges, section kickers. Use
-    /// [`crate::ui::text::overline`] to get the letter spacing.
+    /// the app's `ui::text::overline` to get the letter spacing.
     pub fn overline() -> FontId {
         named(12.0, family::UI_600)
     }
@@ -276,16 +276,27 @@ pub mod font {
     }
     /// Phosphor Regular at `size`.
     pub fn icon(size: f32) -> FontId {
-        named(size, crate::ui::icons::FAMILY_REGULAR)
+        named(size, crate::icons::FAMILY_REGULAR)
     }
     /// Phosphor Fill at `size`.
     pub fn icon_fill(size: f32) -> FontId {
-        named(size, crate::ui::icons::FAMILY_FILL)
+        named(size, crate::icons::FAMILY_FILL)
     }
 }
 
-const UI_VF: &[u8] = include_bytes!("../../../../assets/fonts/SourceSans3-Variable.ttf");
-const DISPLAY_VF: &[u8] = include_bytes!("../../../../assets/fonts/Fraunces-Variable.ttf");
+const UI_VF: &[u8] = include_bytes!("../../../assets/fonts/SourceSans3-Variable.ttf");
+const DISPLAY_VF: &[u8] = include_bytes!("../../../assets/fonts/Fraunces-Variable.ttf");
+
+/// The Fraunces variable font (unmodified, OFL), for faces at other coordinates than
+/// `display` (the installer sets the wordmark live at `opsz` 144, as LAUNCH_PROMPT §0 asks).
+pub fn display_font_bytes() -> &'static [u8] {
+    DISPLAY_VF
+}
+
+/// A face of a variable font at the given axis coordinates (`[("wght", 600.0)]`).
+pub fn variable_face(bytes: &'static [u8], coords: &[(&str, f32)]) -> Arc<FontData> {
+    face(bytes, coords)
+}
 
 fn face(bytes: &'static [u8], coords: &[(&str, f32)]) -> Arc<FontData> {
     let tags: Vec<([u8; 4], f32)> = coords

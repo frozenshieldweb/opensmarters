@@ -33,18 +33,28 @@ pub fn galley(ui: &Ui, text: &str, font: FontId, color: Color32) -> Arc<Galley> 
     ui.painter().layout_no_wrap(text.to_owned(), font, color)
 }
 
-/// Paints one line of text anchored by `align` at `pos`; returns its rect.
+/// Paints one line of text anchored by `align` at `pos`; returns its rect. Screen readers
+/// get it as a label.
 pub fn text(ui: &Ui, pos: Pos2, align: Align2, text: &str, font: FontId, color: Color32) -> Rect {
-    ui.painter().text(pos, align, text, font, color)
+    let rect = ui.painter().text(pos, align, text, font, color);
+    label(ui, rect, text);
+    rect
+}
+
+/// Exposes painted text to AccessKit (screen readers) as a static label.
+pub fn label(ui: &Ui, rect: Rect, text: &str) {
+    let resp = ui.interact(rect, ui.scope_id().with(("label", text)), Sense::hover());
+    resp.widget_info(|| WidgetInfo::labeled(Role::Label, true, text));
 }
 
 /// Paints text wrapped to `width` with its top-left at `pos`; returns its rect. A text that
 /// wraps to two lines is balanced (no orphaned last word).
 pub fn wrapped(ui: &Ui, pos: Pos2, width: f32, text: &str, font: FontId, color: Color32) -> Rect {
-    let text = balanced(ui, text, &font, width);
-    let g = ui.painter().layout(text, font, color, width);
+    let shown = balanced(ui, text, &font, width);
+    let g = ui.painter().layout(shown, font, color, width);
     let rect = Rect::from_min_size(pos, g.size());
     ui.painter().galley(pos, g, color);
+    label(ui, rect, text);
     rect
 }
 

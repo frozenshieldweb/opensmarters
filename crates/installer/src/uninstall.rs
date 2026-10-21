@@ -171,6 +171,10 @@ pub fn uninstall(
     // 3. Apps & features (85% … 90%).
     p.set(Phase::Finishing, 0.85);
     env.registry.delete().map_err(UninstallError::Registry)?;
+    // A sandbox leaves no empty test registry tree behind.
+    if env.registry.is_test() {
+        env.registry.delete_test_tree();
+    }
 
     // 4. Only if asked: the data folder (90% … 95%) and saved passwords (95% … 100%).
     p.set(Phase::Finishing, 0.9);

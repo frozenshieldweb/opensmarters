@@ -54,7 +54,11 @@ The threat model, mitigations and review findings are in [docs/SECURITY.md](docs
 
 ## Install
 
-Download `opensmarters-<version>-windows-x64.zip` and unzip it anywhere. Run `opensmarters.exe`, keeping `libmpv-2.dll` next to it. Windows 10/11 x64 with a current graphics driver is required.
+Download `opensmarters-<version>-windows-x64-setup.exe` and run it. It installs for your Windows account only (no administrator rights) into `%LOCALAPPDATA%\Programs\opensmarters` and adds a Start menu shortcut; **Options** picks another folder or adds a desktop shortcut. Running a newer setup updates in place. Remove it from Windows Settings → Apps: your data and saved passwords stay unless you tick the boxes, and recordings in your Videos folder always stay. For scripted installs, `--quiet` (see `--help`).
+
+Or use the portable zip: download `opensmarters-<version>-windows-x64.zip`, unzip it anywhere and run `opensmarters.exe`, keeping `libmpv-2.dll` next to it.
+
+Windows 10/11 x64 with a current graphics driver is required. Builds are not signed yet, so Windows may warn about an unknown publisher.
 
 Your data lives in `%LOCALAPPDATA%\opensmarters\opensmarters\data`. Passwords are in Windows Credential Manager, under entries ending in `.opensmarters`.
 
@@ -99,7 +103,7 @@ cargo test --workspace --all-features
 cargo deny check; cargo audit
 ```
 
-**Release zip:** `powershell -ExecutionPolicy Bypass -File tools\package.ps1` writes `dist/`. It needs `cargo install --locked cargo-about --features cli`.
+**Release files:** `powershell -ExecutionPolicy Bypass -File tools\package.ps1` writes `dist/`: the portable zip, the setup exe (built from the same files) and `SHA256SUMS.txt`. It needs `cargo install --locked cargo-about --features cli`.
 
 ## Project layout
 
@@ -109,7 +113,11 @@ cargo deny check; cargo audit
 | `crates/store` | SQLite storage, keychain secrets, encrypted cache, Argon2id PIN |
 | `crates/player` | Hardened libmpv wrapper and the egui video view (the only crate with `unsafe`) |
 | `crates/app` | The desktop app (eframe/egui) |
+| `crates/afterglow` | The Afterglow theme, icons and painting helpers, shared by the app and the installer |
+| `crates/installer` | `opensmarters-setup`, the per-user Windows installer ([ADR 0002](docs/adr/0002-installer.md)) |
 | `crates/fake-panel` | A synthetic provider for development and tests |
+| `site/` | The landing page (static; [site/README.md](site/README.md)) |
+| `tools/assets/` | The launch-asset pipeline (Codex image generation, then a deterministic build into `assets/launch/`) |
 | `docs/` | [Architecture](docs/APP_ARCHITECTURE.md), [design system](docs/DESIGN.md), [protocol](docs/PROTOCOL.md), [security](docs/SECURITY.md), [libmpv](docs/LIBMPV.md), [progress](docs/PROGRESS.md) |
 
 ## Licence

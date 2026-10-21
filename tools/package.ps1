@@ -8,7 +8,8 @@
 
 .DESCRIPTION
     1. Ensures the pinned libmpv build is present (tools/fetch-libmpv.ps1, hash-verified).
-    2. Builds `opensmarters.exe` in release mode WITHOUT dev features (no demo provider, no harness).
+    2. Builds `opensmarters.exe` in release mode WITHOUT dev features (no demo provider, no harness),
+       and checks that it doesn't import the VC++ runtime DLL (same check for the setup exe).
     3. Generates THIRD_PARTY_LICENSES.html with cargo-about (all Rust crates + licence texts).
     4. Assembles exe + libmpv-2.dll + LICENSE + THIRD_PARTY.md + licence texts + README.txt.
        Signs opensmarters.exe when a certificate is configured (see SIGNING).
@@ -53,6 +54,15 @@ function Invoke-Checked([string]$what, [scriptblock]$block) {
 
 function Get-Sha256([string]$path) {
     (Get-FileHash -Algorithm SHA256 $path).Hash.ToLower()
+}
+
+# A clean PC has no Visual C++ Redistributable, so both exes link the VC runtime statically
+# (crates/app/build.rs, crates/installer/build.rs). Its DLL name in the binary is an import.
+function Assert-NoVcRuntimeImport([string]$file) {
+    $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($file))
+    if ($text -match '(?i)vcruntime140[_a-z0-9]*\.dll') {
+        throw "$(Split-Path -Leaf $file) imports $($Matches[0]): it would need the Visual C++ Redistributable"
+    }
 }
 
 # ---- signing (optional) -----------------------------------------------------
@@ -111,6 +121,7 @@ if (-not $SkipBuild) {
 }
 $exe = Join-Path $env:CARGO_TARGET_DIR 'release\opensmarters.exe'
 if (-not (Test-Path $exe)) { throw "release exe missing at $exe" }
+Assert-NoVcRuntimeImport $exe
 
 # ---- 3. third-party licences -----------------------------------------------
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
@@ -188,6 +199,7 @@ try {
 }
 $setupBuilt = Join-Path $env:CARGO_TARGET_DIR 'release\opensmarters-setup.exe'
 if (-not (Test-Path $setupBuilt)) { throw "setup exe missing at $setupBuilt" }
+Assert-NoVcRuntimeImport $setupBuilt
 $setupName = "$name-setup.exe"
 $setup = Join-Path $dist $setupName
 Copy-Item -Force $setupBuilt $setup

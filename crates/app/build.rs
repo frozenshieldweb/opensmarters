@@ -2,7 +2,7 @@
 //! Embeds Windows resources into the executable: the application icon
 //! (`assets/icon/opensmarters.ico`, so Explorer and the taskbar show it before the window
 //! opens) and a VERSIONINFO block (file properties, Task Manager) generated from the crate
-//! version.
+//! version. Also links the VC++ runtime statically (see `static_vcruntime`).
 
 use std::path::PathBuf;
 
@@ -12,6 +12,7 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    static_vcruntime();
     let (Ok(manifest), Ok(out)) = (
         std::env::var("CARGO_MANIFEST_DIR"),
         std::env::var("OUT_DIR"),
@@ -71,5 +72,31 @@ END
     // icon is set at runtime), so warn instead of failing the build.
     if let Err(e) = embed_resource::compile(&rc_path, embed_resource::NONE).manifest_optional() {
         println!("cargo:warning=could not embed the exe resources: {e}");
+    }
+}
+
+/// The VC++ runtime (vcruntime140.dll) is not part of Windows: link it statically so the app
+/// starts on a clean PC without the Visual C++ Redistributable (the installer only ships the
+/// release folder). The Universal CRT stays dynamic: it is a Windows 10/11 system component.
+/// The same switch as `crates/installer/build.rs`, for the `opensmarters` binary only.
+fn static_vcruntime() {
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+        return;
+    }
+    let arg = |a: &str| println!("cargo:rustc-link-arg-bin=opensmarters={a}");
+    for lib in [
+        "libvcruntimed.lib",
+        "vcruntime.lib",
+        "vcruntimed.lib",
+        "libcmtd.lib",
+        "msvcrt.lib",
+        "msvcrtd.lib",
+        "libucrt.lib",
+        "libucrtd.lib",
+    ] {
+        arg(&format!("/NODEFAULTLIB:{lib}"));
+    }
+    for lib in ["libcmt.lib", "libvcruntime.lib", "ucrt.lib"] {
+        arg(&format!("/DEFAULTLIB:{lib}"));
     }
 }

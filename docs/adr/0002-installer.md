@@ -143,7 +143,7 @@ validate target ─▶ archive hash ─▶ extract to <dir>.new (hash each file)
 |---|---|
 | No elevation, DPI, long paths | Embedded application manifest: `asInvoker`, PerMonitorV2, `supportedOS` Windows 10/11, `longPathAware` (`build.rs`, via `embed-resource`, with the icon and a VERSIONINFO naming the product "opensmarters") |
 | DLL planting (the exe runs from Downloads) | Static imports are resolved from System32 only (`/DEPENDENTLOADFLAG:0x800` link flag on the setup binary), and the first line of `main` calls `opensmarters_player::harden_dll_search_path()` (the player crate's audited `unsafe`, reused rather than duplicated) |
-| Clean PCs without the Visual C++ Redistributable | The VC runtime is linked statically into the setup binary (link arguments in `build.rs`); its imports are then Windows system DLLs only, the Universal CRT being part of Windows 10/11 |
+| Clean PCs without the Visual C++ Redistributable | The VC runtime is linked statically into the setup binary and into the app's `opensmarters.exe` (the same link arguments in `crates/installer/build.rs` and `crates/app/build.rs`); their imports are then Windows system DLLs only, the Universal CRT being part of Windows 10/11. `tools/package.ps1` fails if either exe still names `vcruntime140*.dll` |
 | Known folders (Start menu, Desktop, `%LOCALAPPDATA%\Programs`, system folders) | `known-folders` (safe `SHGetKnownFolderPath` wrapper) |
 | Apps & features entry | `winreg` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\opensmarters`; `URLInfoAbout`/`HelpLink` come from the workspace `repository` field (one place) |
 | Shortcuts | `mslnk` (pure-Rust `.lnk` writer). The app defines no AppUserModelID, so none is set. |

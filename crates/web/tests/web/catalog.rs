@@ -158,6 +158,26 @@ async fn xtream_catalogue() {
     );
     let movies = c.get(&format!("{base}/movies?category=all")).await.ok();
     assert_eq!(arr(&movies).len(), cat.movies.len());
+    // Long lists are sent gzip-compressed to browsers that accept it.
+    let raw = reqwest::Client::builder()
+        .no_gzip()
+        .build()
+        .unwrap()
+        .get(format!("{}{base}/movies?category=all", app.base))
+        .header("Accept-Encoding", "gzip")
+        .header(
+            "Cookie",
+            format!("opensmarters_session={}", c.session_token().unwrap()),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        raw.headers()
+            .get("content-encoding")
+            .and_then(|v| v.to_str().ok()),
+        Some("gzip")
+    );
     let m0 = &movies[0];
     for k in ["id", "name", "poster", "year", "rating", "added"] {
         assert!(m0.get(k).is_some(), "{k}");

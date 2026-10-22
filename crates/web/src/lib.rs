@@ -62,16 +62,30 @@ use opensmarters_core::Redactor;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use tower_http::compression::CompressionLayer;
+use tower_http::compression::predicate::{NotForContentType, Predicate as _, SizeAbove};
 
 pub use config::Config;
 pub use state::AppState;
 
 /// The whole HTTP application.
 pub fn router(state: AppState) -> Router {
+    // gzip for JSON (film lists run to megabytes) and the UI's files; never for video
+    // segments, playlists or images (no gain, and segments are already compressed).
+    let compress = CompressionLayer::new().compress_when(
+        SizeAbove::new(1024)
+            .and(NotForContentType::IMAGES)
+            .and(NotForContentType::const_new("video/"))
+            .and(NotForContentType::const_new(
+                "application/vnd.apple.mpegurl",
+            ))
+            .and(NotForContentType::SSE),
+    );
     Router::new()
         .nest("/api", api::router().layer(middleware::from_fn(api::guard)))
         .fallback(ui::serve)
         .layer(DefaultBodyLimit::max(64 * 1024))
+        .layer(compress)
         .with_state(state)
 }
 

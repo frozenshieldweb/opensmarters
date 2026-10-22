@@ -51,6 +51,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync", "process", "fs", "io-util"] }
+# gzip for JSON lists and the UI's files (never video or images).
+tower-http = { version = "0.7", default-features = false, features = ["compression-gzip"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "std"] }
 zeroize = "1"

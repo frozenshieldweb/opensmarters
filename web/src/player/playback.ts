@@ -545,7 +545,8 @@ export async function saveProgress(final: boolean): Promise<void> {
   const it = item.value;
   const dur = duration.value;
   if (!it || it.kind === "live" || !dur) return;
-  const pos = Math.floor(phase.value === "ended" ? dur : position.value);
+  // The real position, even at the end: a stream that stops early must not count as watched.
+  const pos = Math.floor(position.value);
   if (pos <= 0 || (!final && Math.abs(pos - lastSaved) < 5)) return;
   lastSaved = pos;
   try {

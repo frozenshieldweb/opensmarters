@@ -103,7 +103,8 @@ export function Guide(props: { memo: Memo; category?: string }) {
   const [focus, setFocus] = useState<Focus | null>(null);
   const pending = useRef<{ row: number; start: number } | null>(null);
 
-  useInitialFocus(!list.loading && channels.length > 0 && rows.size > 0 && version > 1, props.memo);
+  const firstRow = channels[0] ? rows.get(channels[0].key) : undefined;
+  useInitialFocus(!list.loading && !!firstRow && firstRow.state !== "loading" && version > 0, props.memo);
 
   useLayoutEffect(() => {
     const el = scroller.current;
@@ -300,6 +301,7 @@ export function Guide(props: { memo: Memo; category?: string }) {
                   key={p.start}
                   class={cx("g-cell", past && "is-past", live && "is-now")}
                   data-fk={`epg:${c.key}:${p.start}`}
+                  data-autofocus={i === 0 && live ? "" : undefined}
                   data-start={p.start}
                   tabIndex={-1}
                   style={{ transform: `translateX(${x0}px)`, width: `${Math.max(4, w - 2)}px` }}
@@ -308,7 +310,10 @@ export function Guide(props: { memo: Memo; category?: string }) {
                 >
                   {live && <span class="g-elapsed" style={{ width: `${fraction(p.start, p.end, t) * 100}%` }} />}
                   {w >= 48 && (
-                    <span class="g-cell-text">
+                    <span
+                      class="g-cell-text"
+                      style={{ paddingLeft: `${Math.max(0, Math.min(geo.left - x0, w - 72))}px` }}
+                    >
                       <span class="t-body-strong ellipsis">{cap(p.title, 80)}</span>
                       <span class="t-caption c-3 ellipsis tnum">{timeRange(p.start, p.end, fmt)}</span>
                     </span>
@@ -367,7 +372,13 @@ export function Guide(props: { memo: Memo; category?: string }) {
               {dot(
                 timeRange(fprog.start, fprog.end, fmt),
                 `${Math.round((fprog.end - fprog.start) / 60)} min`,
-                fprog.start > t ? `starts in ${Math.max(1, Math.round((fprog.start - t) / 60))} min` : fprog.end > t ? "on now" : "finished",
+                fprog.start > t
+                  ? fprog.start - t < 3600
+                    ? `starts in ${Math.max(1, Math.round((fprog.start - t) / 60))} min`
+                    : `starts at ${clock(fprog.start, fmt)}`
+                  : fprog.end > t
+                    ? "on now"
+                    : "finished",
               )}
             </p>
             {fprog.description && bp !== "compact" && <p class="c-2 ellipsis guide-desc">{cap(fprog.description, 300)}</p>}
@@ -388,7 +399,15 @@ export function Guide(props: { memo: Memo; category?: string }) {
         ) : channels.length === 0 ? (
           <Empty art="empty-guide" title={cat === "favourites" ? "No favourite channels yet" : "No channels here"} body="Choose another category." compact />
         ) : (
-          <div ref={scroller} class="guide-scroll" onKeyDown={onKeyDown} onFocusIn={onFocusIn} role="grid" aria-label="Programme guide">
+          <div
+            ref={scroller}
+            class="guide-scroll"
+            onKeyDown={onKeyDown}
+            onFocusIn={onFocusIn}
+            role="grid"
+            aria-label="Programme guide"
+            style={{ scrollPaddingLeft: `${chanW + 16}px`, scrollPaddingTop: `${RULER_H + 8}px` }}
+          >
             <div class="g-sizer" style={{ width: `${chanW + width}px`, height: `${RULER_H + channels.length * ROW_H}px` }}>
               <div class="g-ruler" style={{ width: `${chanW + width}px` }} aria-hidden="true">
                 <div class="g-ruler-corner t-caption" style={{ width: `${chanW}px` }}>

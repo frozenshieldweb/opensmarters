@@ -137,10 +137,17 @@ export function Search(props: { memo: Memo; q?: string }) {
   );
 }
 
-export function ChannelTile(props: { c: Channel; onClick: () => void }) {
+export function ChannelTile(props: { c: Channel; onClick: () => void; autofocus?: boolean }) {
   const { c } = props;
   return (
-    <button type="button" class="card tile tile-plain" data-fk={`tile:${c.key}`} aria-label={c.name} onClick={props.onClick}>
+    <button
+      type="button"
+      class="card tile tile-plain"
+      data-fk={`tile:${c.key}`}
+      data-autofocus={props.autofocus ? "" : undefined}
+      aria-label={c.name}
+      onClick={props.onClick}
+    >
       <ChannelLogo channel={c} size="lg" />
       <span class="tile-text">
         <span class="t-body-strong ellipsis">{cap(c.name, 80)}</span>

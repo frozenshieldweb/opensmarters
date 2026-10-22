@@ -38,6 +38,7 @@
   inset: 0;
   z-index: 31;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr) auto;
   color: var(--text);
   cursor: default;
@@ -159,6 +160,7 @@
 .scrubber {
   position: relative;
   flex: 1 1 auto;
+  min-width: 0;
   height: 28px;
   display: flex;
   align-items: center;
@@ -376,17 +378,28 @@
     display: none;
   }
   .osd-controls {
-    grid-template-columns: auto 1fr auto;
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
   }
   .osd-left:empty {
     display: none;
   }
+  .osd-left {
+    gap: 0;
+  }
   .osd-center {
-    justify-content: center;
-    gap: 12px;
+    gap: 4px;
   }
   .osd-right {
-    gap: 4px;
+    gap: 0;
+  }
+  .scrub-time {
+    min-width: 0;
+    font-size: 14px;
+  }
+  .scrubber-row {
+    gap: 10px;
   }
   .sheet {
     inset: auto 12px 12px 12px;

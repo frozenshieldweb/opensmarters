@@ -296,6 +296,7 @@
   gap: 12px;
 }
 .live-head {
+  flex: none;
   display: flex;
   align-items: baseline;
   gap: 12px;
@@ -307,7 +308,7 @@
   padding: 0 10px;
 }
 .live-list-wrap {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   position: relative;
 }
@@ -315,6 +316,7 @@
   padding: 6px 0 24px;
 }
 .live-hint {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -457,7 +459,7 @@
 .preview-error {
   position: absolute;
   inset: 0;
-  z-index: 6;
+  z-index: 11; /* above the shared video layer (z-index 10) */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -580,6 +582,7 @@
   gap: 14px;
 }
 .guide-head {
+  flex: none;
   display: flex;
   align-items: baseline;
   gap: 12px;
@@ -593,6 +596,7 @@
   flex: none;
 }
 .guide-info {
+  flex: none;
   min-height: 92px;
   display: flex;
   flex-direction: column;
@@ -603,7 +607,7 @@
   margin-top: 2px;
 }
 .guide-body {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   position: relative;
   margin: 0 calc(-1 * var(--margin) + 8px);
@@ -772,6 +776,7 @@
   height: 60px;
 }
 .guide-hint {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -802,6 +807,7 @@
   gap: 12px;
 }
 .browse-head {
+  flex: none;
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
@@ -819,12 +825,12 @@
   padding: 0 var(--margin);
 }
 .browse-body {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   position: relative;
 }
 .poster-grid {
-  padding: 0 calc(var(--margin) - 20px);
+  padding: 0;
 }
 .grid-skeleton {
   display: grid;
@@ -1376,7 +1382,33 @@
     flex-wrap: wrap;
   }
   .user-row {
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    column-gap: 16px;
+    row-gap: 10px;
+  }
+  .user-actions {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+  .provider-screen .screen-head {
+    padding-left: 0;
+    padding-right: 0;
+  }
+  .browse-head .t-heading {
+    font-size: 22px;
+    line-height: 28px;
+  }
+  .browse-titles {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+  }
+  .guide-head {
+    display: none;
+  }
+  .guide {
+    padding-top: 12px;
   }
   .number-entry {
     top: 72px;

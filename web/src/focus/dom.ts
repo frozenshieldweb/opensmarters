@@ -66,12 +66,14 @@ function candidateOf(el: HTMLElement): Candidate<Element> {
   const r = el.getBoundingClientRect();
   const scopeEl = el.closest<HTMLElement>("[data-scope]");
   const groupEl = el.closest<HTMLElement>("[data-group]");
+  const g = groupEl?.getBoundingClientRect();
   return {
     id: el,
     rect: { x: r.left, y: r.top, w: r.width, h: r.height },
     scope: scopeEl?.dataset["scope"] ?? groupEl?.dataset["group"] ?? "",
     group: groupEl?.dataset["group"] ?? "",
     autofocus: el.hasAttribute("data-autofocus"),
+    ...(g ? { groupRect: { x: g.left, y: g.top, w: g.width, h: g.height } } : {}),
   };
 }
 

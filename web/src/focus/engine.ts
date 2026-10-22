@@ -44,6 +44,8 @@ export interface Candidate<K> {
   group: string;
   /** Preferred initial focus when nothing else is focused. */
   autofocus?: boolean;
+  /** The rectangle of the whole group (region), when known. */
+  groupRect?: Rect;
 }
 
 /**
@@ -160,7 +162,7 @@ export function navigate<K>(
   //    item (a top bar above the page, in the compact layout); a side rail beside the page never
   //    does, so Down at the bottom of a page doesn't jump into the rail's bottom items.
   const reachable = others.filter(
-    (c) => axisOf(dir) === "horizontal" || c.group === src.group || overlapsX(c.rect, src.rect),
+    (c) => axisOf(dir) === "horizontal" || c.group === src.group || overlapsX(c.groupRect ?? c.rect, src.rect),
   );
   const best = bestInDirection(src.rect, dir, reachable);
   if (!best) return null;

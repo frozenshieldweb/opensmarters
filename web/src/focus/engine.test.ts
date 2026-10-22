@@ -106,6 +106,11 @@ describe("navigate", () => {
     const railItem = cand("nav", r(12, 40, 200, 48), "rail-nav", "rail");
     const card = cand("card", r(280, 300, 168, 252), "posters");
     expect(navigate(card, "up", [railItem, card])).toBeNull();
+    // A chip far right of the menu button still reaches it: the top bar spans the page.
+    const chip = cand("chip", r(240, 70, 80, 36), "chips");
+    const barMenu = { ...menu, groupRect: r(0, 0, 390, 56) };
+    expect(navigate(chip, "up", [menu, chip])).toBeNull();
+    expect(navigate(chip, "up", [barMenu, chip])).toBe("menu");
   });
 
   it("returns null at an edge", () => {

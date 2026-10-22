@@ -101,7 +101,11 @@ export function PosterCard({
     >
       <span class="card-art poster-art">
         <Img src={image} fallback="/img/poster.jpg" onFail={() => setFailed(true)} />
-        {showTitle && <span class="poster-fallback-title">{cap(title, 80)}</span>}
+        {showTitle && (
+          <span class="poster-fallback-title">
+            <span>{cap(title, 80)}</span>
+          </span>
+        )}
         {badge}
         {progress !== undefined && progress > 0 && <Bar value={progress} class="card-progress" />}
       </span>

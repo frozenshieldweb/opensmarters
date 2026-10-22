@@ -192,7 +192,16 @@ export function Live(props: { memo: Memo; category?: string }) {
         onRange={onRange}
         reveal={reveal}
         class="channel-list"
-        render={(c, _i, tab) => <ChannelRow c={c} account={a.id} playing={playing?.key === c.key} tabIndex={tab} onActivate={() => activate(c)} />}
+        render={(c, i, tab) => (
+          <ChannelRow
+            c={c}
+            account={a.id}
+            playing={playing?.key === c.key}
+            autofocus={playing ? playing.key === c.key : i === 0}
+            tabIndex={tab}
+            onActivate={() => activate(c)}
+          />
+        )}
       />
     );
 
@@ -245,7 +254,7 @@ export function Live(props: { memo: Memo; category?: string }) {
   );
 }
 
-function ChannelRow(props: { c: Channel; account: string; playing: boolean; tabIndex: number; onActivate: () => void }) {
+function ChannelRow(props: { c: Channel; account: string; playing: boolean; autofocus: boolean; tabIndex: number; onActivate: () => void }) {
   const { c } = props;
   void epgVersion.value;
   const t = now.value;
@@ -259,6 +268,7 @@ function ChannelRow(props: { c: Channel; account: string; playing: boolean; tabI
       class={cx("channel-row", props.playing && "is-playing")}
       tabIndex={props.tabIndex}
       data-fk={`ch:${c.key}`}
+      data-autofocus={props.autofocus ? "" : undefined}
       aria-current={props.playing ? "true" : undefined}
       aria-label={[c.number !== null ? `${c.number}` : "", c.name, p ? `now: ${p.title}` : "", props.playing ? "playing" : "", fav ? "favourite" : ""].filter(Boolean).join(", ")}
       onClick={props.onActivate}

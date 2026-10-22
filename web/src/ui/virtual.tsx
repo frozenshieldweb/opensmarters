@@ -228,6 +228,8 @@ interface GridProps<T> extends Shared<T> {
   render: (item: T, index: number, tabIndex: number, width: number) => ComponentChildren;
   /** Padding inside the scroll area around the grid (room for the focus ring and lift). */
   pad: number;
+  /** Top padding (default: `pad`). */
+  padTop?: number;
 }
 
 /** A virtualised grid of equal cards (posters). */
@@ -244,7 +246,7 @@ export function VirtualGrid<T>(p: GridProps<T>) {
   const itemH = p.itemHeight(itemW);
   const rowH = itemH + p.rowGap;
   const rowsN = Math.ceil(n / cols);
-  const top0 = p.pad;
+  const top0 = p.padTop ?? p.pad;
 
   useLayoutEffect(() => {
     const el = ref.current;

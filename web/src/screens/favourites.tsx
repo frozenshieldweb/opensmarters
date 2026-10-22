@@ -46,22 +46,38 @@ export function FavouritesScreen(props: { memo: Memo }) {
       )}
       {f && f.channels.length > 0 && (
         <Rail title="Channels" kicker={`${f.channels.length}`} scope="fav-channels" onSeeAll={() => go({ name: "live", category: "favourites" })}>
-          {f.channels.map((c) => (
-            <ChannelTile key={c.key} c={c} onClick={() => watchChannel(a.id, c, f.channels)} />
+          {f.channels.map((c, i) => (
+            <ChannelTile key={c.key} c={c} autofocus={i === 0} onClick={() => watchChannel(a.id, c, f.channels)} />
           ))}
         </Rail>
       )}
       {f && f.movies.length > 0 && (
         <Rail title="Films" kicker={`${f.movies.length}`} scope="fav-movies">
-          {f.movies.map((m) => (
-            <PosterCard key={m.id} fk={`movie:${m.id}`} title={m.name} meta={metaOf(m)} image={m.poster} onClick={() => go({ name: "movie", id: m.id })} />
+          {f.movies.map((m, i) => (
+            <PosterCard
+              key={m.id}
+              fk={`movie:${m.id}`}
+              autofocus={i === 0 && f.channels.length === 0}
+              title={m.name}
+              meta={metaOf(m)}
+              image={m.poster}
+              onClick={() => go({ name: "movie", id: m.id })}
+            />
           ))}
         </Rail>
       )}
       {f && f.series.length > 0 && (
         <Rail title="Series" kicker={`${f.series.length}`} scope="fav-series">
-          {f.series.map((s) => (
-            <PosterCard key={s.id} fk={`series:${s.id}`} title={s.name} meta={metaOf(s)} image={s.poster} onClick={() => go({ name: "show", id: s.id })} />
+          {f.series.map((s, i) => (
+            <PosterCard
+              key={s.id}
+              fk={`series:${s.id}`}
+              autofocus={i === 0 && f.channels.length === 0 && f.movies.length === 0}
+              title={s.name}
+              meta={metaOf(s)}
+              image={s.poster}
+              onClick={() => go({ name: "show", id: s.id })}
+            />
           ))}
         </Rail>
       )}

@@ -124,12 +124,14 @@ export function Browse(props: { memo: Memo; kind: Kind; category?: string }) {
         minItemWidth={posterW}
         gap={bp === "compact" ? 12 : 16}
         rowGap={bp === "compact" ? 16 : 24}
-        pad={bp === "compact" ? 12 : 20}
+        pad={bp === "wide" ? 48 : bp === "medium" ? 40 : window.innerWidth < 600 ? 16 : 24}
+        padTop={16}
         itemHeight={(w) => Math.round(w * 1.5) + 52}
         class="poster-grid"
-        render={(x, _i, tab) => (
+        render={(x, i, tab) => (
           <PosterCard
             tabIndex={tab}
+            autofocus={i === 0}
             fk={`${k}:${x.id}`}
             title={x.name}
             meta={metaOf(x)}
@@ -166,7 +168,7 @@ export function Browse(props: { memo: Memo; kind: Kind; category?: string }) {
       <section class="browse-main" aria-label={catName}>
         <header class="browse-head">
           <div class="browse-titles">
-            <h1 class="t-heading ellipsis">{bp === "wide" || m3u ? catName : title}</h1>
+            <h1 class="t-heading ellipsis">{bp === "medium" && !m3u ? title : catName}</h1>
             {list.data && !m3u && <span class="t-caption c-3 tnum">{plural(sorted.length, k === "movies" ? "film" : "series", k === "movies" ? "films" : "series")}</span>}
           </div>
           {!m3u && (

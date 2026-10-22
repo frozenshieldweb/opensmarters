@@ -15,7 +15,7 @@ import { cap } from "../lib/text";
 import { Bar, Button, Icon, IconButton, Spinner, cx } from "../ui/kit";
 import { LiveBadge } from "../ui/media";
 import { useBack, useKeys } from "../ui/hooks";
-import { focusEl, focusFallback, isTextInput } from "../focus/dom";
+import { focusEl, focusFallback, focusKey, isTextInput } from "../focus/dom";
 import * as pb from "./playback";
 
 const HIDE_AFTER = 3000;
@@ -79,6 +79,13 @@ export function Player(props: { inert: boolean }) {
       const toLive = current.value.route.name === "live" && pb.item.value?.kind === "live";
       if (!toLive) pb.stop();
       if (enteredFs.current && document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+      // Back on the screen below: the focus returns to what opened the player.
+      const below = current.value;
+      requestAnimationFrame(() => {
+        const content = document.querySelector('[data-group="content"]') ?? undefined;
+        if (below.memo.focus && focusKey(below.memo.focus, content)) return;
+        if (content) focusFallback(content);
+      });
     };
   }, []);
 
@@ -92,12 +99,15 @@ export function Player(props: { inert: boolean }) {
       return;
     }
     const root = rootRef.current;
-    if (root && !root.contains(document.activeElement) || document.activeElement === root) {
-      const pp = root?.querySelector<HTMLElement>("[data-fk='osd:play']");
-      if (pp) focusEl(pp, { scroll: false });
-      else if (root) focusFallback(root);
+    if (!root) return;
+    const active = document.activeElement;
+    if (!root.contains(active) || active === root || (err && !active?.closest("[data-scope='osd-error']"))) {
+      const target =
+        root.querySelector<HTMLElement>(".osd-middle [data-autofocus]") ?? root.querySelector<HTMLElement>("[data-fk='osd:play']");
+      if (target) focusEl(target, { scroll: false });
+      else focusFallback(root);
     }
-  }, [visible, !!err]);
+  }, [visible, !!err, phase === "ended"]);
 
   // Up next: when an episode ends and there's another one.
   const next = pb.nextEpisode.value;

@@ -10,10 +10,13 @@ import { focusEl, focusFallback, pushBack } from "../focus/dom";
 import { toasts } from "../state/misc";
 import { Button, cx, Icon } from "./kit";
 
+/** Closes a layer; `restoreFocus: false` when the action itself moves the focus (navigation). */
+export type CloseLayer = (restoreFocus?: boolean) => void;
+
 interface Layer {
   id: number;
-  render: (close: () => void) => VNode;
-  close: () => void;
+  render: (close: CloseLayer) => VNode;
+  close: CloseLayer;
 }
 
 const layers = signal<Layer[]>([]);
@@ -23,14 +26,15 @@ let layerId = 1;
 export const layerOpen = computed(() => layers.value.length > 0);
 
 /** Opens a layer; resolves when it closes. */
-export function openLayer(render: (close: () => void) => VNode): Promise<void> {
+export function openLayer(render: (close: CloseLayer) => VNode): Promise<void> {
   return new Promise((resolve) => {
     const opener = document.activeElement as HTMLElement | null;
     const id = layerId++;
-    const close = () => {
+    const close: CloseLayer = (restoreFocus = true) => {
       if (!layers.value.some((l) => l.id === id)) return;
       layers.value = layers.value.filter((l) => l.id !== id);
       resolve();
+      if (!restoreFocus) return;
       // Back to the element that opened it (if it's still there).
       requestAnimationFrame(() => {
         if (opener && opener.isConnected && !opener.closest("[inert]")) focusEl(opener, { scroll: false });
@@ -54,7 +58,7 @@ export function confirmDialog(opts: {
     <Dialog title={opts.title} onClose={close}>
       <div class="dialog-body c-2">{opts.body}</div>
       <div class="dialog-actions">
-        <Button variant="secondary" onClick={close} autofocus>
+        <Button variant="secondary" onClick={() => close()} autofocus>
           {opts.cancel ?? "Cancel"}
         </Button>
         <Button

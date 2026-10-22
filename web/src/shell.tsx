@@ -12,7 +12,7 @@ import { cap, hue, monogram } from "./lib/text";
 import { Icon, IconButton, Lockup, cx } from "./ui/kit";
 import type { IconName } from "./ui/icons";
 import { breakpoint } from "./ui/hooks";
-import { openLayer, openMenu } from "./ui/overlay";
+import { openLayer, openMenu, type CloseLayer } from "./ui/overlay";
 import { focusFallback, pushBack } from "./focus/dom";
 import { useEffect, useLayoutEffect, useRef } from "preact/hooks";
 import { invalidate } from "./state/cache";
@@ -152,7 +152,7 @@ function openDrawer(): void {
   void openLayer((close) => <Drawer onClose={close} />);
 }
 
-function Drawer(props: { onClose: () => void }) {
+function Drawer(props: { onClose: CloseLayer }) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const el = ref.current;
@@ -168,7 +168,7 @@ function Drawer(props: { onClose: () => void }) {
   return (
     <div class="layer layer-drawer" data-modal="" onPointerDown={(e) => e.target === e.currentTarget && props.onClose()}>
       <div ref={ref} class="rail rail-drawer" data-group="rail" role="dialog" aria-modal="true" aria-label="Menu">
-        <RailBody onPick={props.onClose} />
+        <RailBody onPick={() => props.onClose(false)} />
       </div>
     </div>
   );

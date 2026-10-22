@@ -99,6 +99,10 @@
 .provider-col {
   max-width: 560px;
 }
+.first-run-signout {
+  align-self: flex-start;
+  margin: 16px 0 0 -14px;
+}
 .provider-screen .screen-head {
   flex-direction: column;
   align-items: flex-start;

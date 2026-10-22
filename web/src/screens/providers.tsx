@@ -7,7 +7,7 @@ import type { ComponentChildren } from "preact";
 import { useState } from "preact/hooks";
 import { api, ApiError } from "../api/client";
 import type { AccountPatch, NewAccount } from "../api/types";
-import { accounts, putAccount, selectAccount } from "../state/session";
+import { accounts, putAccount, selectAccount, signOut } from "../state/session";
 import { back, go } from "../state/router";
 import { toast } from "../state/misc";
 import { invalidate } from "../state/cache";
@@ -128,7 +128,7 @@ export function AddProvider(props: { firstRun?: boolean; editId?: string }) {
       <p class="provider-explain c-2">
         {kind === "xtream"
           ? "Your provider gave you a server address, a username and a password. You get live TV with its guide, films and series."
-          : "A playlist link usually ends in .m3u or .m3u8. Add your provider's guide link (XMLTV) too if you have one. Playlists have live TV only."}
+          : "A playlist link usually ends in .m3u or .m3u8. Add your provider's guide link (XMLTV) too if you have one. Playlists have live TV, and films when the playlist lists them; no series."}
       </p>
       <Field label="Name" value={name} onInput={setName} placeholder="Living room" error={fe["name"]} autofocus maxLength={64} />
       {kind === "xtream" ? (
@@ -210,6 +210,9 @@ export function AddProvider(props: { firstRun?: boolean; editId?: string }) {
         </h1>
         <p class="auth-intro c-2">Use the details from your own subscription. opensmarters comes with no channels of its own.</p>
         {form}
+        <Button variant="ghost" icon="sign-out" class="first-run-signout" onClick={() => void signOut()}>
+          Sign out
+        </Button>
       </FirstRunLayout>
     );
   }

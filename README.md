@@ -118,6 +118,16 @@ cargo deny check; cargo audit
 
 **Release files:** `powershell -ExecutionPolicy Bypass -File tools\package.ps1` writes `dist/`: the portable zip, the setup exe (built from the same files) and `SHA256SUMS.txt`. It needs `cargo install --locked cargo-about --features cli`.
 
+**Web UI** (`web/`, the web edition's browser interface; Vite, TypeScript and Preact; Node 22.12 or newer):
+```bash
+cd web
+npm ci
+npm run dev        # http://localhost:5173 with a built-in mock of the server's API (test video made with ffmpeg)
+npm run build      # web/dist, which the opensmarters-web server serves
+npm run typecheck; npm run lint; npm test
+OPENSMARTERS_API=http://127.0.0.1:8080 npm run dev   # use a running opensmarters-web instead of the mock
+```
+
 ## Project layout
 
 | Path | What |

@@ -344,3 +344,44 @@ async fn xtream_film_episode_and_hls_source() {
     assert_eq!(missing["error"]["code"], "provider_error", "{missing}");
     app.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn video_the_browser_cannot_play() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let panel = media_panel("").await;
+    let cat = panel.catalogue().clone();
+    // The AVI test film is MPEG-4 Part 2 video with MP3 audio.
+    let avi = cat
+        .movies
+        .iter()
+        .find(|m| m.container_extension == "avi")
+        .expect("an AVI film");
+    let body = |account: &str| json!({"account": account, "kind": "movie", "id": avi.stream_id.to_string(), "hevc": false});
+
+    // Default policy: refused with a plain message, no stream left behind.
+    let app = app(&[panel.addr()]).await;
+    let c = admin(&app).await;
+    let a = add_xtream(&c, &panel).await;
+    let r = c.post("/api/play", body(&a)).await;
+    assert_eq!(
+        (r.status, r.code()),
+        (415, "unsupported_format"),
+        "{}",
+        r.json
+    );
+    assert_eq!(app.server.state.streams.count(), 0);
+    app.shutdown().await;
+
+    // OPENSMARTERS_TRANSCODE_VIDEO=always: converted to H.264 (and the audio to AAC).
+    let app = app_with(&[panel.addr()], |c| {
+        c.transcode_video = opensmarters_web::config::TranscodeVideo::Always;
+    })
+    .await;
+    let c = admin(&app).await;
+    let a = add_xtream(&c, &panel).await;
+    let r = c.post("/api/play", body(&a)).await.ok();
+    fetch_hls(&c, r["url"].as_str().unwrap()).await;
+    app.shutdown().await;
+}

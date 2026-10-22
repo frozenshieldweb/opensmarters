@@ -57,7 +57,9 @@ pub async fn setup(
             "This server is already set up. Sign in instead.",
         ));
     }
-    let keys = vec![format!("setup-ip:{ip}"), "setup".to_owned()];
+    // Per address only: a global lock would let anyone block the owner's setup (the
+    // code has about 60 bits, far beyond guessing).
+    let keys = vec![format!("setup-ip:{ip}")];
     state.limiter.check(&keys).map_err(Limiter::rejection)?;
     if !state.setup_code_matches(&body.setup_code) {
         state.limiter.fail(&keys);

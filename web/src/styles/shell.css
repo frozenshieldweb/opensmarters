@@ -1,0 +1,248 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * The shell (DESIGN.md §3, §6.1): full window, side rail, inner scrolling only.
+ */
+
+.shell {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+  overflow: clip;
+}
+.main {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: clip;
+}
+
+/* ---- side rail -------------------------------------------------------------------------- */
+.rail {
+  position: relative;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  width: var(--rail-w);
+  height: 100%;
+  padding: 24px 12px 20px;
+  background: var(--surface-1);
+  border-right: 1px solid var(--stroke-subtle);
+  overflow: hidden;
+}
+.rail-top {
+  display: flex;
+  align-items: center;
+  height: 40px;
+  padding: 0 12px;
+  margin-bottom: 28px;
+  font-size: 26px;
+  white-space: nowrap;
+}
+.rail-lockup .brand-symbol {
+  width: 28px;
+  height: 22.4px;
+}
+.rail-items {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.rail-bottom {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 16px;
+}
+.rail-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  height: 48px;
+  padding: 0 14px;
+  border-radius: var(--r-sm);
+  color: var(--text-2);
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background-color var(--fast) var(--quad-out), color var(--fast) var(--quad-out);
+}
+.rail-icon {
+  font-size: 24px;
+}
+.rail-item:hover,
+.rail-item:focus {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.rail-item.is-current {
+  color: var(--text);
+}
+.rail-item.is-current .rail-icon {
+  color: var(--accent);
+}
+.rail-item.is-current::after {
+  content: "";
+  position: absolute;
+  right: -12px;
+  top: 12px;
+  width: 3px;
+  height: 24px;
+  border-radius: var(--r-full);
+  background: var(--accent);
+}
+.rail-label {
+  min-width: 0;
+  transition: opacity var(--slow) var(--cubic-out);
+}
+.rail-account {
+  padding: 0 10px;
+}
+.rail-account .rail-label {
+  flex: 1 1 auto;
+}
+.rail-caret {
+  font-size: 16px;
+  color: var(--text-3);
+}
+
+/* Medium: collapsed to 72 px; it expands over the content while it has the focus. */
+.bp-medium .rail {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 72px;
+  padding: 24px 12px 20px;
+  transition: width var(--slow) var(--cubic-out), box-shadow var(--slow) var(--cubic-out);
+}
+.bp-medium .rail-item {
+  padding: 0 12px;
+}
+.bp-medium .rail .rail-label,
+.bp-medium .rail .rail-caret,
+.bp-medium .rail .wordmark {
+  opacity: 0;
+}
+.bp-medium .rail .rail-top {
+  padding: 0 10px;
+}
+.bp-medium .rail:focus-within {
+  width: 232px;
+  box-shadow: var(--e2);
+}
+.bp-medium .rail:focus-within .rail-label,
+.bp-medium .rail:focus-within .rail-caret,
+.bp-medium .rail:focus-within .wordmark {
+  opacity: 1;
+}
+.bp-medium .main {
+  grid-column: 2;
+}
+.bp-medium .rail-account {
+  padding: 0 6px;
+}
+
+/* Compact: a top bar with a menu button; the rail opens as a drawer. */
+.bp-compact {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 56px minmax(0, 1fr);
+}
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 56px;
+  padding: 0 8px 0 4px;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--stroke-subtle);
+}
+.topbar-title {
+  flex: 1 1 auto;
+}
+.topbar .status {
+  position: static;
+  height: auto;
+  padding-right: 8px;
+}
+.rail-drawer {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: min(280px, 85vw);
+  box-shadow: var(--e3);
+  animation: drawer-in var(--slow) var(--cubic-out);
+}
+@keyframes drawer-in {
+  from {
+    transform: translateX(-24px);
+    opacity: 0;
+  }
+}
+
+/* ---- status cluster (clock) ------------------------------------------------------------- */
+.status {
+  position: absolute;
+  top: 0;
+  right: var(--margin);
+  z-index: 15;
+  height: 88px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  pointer-events: none;
+}
+.status-clock {
+  color: var(--text);
+}
+
+/* ---- screens -------------------------------------------------------------------------------- */
+.screen {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  animation: screen-in var(--slow) var(--cubic-out);
+}
+@keyframes screen-in {
+  from {
+    opacity: 0;
+  }
+}
+.screen-pad {
+  padding: 24px var(--margin) 48px;
+}
+.screen-pad-x {
+  padding-left: var(--margin);
+  padding-right: var(--margin);
+}
+.screen-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-height: 88px;
+  padding-top: 26px;
+  padding-right: 120px;
+}
+.back-btn {
+  margin-left: -12px;
+}
+
+/* ---- boot ----------------------------------------------------------------------------------- */
+.boot {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 24px;
+  background: var(--bg);
+}
+.boot-symbol {
+  width: 64px;
+  height: 51px;
+  opacity: 0.6;
+  animation: fade-in var(--slower) var(--cubic-out);
+}
+.boot-error {
+  width: min(480px, calc(100vw - 32px));
+}

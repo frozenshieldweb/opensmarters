@@ -1,0 +1,381 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * opensmarters web, art direction "Afterglow" (docs/DESIGN.md is the contract; tokens as in
+ * site/styles.css). Dark only. Styles live in these files only: no inline <style> and no style
+ * attributes in markup (the CSP is `style-src 'self'`); dynamic values are set through
+ * element.style by Preact.
+ */
+
+/* ---- fonts (SIL OFL 1.1 texts in /fonts) ------------------------------------------------- */
+@font-face {
+  font-family: "Afterglow Sans"; /* Source Sans 3, subset and renamed (OFL Reserved Font Name) */
+  src: url("/fonts/afterglow-sans-latin.woff2") format("woff2");
+  font-weight: 200 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F,
+    U+2074, U+20AC, U+2122, U+2190-2193, U+2212, U+2215, U+2713, U+2605, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Afterglow Sans"; /* Latin Extended, Vietnamese, Greek, Cyrillic: provider text */
+  src: url("/fonts/afterglow-sans-ext.woff2") format("woff2");
+  font-weight: 200 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0100-024F, U+0259, U+0300-036F, U+0370-03FF, U+0400-052F, U+1E00-1EFF, U+20A0-20C0;
+}
+@font-face {
+  font-family: "Fraunces";
+  src: url("/fonts/fraunces-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Afterglow Fallback";
+  src: local("Arial"), local("Helvetica Neue"), local("Helvetica"), local("Liberation Sans");
+  size-adjust: 93%;
+  ascent-override: 110%;
+  descent-override: 43%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: "Fraunces Fallback";
+  src: local("Georgia"), local("Times New Roman"), local("Liberation Serif");
+  size-adjust: 100%;
+  ascent-override: 98%;
+  descent-override: 26%;
+  line-gap-override: 0%;
+}
+
+/* ---- tokens (DESIGN §4) ----------------------------------------------------------------- */
+:root {
+  --bg: #141013;
+  --bg-deep: #0d0a0c;
+  --video: #000;
+  --surface-1: #20191e;
+  --surface-2: #2c2228;
+  --surface-3: #3a2d34;
+  --surface-4: #4a3a43;
+  --surface-3-hover: #463840;
+  --stroke-subtle: rgb(255 255 255 / 0.08);
+  --stroke: rgb(255 255 255 / 0.14);
+  --scrim: rgb(13 10 12 / 0.72);
+  --text: #f4ece4;
+  --text-2: #bfafb6;
+  --text-3: #a8989e;
+  --text-disabled: #6e6168;
+  --text-on-accent: #1a1316;
+  --accent: #e6be91;
+  --accent-hover: #efcda6;
+  --accent-pressed: #d4a877;
+  --accent-soft: rgb(230 190 145 / 0.16);
+  --focus: #f2d3ae;
+  --focus-glow: rgb(230 190 145 / 0.28);
+  --sage: #a4b6a4;
+  --cream: #f4ece4;
+  --live: #f0665e;
+  --danger: #f28b82;
+  --danger-bg: #3d292c;
+  --warning: #f0a848;
+  --warning-bg: #3d2d24;
+  --success: #8fc79a;
+  --success-bg: rgb(143 199 154 / 0.12);
+  --info: #9fb4d6;
+  --info-bg: rgb(159 180 214 / 0.12);
+
+  --r-xs: 4px;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 24px;
+  --r-full: 999px;
+
+  --e1: 0 6px 18px rgb(0 0 0 / 0.45);
+  --e2: 0 10px 28px rgb(0 0 0 / 0.55);
+  --e3: 0 18px 48px 4px rgb(0 0 0 / 0.65);
+  /* §5: a 3 px ring outside the element with a 3 px gap in the page colour, plus the glow. */
+  --ring: 0 0 0 3px var(--bg), 0 0 0 6px var(--focus), 0 0 24px 8px var(--focus-glow);
+
+  --fast: 90ms;
+  --base: 160ms;
+  --slow: 240ms;
+  --slower: 400ms;
+  --osd: 200ms;
+  --quad-out: cubic-bezier(0.5, 1, 0.89, 1);
+  --cubic-out: cubic-bezier(0.33, 1, 0.68, 1);
+  --cubic-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+  --sans: "Afterglow Sans", "Afterglow Fallback", system-ui, sans-serif;
+  --serif: "Fraunces", "Fraunces Fallback", Georgia, serif;
+
+  /* Layout (DESIGN §3): wide by default, narrowed below. */
+  --margin: 48px;
+  --rail-w: 232px;
+  --poster-w: 168px;
+  color-scheme: dark;
+}
+@media (max-width: 1439.98px) {
+  :root {
+    --margin: 40px;
+    --rail-w: 72px;
+    --poster-w: 148px;
+  }
+}
+@media (max-width: 959.98px) {
+  :root {
+    --margin: 24px;
+    --rail-w: 0px;
+    --poster-w: 132px;
+  }
+}
+@media (max-width: 599.98px) {
+  :root {
+    --margin: 16px;
+    --poster-w: 112px;
+  }
+}
+
+/* ---- base ---------------------------------------------------------------------------------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  overscroll-behavior: none;
+}
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+body {
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#app {
+  position: fixed;
+  inset: 0;
+  overflow: clip;
+}
+p,
+h1,
+h2,
+h3,
+ul,
+ol,
+figure {
+  margin: 0;
+  padding: 0;
+}
+ul,
+ol {
+  list-style: none;
+}
+h1,
+h2,
+h3 {
+  font-size: inherit;
+  font-weight: inherit;
+}
+a {
+  color: var(--accent);
+  text-underline-offset: 0.18em;
+  text-decoration-thickness: 1px;
+}
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+}
+button {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  text-align: inherit;
+}
+img {
+  display: block;
+  max-width: 100%;
+}
+input,
+textarea {
+  user-select: text;
+  -webkit-user-select: text;
+}
+:focus {
+  outline: none;
+}
+.noscript {
+  padding: 48px;
+  color: var(--text-2);
+}
+
+/* Focus (DESIGN §5): ring + gap + glow on every focusable thing; hidden after touch input. */
+:where(button, a, [data-f]):focus {
+  box-shadow: var(--ring);
+}
+html[data-input="touch"] :where(button, a, [data-f]):focus {
+  box-shadow: none;
+}
+
+/* Thin, dark scrollbars on the panels that scroll (the shell itself never scrolls). */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface-4) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--surface-4);
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::selection {
+  background: rgb(230 190 145 / 0.22);
+}
+
+/* ---- type ramp (DESIGN §4.7) ------------------------------------------------------------ */
+.t-caption {
+  font-size: 13px;
+  line-height: 18px;
+}
+.t-overline {
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.t-body-strong {
+  font-weight: 600;
+}
+.t-title-sm {
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 600;
+}
+.t-title {
+  font-size: 22px;
+  line-height: 28px;
+  font-weight: 600;
+}
+.t-heading {
+  font-size: 28px;
+  line-height: 34px;
+  font-weight: 700;
+}
+.t-display {
+  font-family: var(--serif);
+  font-weight: 560;
+  font-variation-settings: "opsz" 72;
+  font-optical-sizing: none;
+  font-size: 40px;
+  line-height: 46px;
+  letter-spacing: -0.006em;
+}
+.t-hero {
+  font-family: var(--serif);
+  font-weight: 560;
+  font-variation-settings: "opsz" 72;
+  font-optical-sizing: none;
+  font-size: 56px;
+  line-height: 60px;
+  letter-spacing: -0.006em;
+}
+.c-2 {
+  color: var(--text-2);
+}
+.c-3 {
+  color: var(--text-3);
+}
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+.ellipsis {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.clamp-2,
+.clamp-3,
+.clamp-4 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.clamp-2 {
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+.clamp-3 {
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+.clamp-4 {
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+}
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Icons: Phosphor SVGs, sized by font-size, coloured by currentColor (DESIGN §4.8). */
+.i {
+  display: inline-block;
+  flex: none;
+  width: 1em;
+  height: 1em;
+  fill: currentColor;
+  vertical-align: -0.125em;
+}
+
+/* ---- motion preferences (DESIGN §7) --------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --fast: 0ms;
+    --base: 0ms;
+    --slow: 0ms;
+    --slower: 100ms;
+    --osd: 100ms;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

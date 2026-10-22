@@ -1,0 +1,403 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * The video layer and the player OSD (DESIGN.md §6.10, §8.5).
+ */
+
+.video-layer {
+  position: fixed;
+  z-index: 10;
+  background: var(--video);
+  overflow: hidden;
+}
+.video-layer.is-preview {
+  border-radius: var(--r-md);
+  pointer-events: none;
+}
+.video-layer.is-full {
+  inset: 0;
+  z-index: 30;
+}
+.video-layer.is-hidden {
+  display: none;
+}
+.video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: var(--video);
+}
+.video::cue {
+  font-family: var(--sans);
+  font-size: 1.1em;
+  background: rgb(13 10 12 / 0.72);
+  color: var(--text);
+}
+
+.player {
+  position: fixed;
+  inset: 0;
+  z-index: 31;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  color: var(--text);
+  cursor: default;
+}
+.player:focus {
+  box-shadow: none;
+}
+.player.osd-off {
+  cursor: none;
+}
+.player.is-idle {
+  background: url("/img/player-idle.jpg") center / cover no-repeat var(--video);
+  display: grid;
+  place-items: center;
+}
+.player-idle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+.osd-top,
+.osd-bottom {
+  position: relative;
+  transition: opacity var(--osd) var(--cubic-out);
+}
+.player.osd-off .osd-top,
+.player.osd-off .osd-bottom {
+  opacity: 0;
+  pointer-events: none;
+}
+.osd-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 40px var(--margin) 48px calc(var(--margin) - 8px);
+  /* scrim-osd-top: black 80% → 72% → 0% */
+  background: linear-gradient(180deg, rgb(0 0 0 / 0.8) 0, rgb(0 0 0 / 0.72) 50%, rgb(0 0 0 / 0) 100%);
+}
+.osd-titles {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-top: 6px;
+}
+.osd-clock {
+  padding-top: 10px;
+  flex: none;
+}
+.osd-middle {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 0;
+}
+.osd-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 24px;
+  border-radius: var(--r-lg);
+  background: rgb(0 0 0 / 0.45);
+}
+.osd-flash {
+  position: absolute;
+  padding: 10px 20px;
+  border-radius: var(--r-full);
+  background: rgb(13 10 12 / 0.72);
+}
+.osd-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 32px;
+  border-radius: var(--r-lg);
+  background: rgb(32 25 30 / 0.94);
+  box-shadow: var(--e3);
+}
+.osd-panel-icon {
+  font-size: 36px;
+  color: var(--danger);
+}
+.osd-panel-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.osd-bottom {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 72px var(--margin) 40px;
+  /* scrim-osd-bottom: black 85% → 78% → 60% → 0% (bottom to top) */
+  background: linear-gradient(0deg, rgb(0 0 0 / 0.85) 0, rgb(0 0 0 / 0.78) 30%, rgb(0 0 0 / 0.6) 60%, rgb(0 0 0 / 0) 100%);
+}
+.player.has-sheet .osd-bottom,
+.player.has-sheet .osd-top {
+  padding-right: calc(360px + 48px + 24px);
+}
+
+/* VOD scrubber */
+.scrubber-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.scrub-time {
+  flex: none;
+  min-width: 64px;
+}
+.scrub-remaining {
+  text-align: right;
+}
+.scrubber {
+  position: relative;
+  flex: 1 1 auto;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  border-radius: var(--r-full);
+  cursor: pointer;
+}
+.scrubber:focus {
+  box-shadow: none;
+}
+.scrub-track {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 6px;
+  border-radius: var(--r-full);
+  background: rgb(255 255 255 / 0.2);
+  transition: height var(--fast) var(--quad-out);
+}
+.scrub-avail {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: rgb(255 255 255 / 0.35);
+}
+.scrub-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--accent);
+}
+.scrub-thumb {
+  position: absolute;
+  top: 50%;
+  width: 20px;
+  height: 20px;
+  margin: -10px 0 0 -10px;
+  border-radius: 50%;
+  background: var(--cream);
+  opacity: 0;
+  transition: opacity var(--fast) var(--quad-out);
+}
+.scrubber:focus .scrub-track,
+.scrubber:hover .scrub-track {
+  height: 10px;
+}
+.scrubber:focus .scrub-thumb,
+.scrubber:hover .scrub-thumb {
+  opacity: 1;
+}
+.scrubber:focus .scrub-thumb {
+  box-shadow: 0 0 0 3px rgb(0 0 0 / 0.6), 0 0 0 6px var(--focus), 0 0 24px 8px var(--focus-glow);
+}
+
+/* Live line */
+.live-line {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+.live-line-name {
+  flex: none;
+  max-width: 34%;
+}
+.live-line-now {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.live-line-bar {
+  height: 3px;
+  max-width: 320px;
+}
+.live-line-next {
+  flex: none;
+  max-width: 28%;
+}
+
+/* Controls row */
+.osd-controls {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 16px;
+}
+.osd-left,
+.osd-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.osd-right {
+  justify-content: flex-end;
+}
+.osd-center {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+.osd-play {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-size: 28px;
+  transition: background-color var(--fast) var(--quad-out);
+}
+.osd-play:hover,
+.osd-play:focus {
+  background: var(--accent-hover);
+}
+.osd-play:focus {
+  box-shadow: 0 0 0 3px rgb(0 0 0 / 0.6), 0 0 0 6px var(--focus), 0 0 24px 8px var(--focus-glow);
+}
+.osd-seek {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 56px;
+  border-radius: var(--r-md);
+  font-size: 26px;
+  color: var(--text);
+}
+.osd-seek:hover,
+.osd-seek:focus {
+  background: rgb(255 255 255 / 0.08);
+}
+.osd-seek-n {
+  font-size: 12px;
+  line-height: 14px;
+  font-weight: 600;
+}
+.player .icon-btn:focus,
+.player .osd-seek:focus {
+  box-shadow: 0 0 0 3px rgb(0 0 0 / 0.6), 0 0 0 6px var(--focus), 0 0 24px 8px var(--focus-glow);
+}
+
+/* Track sheet ("Playback options") */
+.sheet {
+  position: absolute;
+  top: 48px;
+  right: 48px;
+  bottom: 48px;
+  z-index: 2;
+  width: 360px;
+  padding: 24px;
+  overflow-y: auto;
+  border-radius: var(--r-lg);
+  background: rgb(32 25 30 / 0.96);
+  box-shadow: var(--e3);
+  animation: sheet-in var(--slow) var(--cubic-out);
+}
+@keyframes sheet-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+}
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.sheet-section {
+  margin: 16px 0 6px;
+}
+.sheet-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  height: 52px;
+  padding: 0 16px;
+  border-radius: var(--r-sm);
+  color: var(--text-2);
+}
+.sheet-row .ellipsis {
+  flex: 1 1 auto;
+}
+.sheet-row:hover,
+.sheet-row:focus,
+.sheet-row.is-selected {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.sheet-check {
+  color: var(--accent);
+  font-size: 20px;
+}
+
+@media (max-width: 959.98px) {
+  .osd-top {
+    padding-top: 16px;
+  }
+  .osd-bottom {
+    padding-bottom: 24px;
+  }
+  .live-line {
+    flex-wrap: wrap;
+    gap: 8px 12px;
+  }
+  .live-line-name {
+    max-width: 70%;
+  }
+  .live-line-next {
+    display: none;
+  }
+  .osd-controls {
+    grid-template-columns: auto 1fr auto;
+  }
+  .osd-left:empty {
+    display: none;
+  }
+  .osd-center {
+    justify-content: center;
+    gap: 12px;
+  }
+  .osd-right {
+    gap: 4px;
+  }
+  .sheet {
+    inset: auto 12px 12px 12px;
+    width: auto;
+    max-height: 70%;
+  }
+  .player.has-sheet .osd-bottom,
+  .player.has-sheet .osd-top {
+    padding-right: var(--margin);
+  }
+  .number-entry {
+    top: 72px;
+  }
+}

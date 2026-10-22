@@ -1,0 +1,1059 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Afterglow components (DESIGN.md §6).
+ */
+
+/* ---- brand ------------------------------------------------------------------------------- */
+.lockup {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.33em;
+  font-family: var(--serif);
+  line-height: 1;
+}
+.brand-symbol {
+  width: 0.84em;
+  height: 0.672em;
+  flex: none;
+  margin-top: 0.1em;
+}
+.wordmark {
+  font-weight: 560;
+  font-variation-settings: "opsz" 144;
+  font-optical-sizing: none;
+  letter-spacing: -0.01em;
+  color: var(--cream);
+}
+
+/* ---- buttons (§6.5) ------------------------------------------------------------------------ */
+.btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 20px;
+  border-radius: var(--r-sm);
+  font-size: 16px;
+  line-height: 20px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-decoration: none;
+  flex: none;
+  transition: background-color var(--fast) var(--quad-out), color var(--fast) var(--quad-out), transform var(--fast) var(--quad-out);
+}
+.btn .i {
+  font-size: 20px;
+}
+.btn-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.btn-lg {
+  height: 52px;
+  padding: 0 28px;
+}
+.btn-sm {
+  height: 36px;
+  padding: 0 14px;
+  font-size: 14px;
+}
+.btn-sm .i {
+  font-size: 18px;
+}
+.btn-block {
+  display: flex;
+  width: 100%;
+}
+.btn-primary {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+.btn-primary:hover,
+.btn-primary:focus {
+  background: var(--accent-hover);
+}
+.btn-primary:active {
+  background: var(--accent-pressed);
+}
+.btn-secondary {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.btn-secondary:hover,
+.btn-secondary:focus {
+  background: var(--surface-3-hover);
+}
+.btn-secondary:active {
+  background: var(--surface-4);
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--text-2);
+}
+.btn-ghost:hover,
+.btn-ghost:focus {
+  background: rgb(255 255 255 / 0.06);
+  color: var(--text);
+}
+.btn-ghost:active {
+  background: rgb(255 255 255 / 0.1);
+}
+.btn-danger {
+  background: var(--surface-3);
+  color: var(--danger);
+}
+.btn-danger:hover,
+.btn-danger:focus {
+  background: var(--surface-3-hover);
+}
+.btn:disabled,
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.btn.is-busy {
+  cursor: progress;
+}
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  border-radius: var(--r-full);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 22px;
+  transition: background-color var(--fast) var(--quad-out), color var(--fast) var(--quad-out);
+}
+.icon-btn:hover,
+.icon-btn:focus {
+  background: rgb(255 255 255 / 0.06);
+  color: var(--text);
+}
+.icon-btn.is-active {
+  color: var(--accent);
+}
+.icon-btn-lg {
+  width: 52px;
+  height: 52px;
+  background: var(--surface-3);
+  color: var(--text);
+}
+.icon-btn-lg:hover,
+.icon-btn-lg:focus {
+  background: var(--surface-3-hover);
+}
+.icon-btn-osd {
+  width: 48px;
+  height: 48px;
+  font-size: 24px;
+  color: var(--text);
+}
+
+/* ---- fields (§6.7) -------------------------------------------------------------------------- */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.field-label {
+  color: var(--text-2);
+}
+.field-box {
+  position: relative;
+  display: flex;
+}
+.field-input {
+  width: 100%;
+  height: 48px;
+  padding: 0 16px;
+  border: 1.5px solid var(--stroke);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 16px;
+  transition: border-color var(--fast) var(--quad-out), box-shadow var(--fast) var(--quad-out);
+}
+.field-input::placeholder {
+  color: var(--text-3);
+  opacity: 1;
+}
+.field-input:focus {
+  border: 2px solid var(--accent);
+  padding: 0 15.5px;
+  box-shadow: 0 0 24px 2px var(--focus-glow);
+}
+.field-box:has(.field-reveal) .field-input {
+  padding-right: 52px;
+}
+.field-reveal {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-full);
+  color: var(--text-3);
+  font-size: 20px;
+}
+.field-reveal:hover,
+.field-reveal:focus {
+  color: var(--text);
+  background: rgb(255 255 255 / 0.06);
+}
+.field.has-error .field-input {
+  border: 2px solid var(--danger);
+  padding: 0 15.5px;
+}
+.field-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--danger);
+}
+.field-error .i {
+  margin-top: 2px;
+}
+.field-hint {
+  color: var(--text-3);
+}
+input[type="search"]::-webkit-search-cancel-button {
+  display: none;
+}
+
+/* ---- callouts (§6.17) ---------------------------------------------------------------------- */
+.callout {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px 16px;
+  border-radius: var(--r-sm);
+  color: var(--text);
+}
+.callout p {
+  min-width: 0;
+}
+.callout strong {
+  font-weight: 600;
+}
+.callout-icon {
+  font-size: 20px;
+  margin-top: 2px;
+}
+.callout-warning {
+  background: var(--warning-bg);
+}
+.callout-warning .callout-icon {
+  color: var(--warning);
+}
+.callout-danger {
+  background: var(--danger-bg);
+}
+.callout-danger .callout-icon {
+  color: var(--danger);
+}
+.callout-info {
+  background: var(--info-bg);
+}
+.callout-info .callout-icon {
+  color: var(--info);
+}
+.callout-success {
+  background: var(--success-bg);
+}
+.callout-success .callout-icon {
+  color: var(--success);
+}
+
+/* ---- segmented control, toggle (§6.6, §8.6) ---------------------------------------------- */
+.segmented {
+  position: relative;
+  display: flex;
+  padding: 4px;
+  border-radius: var(--r-full);
+  background: var(--surface-2);
+  min-width: 0;
+}
+.segmented-pill {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  height: calc(100% - 8px);
+  border-radius: var(--r-full);
+  background: var(--cream);
+  transition: transform var(--base) var(--cubic-out);
+}
+.segmented-opt {
+  position: relative;
+  flex: 1 1 0;
+  height: 36px;
+  padding: 0 16px;
+  border-radius: var(--r-full);
+  color: var(--text-2);
+  font-weight: 600;
+  text-align: center;
+  white-space: nowrap;
+  transition: color var(--base) var(--cubic-out);
+}
+.segmented-opt.is-selected {
+  color: var(--text-on-accent);
+}
+.segmented-opt:not(.is-selected):hover {
+  color: var(--text);
+}
+.toggle {
+  position: relative;
+  width: 52px;
+  height: 30px;
+  flex: none;
+  border-radius: var(--r-full);
+  background: var(--surface-4);
+  transition: background-color var(--base) var(--cubic-out);
+}
+.toggle-knob {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--text-2);
+  transition: transform var(--base) var(--cubic-out), background-color var(--base) var(--cubic-out);
+}
+.toggle.is-on {
+  background: var(--accent);
+}
+.toggle.is-on .toggle-knob {
+  transform: translateX(22px);
+  background: var(--text-on-accent);
+}
+
+/* ---- progress, spinner ------------------------------------------------------------------- */
+.bar {
+  position: relative;
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  background: rgb(255 255 255 / 0.14);
+  overflow: hidden;
+}
+.bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--accent);
+  border-radius: inherit;
+}
+.spinner {
+  display: inline-block;
+  width: 48px;
+  height: 48px;
+  flex: none;
+}
+.spinner-sm {
+  width: 20px;
+  height: 20px;
+}
+.spinner svg {
+  width: 100%;
+  height: 100%;
+  animation: spin 1s linear infinite;
+}
+.spinner circle {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-dasharray: 80 200;
+}
+.btn-primary .spinner circle {
+  stroke: var(--text-on-accent);
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- skeletons (§6.16) ---------------------------------------------------------------------- */
+.skeleton {
+  position: relative;
+  display: block;
+  background: var(--surface-2);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.05) 50%, transparent);
+  width: 120px;
+  animation: shimmer 1.4s linear infinite;
+}
+@keyframes shimmer {
+  from {
+    transform: translateX(-120px);
+  }
+  to {
+    transform: translateX(100vw);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    display: none;
+  }
+}
+.sk-line {
+  height: 14px;
+  width: 80%;
+  margin: 6px 0;
+}
+.sk-line-short {
+  height: 12px;
+  width: 45%;
+  margin: 6px 0;
+}
+.sk-title {
+  height: 22px;
+  width: 220px;
+  margin: 8px 0;
+}
+.sk-overline {
+  height: 12px;
+  width: 140px;
+  margin-bottom: 12px;
+}
+.sk-display {
+  height: 40px;
+  width: min(520px, 80%);
+  margin-bottom: 16px;
+}
+.sk-button {
+  height: 52px;
+  width: 180px;
+  margin-top: 24px;
+}
+.sk-poster {
+  flex: none;
+  width: var(--poster-w);
+  aspect-ratio: 2 / 3;
+  border-radius: var(--r-md);
+}
+.sk-cat {
+  height: 20px;
+  margin: 14px 16px;
+}
+
+/* ---- empty and error states (§6.13) ---------------------------------------------------- */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  max-width: 480px;
+  margin: 48px auto;
+  padding: 0 16px;
+}
+.empty-compact {
+  margin: 32px auto;
+}
+.empty-art {
+  width: 200px;
+  height: 200px;
+  margin-bottom: 24px;
+}
+.empty-title {
+  font-family: var(--serif);
+  font-weight: 560;
+  font-variation-settings: "opsz" 72;
+  font-size: 28px;
+  line-height: 34px;
+  margin-bottom: 8px;
+}
+.empty-body {
+  margin-bottom: 24px;
+}
+.empty-compact .empty-body {
+  margin-bottom: 16px;
+}
+.empty-action {
+  display: flex;
+  gap: 12px;
+}
+
+/* ---- chips (§6.6) --------------------------------------------------------------------------- */
+.chiprow-wrap {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+.chiprow {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 10px 8px;
+  margin: -10px -8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  scroll-padding-inline: 56px;
+}
+.chiprow::-webkit-scrollbar {
+  display: none;
+}
+.chiprow.fade-end {
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 56px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 56px), transparent);
+}
+.chiprow.fade-start {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 56px);
+  mask-image: linear-gradient(90deg, transparent, #000 56px);
+}
+.chiprow.fade-start.fade-end {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 56px, #000 calc(100% - 56px), transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 56px, #000 calc(100% - 56px), transparent);
+}
+.chip {
+  flex: none;
+  height: 36px;
+  padding: 0 16px;
+  border-radius: var(--r-full);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-weight: 600;
+  white-space: nowrap;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background-color var(--fast) var(--quad-out), color var(--fast) var(--quad-out);
+}
+.chip:hover,
+.chip:focus {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.chip.is-selected {
+  background: var(--cream);
+  color: var(--text-on-accent);
+}
+
+/* ---- tabs (seasons) -------------------------------------------------------------------- */
+.tab {
+  position: relative;
+  height: 44px;
+  padding: 0 8px;
+  border-radius: var(--r-sm);
+  color: var(--text-2);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.tab:hover,
+.tab:focus {
+  color: var(--text);
+}
+.tab.is-selected {
+  color: var(--text);
+}
+.tab.is-selected::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 4px;
+  height: 3px;
+  border-radius: var(--r-full);
+  background: var(--accent);
+}
+
+/* ---- cards (§6.3) ------------------------------------------------------------------------- */
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  border-radius: var(--r-md);
+  text-align: left;
+  scroll-margin: 24px 120px;
+}
+.card:focus {
+  box-shadow: none;
+}
+.card-art {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  transition: transform var(--base) var(--cubic-out), box-shadow var(--base) var(--cubic-out);
+}
+.card-art > img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.card:focus .card-art {
+  transform: scale(1.06);
+  box-shadow: var(--ring), var(--e1);
+  z-index: 1;
+}
+html[data-input="touch"] .card:focus .card-art {
+  transform: none;
+  box-shadow: none;
+}
+.card:active .card-art {
+  transform: scale(0.98);
+}
+@media (prefers-reduced-motion: reduce) {
+  .card:focus .card-art {
+    transform: none;
+  }
+}
+.poster {
+  width: var(--poster-w);
+}
+.vg-cell .poster {
+  width: 100%;
+}
+.poster-art {
+  aspect-ratio: 2 / 3;
+  width: 100%;
+}
+.poster-art::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--stroke-subtle);
+  pointer-events: none;
+}
+.poster-fallback-title {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  text-align: center;
+  font-family: var(--serif);
+  font-weight: 560;
+  font-variation-settings: "opsz" 72;
+  font-size: 20px;
+  line-height: 26px;
+  color: var(--text-2);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  height: fit-content;
+  margin: auto 0;
+  top: 50%;
+  transform: translateY(-50%);
+  bottom: auto;
+}
+.card-title {
+  margin-top: 10px;
+  font-weight: 600;
+  color: var(--text-2);
+  transition: color var(--fast) var(--quad-out);
+}
+.card:focus .card-title {
+  color: var(--text);
+}
+.card-meta {
+  margin-top: 2px;
+}
+.card-progress {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 10px;
+  height: 4px;
+  background: rgb(0 0 0 / 0.45);
+}
+.backdrop-card {
+  width: 296px;
+}
+.backdrop-art {
+  aspect-ratio: 16 / 9;
+  width: 100%;
+}
+.backdrop-art::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, rgb(20 16 19 / 0) 30%, rgb(20 16 19 / 0.92) 100%);
+  z-index: 1;
+}
+.backdrop-text {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 22px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+}
+.backdrop-art .card-progress {
+  z-index: 2;
+}
+
+/* Channel tile (Live now) */
+.tile {
+  width: 240px;
+  height: 135px;
+  padding: 10px 12px 12px;
+  background: var(--surface-2);
+  overflow: hidden;
+  justify-content: space-between;
+  transition: background-color var(--fast) var(--quad-out), transform var(--base) var(--cubic-out), box-shadow var(--base) var(--cubic-out);
+}
+.tile:focus {
+  background: var(--surface-3);
+  transform: scale(1.06);
+  box-shadow: var(--ring), var(--e1);
+  z-index: 1;
+}
+html[data-input="touch"] .tile:focus {
+  transform: none;
+  box-shadow: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tile:focus {
+    transform: none;
+  }
+}
+.tile .logo {
+  align-self: center;
+  width: 96px;
+  height: 52px;
+  font-size: 18px;
+}
+.tile-live {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 11px;
+}
+.live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--live);
+  flex: none;
+}
+.tile-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.tile-bar {
+  height: 3px;
+  margin-top: 4px;
+  flex: none;
+}
+.tile-plain {
+  justify-content: center;
+  gap: 10px;
+}
+.tile-plain .logo {
+  margin-top: 0;
+}
+
+/* ---- channel logos (§6.4) -------------------------------------------------------------- */
+.logo {
+  display: grid;
+  place-items: center;
+  flex: none;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  font-weight: 600;
+  color: var(--text);
+}
+.logo-plate {
+  position: relative;
+  background: var(--surface-3);
+}
+.logo-plate img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  object-fit: contain;
+  padding: 4px;
+}
+.logo-sm {
+  width: 48px;
+  height: 30px;
+  font-size: 13px;
+}
+.logo-md {
+  width: 64px;
+  height: 40px;
+  font-size: 16px;
+}
+.logo-lg {
+  width: 120px;
+  height: 68px;
+  font-size: 22px;
+}
+.logo-lg.logo-plate img {
+  padding: 8px;
+}
+.hue-0 {
+  background: #4a3a43;
+}
+.hue-1 {
+  background: #3e4a44;
+}
+.hue-2 {
+  background: #3c4456;
+}
+.hue-3 {
+  background: #4b3f35;
+}
+.hue-4 {
+  background: #45394f;
+}
+.hue-5 {
+  background: #4a3838;
+}
+.avatar {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: 50%;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+.avatar-lg {
+  width: 44px;
+  height: 44px;
+  font-size: 16px;
+}
+
+/* ---- badges ------------------------------------------------------------------------------ */
+.live-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 10px;
+  border-radius: var(--r-full);
+  background: var(--live);
+  color: var(--text-on-accent);
+  flex: none;
+}
+.badge-soft {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  margin-left: 8px;
+  padding: 0 8px;
+  border-radius: var(--r-full);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  vertical-align: 2px;
+}
+.fav-heart {
+  color: var(--accent);
+  font-size: 18px;
+}
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--r-full);
+  background: var(--surface-2);
+  white-space: nowrap;
+  flex: none;
+}
+.st-success {
+  color: var(--success);
+}
+.st-warning {
+  color: var(--warning);
+}
+.st-danger {
+  color: var(--danger);
+}
+.st-info {
+  color: var(--info);
+}
+
+/* ---- layers: dialogs, menus, toasts (§6.11, §6.12) ---------------------------------------- */
+.layer {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+}
+.layer-dialog {
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: var(--scrim);
+  animation: fade-in var(--slow) var(--cubic-out);
+}
+.dialog {
+  width: min(520px, 100%);
+  padding: 32px;
+  border-radius: var(--r-lg);
+  background: var(--surface-1);
+  box-shadow: var(--e3);
+  animation: rise-in var(--slow) var(--cubic-out);
+}
+.dialog-wide {
+  width: min(640px, 100%);
+}
+.dialog-title {
+  margin-bottom: 12px;
+}
+.dialog-body {
+  margin-bottom: 28px;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+}
+.layer-menu {
+  background: transparent;
+}
+.menu {
+  position: fixed;
+  padding: 8px;
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+  box-shadow: var(--e2);
+  border: 1px solid var(--stroke-subtle);
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  animation: fade-in var(--base) var(--cubic-out);
+}
+.menu-title {
+  padding: 8px 12px 6px;
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 12px;
+  border-radius: var(--r-sm);
+  color: var(--text-2);
+}
+.menu-item .i {
+  font-size: 20px;
+}
+.menu-item:hover,
+.menu-item:focus {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.menu-item.is-selected {
+  color: var(--text);
+}
+.menu-label {
+  flex: 1 1 auto;
+}
+.menu-check {
+  color: var(--accent);
+}
+.layer-drawer {
+  background: var(--scrim);
+  animation: fade-in var(--slow) var(--cubic-out);
+}
+.toasts {
+  position: fixed;
+  left: 50%;
+  bottom: 48px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(520px, calc(100vw - 32px));
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: var(--r-md);
+  background: var(--surface-3);
+  box-shadow: var(--e2);
+  animation: rise-in var(--slow) var(--cubic-out);
+}
+.toast-icon {
+  font-size: 20px;
+  margin-top: 2px;
+}
+.toast-info .toast-icon {
+  color: var(--info);
+}
+.toast-success .toast-icon {
+  color: var(--success);
+}
+.toast-warning .toast-icon {
+  color: var(--warning);
+}
+.toast-error .toast-icon {
+  color: var(--danger);
+}
+
+/* ---- virtual lists and grids ----------------------------------------------------------- */
+.vl,
+.vg {
+  position: relative;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+.vl-sizer,
+.vg-sizer {
+  position: relative;
+  width: 100%;
+}
+.vl-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  padding: 2px 10px;
+}
+.vg-cell {
+  position: absolute;
+  left: 0;
+  top: 0;
+}

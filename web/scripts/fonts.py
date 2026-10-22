@@ -12,7 +12,6 @@ Run from the repository root: python web/scripts/fonts.py   (needs fontTools + b
 
 from __future__ import annotations
 
-import shutil
 import sys
 from pathlib import Path
 
@@ -62,7 +61,6 @@ def main() -> None:
         paths, how = build.build_font(o, OUT)
         for p in paths:
             print(f"{p.relative_to(ROOT)}  {p.stat().st_size / 1024:.1f} KB  ({how})")
-    shutil.copy2(ROOT / "assets/fonts/LICENSE-Phosphor.txt", OUT.parent / "licences" / "LICENSE-Phosphor.txt")
 
 
 if __name__ == "__main__":

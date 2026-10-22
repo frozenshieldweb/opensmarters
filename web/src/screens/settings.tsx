@@ -489,7 +489,11 @@ function About() {
             <h3 class="t-title-sm">Licences</h3>
             <p class="c-2">
               opensmarters is free software under the GNU General Public License, version 3 or later. Fonts: Fraunces and Source Sans 3 (as
-              “Afterglow Sans”), SIL Open Font License 1.1. Icons: Phosphor, MIT licence. Video: hls.js, Apache 2.0.
+              “Afterglow Sans”), SIL Open Font License 1.1. Icons: Phosphor, MIT licence. Video: hls.js, Apache 2.0. Interface: Preact, MIT
+              licence.{" "}
+              <a href="/licences/README.txt" target="_blank" rel="noopener noreferrer">
+                Licence texts
+              </a>
             </p>
             <p class="c-3 t-caption">
               Independent open-source project. It ships with no channels, content or provider: use it with a subscription you're entitled to.

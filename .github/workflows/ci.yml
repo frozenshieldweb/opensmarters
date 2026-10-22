@@ -97,3 +97,48 @@ jobs:
           persist-credentials: false
       - name: index.html and the copied assets are up to date
         run: node site/scripts/build.mjs --check
+
+  # The web edition's server on Linux (its deployment target), with ffmpeg so the
+  # streaming tests run instead of being skipped.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.99.1  # = rust-toolchain.toml
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Clippy (crates/web)
+        run: cargo clippy -p opensmarters-web --all-targets --locked -- -D warnings
+      - name: Test (crates/web)
+        run: cargo test -p opensmarters-web --locked
+
+  # The Docker image builds, starts with only a secret key, passes its health check and
+  # serves the demo. Nothing is pushed.
+  web-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the image
+        run: docker build -f deploy/web/Dockerfile -t opensmarters-web:ci .
+      - name: Start it with --demo and check it
+        run: |
+          key="$(docker run --rm opensmarters-web:ci --generate-secret-key)"
+          docker run -d --name osw -p 127.0.0.1:8080:8080 -e OPENSMARTERS_SECRET_KEY="$key" \
+            --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true \
+            opensmarters-web:ci --demo
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8080/api/status && break
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8080/api/status | grep -q '"setup_required":false'
+          docker exec osw opensmarters-web --healthcheck
+          docker logs osw 2>&1 | tail -20
+          docker rm -f -v osw

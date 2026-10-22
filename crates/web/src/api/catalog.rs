@@ -189,8 +189,9 @@ pub async fn epg_now(
         }))
         .await;
         for (k, r) in results {
-            if let Ok(rows) = r {
-                let rows = rows.map(|r| now_next(&r, now)).unwrap_or_default();
+            // A key whose request failed or timed out is left out (ask again later).
+            if let Ok(Some(rows)) = r {
+                let rows = now_next(&rows, now);
                 out.insert(
                     k.to_owned(),
                     serde_json::to_value(rows).unwrap_or(Value::Null),

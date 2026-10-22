@@ -191,7 +191,12 @@ async fn run(cli: Cli, redactor: Redactor) -> anyhow::Result<()> {
         opensmarters_web::demo::ensure_demo_user(&state, panel).await?;
     }
     let server = opensmarters_web::start_with_state(state).await?;
-    tracing::info!("open {} in a browser", server.url());
+    let shown = if server.addr.ip().is_unspecified() {
+        format!("http://localhost:{}", server.addr.port())
+    } else {
+        server.url()
+    };
+    tracing::info!("open {shown} in a browser");
     shutdown_signal().await;
     tracing::info!("shutting down");
     server.shutdown().await;

@@ -5,7 +5,7 @@
 
 import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import type { Episode, MovieDetail, Season, SeriesDetail } from "../api/types";
+import type { MovieDetail, SeriesDetail } from "../api/types";
 import { account } from "../state/session";
 import { useLoad } from "../state/cache";
 import { isFavourite, toggleFavourite } from "../state/favourites";
@@ -16,11 +16,9 @@ import { Bar, Button, ErrorState, Icon, IconButton, Skeleton, cx } from "../ui/k
 import { Img } from "../ui/media";
 import { useInitialFocus } from "../ui/hooks";
 import { watchEpisode, watchMovie } from "../player/start";
+import { FINISHED, RESUME_AFTER, continuePoint } from "../lib/series";
 import { api } from "../api/client";
 
-const FINISHED = 0.95;
-/** A film or episode watched for at least this long (seconds) offers Resume. */
-const RESUME_AFTER = 10;
 
 /** Reloads the page's data when the player above it closes (new progress). */
 function useReloadAfterPlayer(watching: boolean, reload: () => void): void {
@@ -171,27 +169,6 @@ export function MovieDetailScreen(props: { memo: Memo; id: string }) {
   );
 }
 
-/** Where "Continue" starts: the episode in progress, else the one after the last watched. */
-export function continuePoint(s: SeriesDetail): { season: Season; episode: Episode; resume: number; label: string } | null {
-  const all = s.seasons.flatMap((season) => season.episodes.map((episode) => ({ season, episode })));
-  if (all.length === 0) return null;
-  let lastIdx = -1;
-  all.forEach((x, i) => {
-    if (x.episode.progress && x.episode.progress.position > 0) lastIdx = i;
-  });
-  if (lastIdx < 0) {
-    const f = all[0]!;
-    return { ...f, resume: 0, label: `Play S${f.season.number} · E${f.episode.number}` };
-  }
-  const last = all[lastIdx]!;
-  const pr = last.episode.progress!;
-  if (pr.position < pr.duration * FINISHED) {
-    return { ...last, resume: pr.position, label: `Continue S${last.season.number} · E${last.episode.number}` };
-  }
-  const n = all[lastIdx + 1];
-  if (!n) return { ...last, resume: 0, label: `Watch S${last.season.number} · E${last.episode.number} again` };
-  return { ...n, resume: 0, label: `Continue S${n.season.number} · E${n.episode.number}` };
-}
 
 export function SeriesDetailScreen(props: { memo: Memo; id: string }) {
   const a = account.value!;

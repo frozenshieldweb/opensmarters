@@ -17,16 +17,12 @@ import workerUrl from "hls.js/dist/hls.worker.js?url";
 import { api, ApiError } from "../api/client";
 import type { Channel, PlayKind, PlayResponse } from "../api/types";
 import { toast } from "../state/misc";
+import type { EpisodeRef } from "../lib/series";
+
+export type { EpisodeRef };
 
 // ---- what is playing
 
-export interface EpisodeRef {
-  id: string;
-  seriesId: string;
-  title: string;
-  subtitle: string;
-  duration: number | null;
-}
 
 export type Item =
   | { kind: "live"; account: string; channel: Channel; list: Channel[] }

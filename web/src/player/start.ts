@@ -8,7 +8,8 @@ import { cached } from "../state/cache";
 import { current, go } from "../state/router";
 import { dot, runtime } from "../lib/format";
 import { cap } from "../lib/text";
-import { play, type EpisodeRef } from "./playback";
+import { play } from "./playback";
+import { episodesAfter } from "../lib/series";
 
 function openPlayer(): void {
   if (current.value.route.name !== "watch") go({ name: "watch" });
@@ -42,19 +43,6 @@ export function watchMovie(account: string, m: Pick<MovieDetail, "id" | "name" |
     start,
   );
   openPlayer();
-}
-
-/** The episodes after `episodeId`, in order. */
-export function episodesAfter(s: SeriesDetail, episodeId: string): EpisodeRef[] {
-  const all = s.seasons.flatMap((se) => se.episodes.map((e) => ({ se, e })));
-  const i = all.findIndex((x) => x.e.id === episodeId);
-  return all.slice(i + 1).map(({ se, e }) => ({
-    id: e.id,
-    seriesId: s.id,
-    title: cap(s.name, 120),
-    subtitle: `S${se.number} · E${e.number} · ${cap(e.title, 80)}`,
-    duration: e.duration_secs ?? null,
-  }));
 }
 
 /** Plays an episode of a series from `start` seconds. */

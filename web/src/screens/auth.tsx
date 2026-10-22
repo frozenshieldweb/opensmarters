@@ -9,6 +9,7 @@ import { api, ApiError } from "../api/client";
 import { signedIn, status } from "../state/session";
 import { Button, Callout, Field, Lockup } from "../ui/kit";
 import { useInitialFocus } from "../ui/hooks";
+import { inviteTokenFrom } from "../lib/invite";
 
 export const SOURCE_URL = "https://github.com/frozenshieldweb/opensmarters";
 export const DOWNLOAD_URL = "https://frozenshieldweb.github.io/opensmarters/";
@@ -21,13 +22,7 @@ function errText(e: unknown): string {
 
 /** The invitation token in the address, if this is an invitation link. */
 export function inviteToken(): string | null {
-  const hash = location.hash.replace(/^#/, "");
-  const params = new URLSearchParams(location.search);
-  const hashParams = new URLSearchParams(hash);
-  const path = /\/invite\/([A-Za-z0-9_\-.~]+)\/?$/.exec(location.pathname)?.[1];
-  const fromHash = hashParams.get("invite") ?? hashParams.get("token") ?? (/^[A-Za-z0-9_\-.~]{16,}$/.test(hash) ? hash : null);
-  const t = fromHash ?? params.get("invite") ?? params.get("token") ?? path ?? null;
-  return t && /^[A-Za-z0-9_\-.~]{8,256}$/.test(t) ? t : null;
+  return inviteTokenFrom(location);
 }
 
 function forgetInvite(): void {

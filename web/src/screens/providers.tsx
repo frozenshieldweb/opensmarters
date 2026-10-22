@@ -14,21 +14,10 @@ import { invalidate } from "../state/cache";
 import { Button, Callout, Field, Lockup, Segmented } from "../ui/kit";
 import { useInitialFocus } from "../ui/hooks";
 import { cap } from "../lib/text";
+import { detectXtream } from "../lib/xtream";
 
 type Kind = "xtream" | "m3u";
 
-/** An Xtream Codes link pasted as a playlist (get.php?username=…&password=…). */
-export function detectXtream(url: string): { server: string; username: string; password: string } | null {
-  try {
-    const u = new URL(url.trim());
-    const username = u.searchParams.get("username");
-    const password = u.searchParams.get("password");
-    if (!/\/get\.php$/i.test(u.pathname) || !username || !password) return null;
-    return { server: u.origin, username, password };
-  } catch {
-    return null;
-  }
-}
 
 const isHttp = (s: string) => /^\s*http:\/\//i.test(s);
 const isUrl = (s: string) => /^\s*https?:\/\/[^\s/]+/i.test(s);

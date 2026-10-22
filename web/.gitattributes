@@ -1,0 +1,4 @@
+# Binary assets copied from the asset pipeline and assets/ (see ../site/.gitattributes)
+*.woff2 binary
+*.avif binary
+*.webp binary

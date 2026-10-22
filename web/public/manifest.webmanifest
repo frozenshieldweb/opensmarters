@@ -1,0 +1,21 @@
+{
+  "id": "/app/",
+  "name": "opensmarters",
+  "short_name": "opensmarters",
+  "description": "Your own TV, films and series, from your own server.",
+  "lang": "en",
+  "start_url": "/app/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#141013",
+  "theme_color": "#141013",
+  "categories": ["entertainment", "video"],
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon-256.png", "sizes": "256x256", "type": "image/png", "purpose": "any" },
+    { "src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

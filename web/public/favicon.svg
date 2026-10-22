@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="plate" x1="512" y1="64" x2="512" y2="960" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2A2026"/><stop offset="1" stop-color="#141013"/>
+    </linearGradient>
+    <linearGradient id="light" x1="261.0" y1="311.2" x2="763.0" y2="712.8" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#E6BE91"/><stop offset="0.36" stop-color="#E6BE91"/><stop offset="1" stop-color="#C9868A"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="224" fill="url(#plate)"/>
+  <rect x="65" y="65" width="894" height="894" rx="223" fill="none" stroke="#FFFFFF" stroke-opacity="0.1" stroke-width="2"/>
+  <g fill="url(#light)">
+    <path d="M 632 311.2 A 10 10 0 0 1 642 321.2 L 642 371.2 A 10 10 0 0 1 632 381.2 L 391 381.2 A 60 60 0 0 0 331 441.2 L 331 567.6 A 10 10 0 0 1 321 577.6 L 271 577.6 A 10 10 0 0 1 261 567.6 L 261 441.2 A 130 130 0 0 1 391 311.2 Z"/>
+    <path d="M 392 712.8 A 10 10 0 0 1 382 702.8 L 382 652.8 A 10 10 0 0 1 392 642.8 L 633 642.8 A 60 60 0 0 0 693 582.8 L 693 456.4 A 10 10 0 0 1 703 446.4 L 753 446.4 A 10 10 0 0 1 763 456.4 L 763 582.8 A 130 130 0 0 1 633 712.8 Z"/>
+  </g>
+</svg>

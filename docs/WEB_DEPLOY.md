@@ -168,6 +168,24 @@ the viewer.
 Each viewer also uses one of the provider account's connections; providers keep counting
 a closed connection for one to three minutes.
 
+## How the image is built
+
+`deploy/web/Dockerfile` (build context: the repository root) has three stages:
+
+1. **UI** (`node:22`): when `web/package.json` exists, `npm ci` (or `npm install` without a
+   lock file) and `npm run build` in `web/`, keeping `web/dist`. Without `web/`, the stage
+   produces an empty folder and the server shows a short built-in page saying the
+   interface isn't built (the API works either way).
+2. **Server** (`rust:1.99.1-slim-trixie`): rustup installs exactly the toolchain of
+   `rust-toolchain.toml`, then `cargo build -p opensmarters-web --release --locked`
+   embeds `web/dist` into the binary.
+3. **Runtime** (`debian:trixie-slim`): `ffmpeg`, `ca-certificates` and `tini`, the user
+   `opensmarters` (uid 10001), `/data` as a volume, port 8080, and a `HEALTHCHECK` that
+   runs `opensmarters-web --healthcheck` (no curl in the image).
+
+The root `.dockerignore` keeps `target/`, `dist/`, `vendor/`, `node_modules/` and test
+data out of the build context.
+
 ## Plain Docker or Docker Compose
 
 ```bash

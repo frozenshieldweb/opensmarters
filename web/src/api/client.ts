@@ -203,6 +203,6 @@ export const api = {
 
   // Settings
   settings: () => request<Settings>("GET", "/api/settings"),
-  saveSettings: (s: Settings) => request<Settings>("PUT", "/api/settings", s),
+  saveSettings: (s: Partial<Settings>) => request<Settings>("PUT", "/api/settings", s),
   about: () => request<About>("GET", "/api/about"),
 };

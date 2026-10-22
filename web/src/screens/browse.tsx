@@ -3,7 +3,7 @@
 // below), a sort menu (provider order, name, recently added, rating) and a virtualised poster
 // grid. Enter opens the detail page.
 
-import { useMemo, useState } from "preact/hooks";
+import { useCallback, useMemo, useState } from "preact/hooks";
 import type { Category, Movie, Series } from "../api/types";
 import { account } from "../state/session";
 import { useDelayed, useLoad } from "../state/cache";
@@ -54,9 +54,13 @@ export function Browse(props: { memo: Memo; kind: Kind; category?: string }) {
   const showSkeleton = useDelayed(list.loading);
   const bp = breakpoint.value;
   const title = k === "movies" ? "Movies" : "Series";
-  const m3u = a.kind === "m3u";
+  // M3U playlists have films (their VOD entries, without categories) but no series.
+  const m3u = a.kind === "m3u" && k === "series";
 
-  useInitialFocus(!list.loading && !cats.loading, props.memo);
+  // The grid lays itself out after it has measured its width: focus its first poster then.
+  const [gridReady, setGridReady] = useState(false);
+  const onGridRange = useCallback(() => setGridReady(true), []);
+  useInitialFocus(!list.loading && !cats.loading && (m3u || sorted.length === 0 || gridReady), props.memo);
 
   const select = (id: string) => {
     if (id === cat) return;
@@ -81,6 +85,7 @@ export function Browse(props: { memo: Memo; kind: Kind; category?: string }) {
     );
 
   const catList: Category[] = cats.data ?? [];
+  const column = bp === "wide" && !m3u && (cats.loading || catList.length > 0);
   const catName = cat === "all" ? `All ${k === "movies" ? "films" : "series"}` : cap(catList.find((c) => c.id === cat)?.name ?? title, 60);
   const posterW = bp === "wide" ? 168 : bp === "medium" ? 148 : window.innerWidth < 600 ? 104 : 132;
 
@@ -88,11 +93,11 @@ export function Browse(props: { memo: Memo; kind: Kind; category?: string }) {
   if (m3u) {
     body = (
       <Empty
-        title={`No ${k === "movies" ? "films" : "series"} with a playlist`}
-        body="Films and series come with Xtream Codes providers. This provider is an M3U playlist, so it has live TV only."
+        title="No series with a playlist"
+        body="Series come with Xtream Codes providers. This provider is an M3U playlist: its films are in Movies."
         action={
-          <Button variant="primary" icon="television-simple" onClick={() => go({ name: "live" })} autofocus>
-            Go to Live TV
+          <Button variant="primary" icon="film-strip" onClick={() => go({ name: "movies" })} autofocus>
+            Go to Movies
           </Button>
         }
       />
@@ -127,6 +132,7 @@ export function Browse(props: { memo: Memo; kind: Kind; category?: string }) {
         pad={bp === "wide" ? 48 : bp === "medium" ? 40 : window.innerWidth < 600 ? 16 : 24}
         padTop={16}
         itemHeight={(w) => Math.round(w * 1.5) + 52}
+        onRange={onGridRange}
         class="poster-grid"
         render={(x, i, tab) => (
           <PosterCard
@@ -144,8 +150,8 @@ export function Browse(props: { memo: Memo; kind: Kind; category?: string }) {
   }
 
   return (
-    <div class={cx("screen browse", `browse-${bp}`)}>
-      {bp === "wide" && !m3u && (
+    <div class={cx("screen browse", `browse-${bp}`, !column && "browse-nocats")}>
+      {column && (
         <aside class="cats" aria-label="Categories">
           <h2 class="t-heading cats-title">{title}</h2>
           <div class="cats-list" data-scope={`${k}-cats`}>
@@ -168,7 +174,7 @@ export function Browse(props: { memo: Memo; kind: Kind; category?: string }) {
       <section class="browse-main" aria-label={catName}>
         <header class="browse-head">
           <div class="browse-titles">
-            <h1 class="t-heading ellipsis">{bp === "medium" && !m3u ? title : catName}</h1>
+            <h1 class="t-heading ellipsis">{m3u || bp === "medium" ? title : catName}</h1>
             {list.data && !m3u && <span class="t-caption c-3 tnum">{plural(sorted.length, k === "movies" ? "film" : "series", k === "movies" ? "films" : "series")}</span>}
           </div>
           {!m3u && (

@@ -64,7 +64,7 @@ export function Home(props: { memo: Memo }) {
 
   return (
     <div class="screen home" data-scroll="home">
-      <Hero featured={featured.data ?? null} loading={!!featuredKey && featured.loading} account={a.id} />
+      {!nothing && <Hero featured={featured.data ?? null} loading={!!featuredKey && featured.loading} account={a.id} />}
       <div class="home-rails">
         {nothing && (
           <Empty

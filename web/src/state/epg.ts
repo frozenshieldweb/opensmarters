@@ -7,7 +7,8 @@ import { api } from "../api/client";
 import type { Programme } from "../api/types";
 
 interface Entry {
-  progs: Programme[];
+  /** `null`: the server's guide for this channel isn't ready yet. */
+  progs: Programme[] | null;
   /** Refetch after this time (the end of the current programme, or a minute for "no data"). */
   until: number;
 }
@@ -28,6 +29,7 @@ export function nowNext(account: string, key: string): Programme[] | undefined {
   void epgVersion.value;
   const e = cache.get(k(account, key));
   if (!e) return undefined;
+  if (!e.progs) return undefined;
   const t = nowS();
   // Drop programmes that have ended (the next one becomes "now" until the refetch lands).
   return e.progs.filter((p) => p.end > t);
@@ -61,20 +63,31 @@ function flush(): void {
       api.epgNow(account, batch).then(
         (res) => {
           const t = nowS();
+          const pending: string[] = [];
           for (const key of batch) {
-            const progs = (res[key] ?? []).slice().sort((a, b) => a.start - b.start);
+            inflight.delete(k(account, key));
+            const got = res[key];
+            if (!got) {
+              // Left out: the guide isn't ready yet. Ask again in a little while.
+              cache.set(k(account, key), { progs: null, until: t + 15 });
+              pending.push(key);
+              continue;
+            }
+            const progs = got.slice().sort((a, b) => a.start - b.start);
             const current = progs.find((p) => p.start <= t && p.end > t);
             cache.set(k(account, key), { progs, until: current ? current.end : t + 60 });
-            inflight.delete(k(account, key));
           }
+          if (pending.length) setTimeout(() => requestNowNext(account, pending), 15_500);
           epgVersion.value++;
         },
         () => {
+          // A failed request: show nothing (not "no guide") and try again later.
           const t = nowS();
           for (const key of batch) {
             inflight.delete(k(account, key));
-            cache.set(k(account, key), { progs: [], until: t + 60 });
+            cache.set(k(account, key), { progs: null, until: t + 30 });
           }
+          setTimeout(() => requestNowNext(account, batch), 30_500);
           epgVersion.value++;
         },
       );

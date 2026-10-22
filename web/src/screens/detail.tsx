@@ -19,6 +19,8 @@ import { watchEpisode, watchMovie } from "../player/start";
 import { api } from "../api/client";
 
 const FINISHED = 0.95;
+/** A film or episode watched for at least this long (seconds) offers Resume. */
+const RESUME_AFTER = 10;
 
 /** Reloads the page's data when the player above it closes (new progress). */
 function useReloadAfterPlayer(watching: boolean, reload: () => void): void {
@@ -121,7 +123,7 @@ export function MovieDetailScreen(props: { memo: Memo; id: string }) {
     );
   }
   const p = m.progress;
-  const resumable = !!p && p.position > 30 && p.position < p.duration * FINISHED;
+  const resumable = !!p && p.position >= RESUME_AFTER && p.position < p.duration * FINISHED;
   const fav = isFavourite("movie", m.id);
   const genres = cap(m.genre ?? "", 80).split(/\s*,\s*/).filter(Boolean).join(" · ");
   return (
@@ -285,7 +287,7 @@ export function SeriesDetailScreen(props: { memo: Memo; id: string }) {
             {season.episodes.map((e) => {
               const pr = e.progress;
               const watched = !!pr && pr.position >= pr.duration * FINISHED;
-              const resume = pr && !watched && pr.position > 30 ? pr.position : 0;
+              const resume = pr && !watched && pr.position >= RESUME_AFTER ? pr.position : 0;
               return (
                 <button
                   type="button"

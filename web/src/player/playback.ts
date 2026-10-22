@@ -81,6 +81,8 @@ export const subtitleTracks = signal<Track[]>([]);
 export const subtitleTrack = signal(-1);
 export const reconnecting = signal(0);
 export const isLive = computed(() => item.value?.kind === "live");
+/** The player's OSD is on screen (subtitles move above it). */
+export const osdShown = signal(false);
 
 let video: HTMLVideoElement | null = null;
 let hls: Hls | null = null;
@@ -91,6 +93,8 @@ let progressTimer: ReturnType<typeof setInterval> | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let lastSaved = -1;
 let mediaRecoveries = 0;
+/** Silent restarts of a film after a network error (reset once it plays again). */
+let vodRestarts = 0;
 let hlsModule: Promise<typeof HlsModule> | null = null;
 
 const loadHls = () => (hlsModule ??= import("hls.js"));
@@ -131,6 +135,7 @@ export function attachVideo(v: HTMLVideoElement): void {
   v.addEventListener("playing", () => {
     if (!item.value) return;
     reconnecting.value = 0;
+    vodRestarts = 0;
     set("playing");
   });
   v.addEventListener("pause", () => item.value && !v.ended && set("paused"));
@@ -238,6 +243,7 @@ export async function play(it: Item, start = 0): Promise<void> {
       kind: playKind(it),
       id: itemId(it),
       ...(it.kind !== "live" && start > 0 ? { start: Math.floor(start) } : {}),
+      ...(it.kind === "episode" ? { series_id: it.seriesId } : {}),
       hevc: canPlayHevc(),
     });
   } catch (e) {
@@ -334,8 +340,27 @@ function onHlsError(h: Hls, data: ErrorData, gen: number): void {
     h.recoverMediaError();
     return;
   }
+  const status = (data.response as { code?: number } | undefined)?.code;
+  if (status === 409) {
+    // stream_replaced: this account started another stream (another tab or device).
+    fail({
+      title: "Playing somewhere else",
+      message: "You started watching something else with this account, so this stream stopped.",
+      retry: true,
+    });
+    return;
+  }
   if (it?.kind === "live") {
     reconnect();
+    return;
+  }
+  // Films and episodes: the server stops a stream nobody asked for in 30 s (a long pause).
+  // Start it again where it was, once, before saying anything.
+  if (it && vodRestarts < 1) {
+    vodRestarts++;
+    void play(it, position.value).then(() => {
+      vodRestarts = 1;
+    });
     return;
   }
   fail({ title: "Connection lost", message: "The stream stopped. Check your connection and try again.", retry: true });

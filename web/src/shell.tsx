@@ -13,7 +13,7 @@ import { Icon, IconButton, Lockup, cx } from "./ui/kit";
 import type { IconName } from "./ui/icons";
 import { breakpoint } from "./ui/hooks";
 import { openLayer, openMenu, type CloseLayer } from "./ui/overlay";
-import { focusFallback, pushBack } from "./focus/dom";
+import { focusFallback, pushBack, rememberInGroup, RAIL_GROUP } from "./focus/dom";
 import { useEffect, useLayoutEffect, useRef } from "preact/hooks";
 import { invalidate } from "./state/cache";
 import { clearEpg } from "./state/epg";
@@ -117,13 +117,28 @@ function AccountButton(props: { onPick?: () => void }) {
 
 function RailBody(props: { onPick?: () => void }) {
   const section = sectionOf(current.value.route);
+  const ref = useRef<HTMLSpanElement>(null);
+  // Moving into the rail lands on the current section (like the app's rail memory), also after
+  // the focus wandered through the rail and left it without choosing anything.
+  useEffect(() => {
+    const rail = ref.current?.parentElement;
+    if (!rail) return;
+    const remember = () => rememberInGroup(RAIL_GROUP, rail.querySelector(".rail-item.is-current"));
+    remember();
+    const onOut = (e: FocusEvent) => {
+      if (!(e.relatedTarget instanceof Node) || !rail.contains(e.relatedTarget)) remember();
+    };
+    rail.addEventListener("focusout", onOut);
+    return () => rail.removeEventListener("focusout", onOut);
+  }, [section]);
   return (
     <>
+      <span ref={ref} hidden />
       <div class="rail-top">
         <Lockup class="rail-lockup" />
       </div>
       <nav class="rail-items" aria-label="Main" data-scope="rail-nav">
-        {NAV.map((n) => (
+        {NAV.filter((n) => n.name !== "series" || account.value?.kind !== "m3u").map((n) => (
           <RailItem key={n.name} item={n} currentSection={section} onPick={props.onPick} />
         ))}
       </nav>

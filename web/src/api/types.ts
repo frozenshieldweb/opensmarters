@@ -184,6 +184,8 @@ export interface PlayRequest {
   start?: number;
   catchup_start?: number;
   catchup_minutes?: number;
+  /** Episodes: the series they belong to (the server needs it to find the stream). */
+  series_id?: string;
   hevc: boolean;
 }
 

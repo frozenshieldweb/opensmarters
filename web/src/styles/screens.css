@@ -796,7 +796,8 @@
   overflow: hidden;
 }
 .browse-medium,
-.browse-compact {
+.browse-compact,
+.browse-nocats {
   grid-template-columns: minmax(0, 1fr);
 }
 .browse-main {

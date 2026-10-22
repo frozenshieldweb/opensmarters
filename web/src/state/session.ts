@@ -77,7 +77,8 @@ export async function updateSettings(patch: Partial<Settings>): Promise<void> {
   const next = { ...before, ...patch };
   settings.value = next;
   try {
-    await api.saveSettings(next);
+    const saved = await api.saveSettings(patch);
+    settings.value = { ...DEFAULT_SETTINGS, ...saved };
   } catch (e) {
     settings.value = before;
     throw e;

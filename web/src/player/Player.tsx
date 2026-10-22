@@ -91,6 +91,14 @@ export function Player(props: { inert: boolean }) {
 
   const visible = osd || pinned;
 
+  // Subtitles move up while the OSD is shown, so the controls never cover them.
+  useEffect(() => {
+    pb.osdShown.value = visible;
+    return () => {
+      pb.osdShown.value = false;
+    };
+  }, [visible]);
+
   // When the OSD appears without focus inside it, put the focus on play/pause.
   useEffect(() => {
     if (!visible) {
@@ -107,7 +115,7 @@ export function Player(props: { inert: boolean }) {
       if (target) focusEl(target, { scroll: false });
       else focusFallback(root);
     }
-  }, [visible, !!err, phase === "ended"]);
+  }, [visible, !!err, phase === "ended", upNext === null]);
 
   // Up next: when an episode ends and there's another one.
   const next = pb.nextEpisode.value;

@@ -8,6 +8,12 @@
 // "afterglow-demo") who has a demo provider. POST /api/__mock/reset {"state": "fresh"|"ready"}
 // resets it (used by the screenshot script).
 //
+// It follows the real server's (crates/web) behaviour where the contract leaves room: error
+// codes, `Retry-After` on 429, invite links `{origin}/invite#<token>`, epg/now leaving out
+// channels whose guide isn't ready yet, PUT /api/settings taking a subset, M3U accounts (films
+// from the playlist, no categories, no series), films as a growing EVENT playlist that starts at
+// the requested `start`, and 409 `stream_replaced` on a stream replaced by a newer one.
+//
 // Scripted errors: sign-in failures (401, then 429 after 5), a provider that refuses (server
 // containing "refuse", or username "wrong") or can't be reached (server containing
 // "unreachable"), channel 13 (stream limit reached, 503), channel 14 (provider refused the
@@ -31,7 +37,7 @@ import type {
 } from "../src/api/types.ts";
 import { buildCatalogue, schedule, type Catalogue, type MockChannel } from "./catalogue.ts";
 import { imageFor } from "./images.ts";
-import { ensureMedia, livePlaylist, segmentFile, vodPlaylist, SEGMENT_SECS, type MediaDirs } from "./media.ts";
+import { ensureMedia, livePlaylist, segmentFile, subtitleSegment, vodMaster, vodPlaylist, SEGMENT_SECS, type MediaDirs } from "./media.ts";
 
 type Next = (err?: unknown) => void;
 type Req = IncomingMessage & { body?: unknown };
@@ -63,6 +69,7 @@ class ApiFail extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    readonly retryAfter?: number,
   ) {
     super(message);
   }
@@ -81,6 +88,8 @@ export class MockApi {
   private progress = new Map<string, Map<string, { kind: "movie" | "episode"; series_id: string | null; position: number; duration: number; updated: number }>>();
   private settings = new Map<string, Settings>();
   private streams = new Map<string, Stream>();
+  private replaced = new Map<string, string>();
+  private startedAt = Date.now();
   private failures = new Map<string, number>();
   private media: MediaDirs | null;
 
@@ -99,6 +108,8 @@ export class MockApi {
     this.progress.clear();
     this.settings.clear();
     this.streams.clear();
+    this.replaced.clear();
+    this.startedAt = Date.now();
     this.failures.clear();
     this.setupCode = randomBytes(4).toString("hex").toUpperCase().replace(/(.{4})/, "$1-");
     if (state === "fresh") {
@@ -196,6 +207,11 @@ export class MockApi {
     return { key: c.key, name: c.name, number: c.number, logo: c.logo, categories: c.categories, archive_days: c.archive_days };
   }
 
+  /** The films of an M3U playlist (its VOD entries). */
+  private playlistMovies(): Catalogue["movies"] {
+    return this.cat.movies.filter((_, i) => i % 36 === 7);
+  }
+
   private publicMovie(m: Catalogue["movies"][number]): Movie {
     return { id: m.id, name: m.name, poster: m.poster, year: m.year, rating: m.rating, added: m.added };
   }
@@ -225,12 +241,12 @@ export class MockApi {
       try {
         u = new URL(server);
       } catch {
-        throw fail(400, "invalid_url", "Enter an address that starts with http:// or https://.");
+        throw fail(400, "invalid_server", "Enter an address that starts with http:// or https://.");
       }
-      if (u.protocol !== "http:" && u.protocol !== "https:") throw fail(400, "invalid_url", "Enter an address that starts with http:// or https://.");
+      if (u.protocol !== "http:" && u.protocol !== "https:") throw fail(400, "invalid_server", "Enter an address that starts with http:// or https://.");
       if (/unreachable/i.test(u.hostname)) throw fail(502, "provider_unreachable", "We couldn't reach this server. Check the address, or try again later.");
       if (/refuse/i.test(u.hostname) || username === "wrong") throw fail(400, "provider_rejected", "Your provider didn't accept this username and password.");
-      if (/^(localhost|127\.|10\.|192\.168\.)/.test(u.hostname)) throw fail(400, "address_not_allowed", "This server can't use addresses on a private network.");
+      if (/^(localhost|127\.|10\.|192\.168\.)/.test(u.hostname)) throw fail(400, "blocked_address", "This server can't use addresses on a private network.");
     }
   }
 
@@ -248,7 +264,10 @@ export class MockApi {
       if (!url.pathname.startsWith("/api/streams/") && !url.pathname.startsWith("/api/img/")) await sleep(80 + Math.random() * 120);
       await this.route(req, res, url);
     } catch (e) {
-      if (e instanceof ApiFail) return json(res, e.status, { error: { code: e.code, message: e.message } });
+      if (e instanceof ApiFail) {
+        if (e.retryAfter) res.setHeader("Retry-After", String(e.retryAfter));
+        return json(res, e.status, { error: { code: e.code, message: e.message } });
+      }
       console.error("[mock]", e);
       json(res, 500, { error: { code: "internal", message: "Something went wrong on the server." } });
     }
@@ -273,7 +292,7 @@ export class MockApi {
     if (p === "/api/setup" && m === "POST") {
       if (this.users.length > 0) throw fail(409, "already_set_up", "This server is already set up. Sign in instead.");
       if (String(body["setup_code"] ?? "").trim().toUpperCase() !== this.setupCode) {
-        throw fail(400, "bad_setup_code", "That setup code isn't right. Copy it from the server log.");
+        throw fail(403, "bad_setup_code", "That setup code isn't right. Copy it from the server log.");
       }
       const name = this.validName(body["name"]);
       const pw = this.validPassword(body["password"]);
@@ -285,7 +304,7 @@ export class MockApi {
     if (p === "/api/login" && m === "POST") {
       const name = String(body["name"] ?? "");
       const n = this.failures.get(name.toLowerCase()) ?? 0;
-      if (n >= 5) throw fail(429, "rate_limited", "Too many attempts. Wait a minute and try again.");
+      if (n >= 5) throw new ApiFail(429, "rate_limited", "Too many attempts. Wait a minute and try again.", 60);
       const u = this.users.find((x) => x.name.toLowerCase() === name.toLowerCase());
       if (!u || u.disabled || u.password !== body["password"]) {
         this.failures.set(name.toLowerCase(), n + 1);
@@ -311,7 +330,7 @@ export class MockApi {
     if (p.startsWith("/api/img/") && m === "GET") return this.image(res, decodeURIComponent(p.slice(9)));
 
     const u = this.cookieUser(req);
-    if (!u) throw fail(401, "unauthorized", "Your session has ended. Sign in again.");
+    if (!u) throw fail(401, "not_signed_in", "Your session has ended. Sign in again.");
 
     if (p === "/api/logout" && m === "POST") {
       for (const [k, v] of this.sessions) if (v === u.id) this.sessions.delete(k);
@@ -319,7 +338,7 @@ export class MockApi {
       return json(res, 200, {});
     }
     if (p === "/api/password" && m === "POST") {
-      if (body["current"] !== u.password) throw fail(400, "wrong_password", "Your current password isn't right.");
+      if (body["current"] !== u.password) throw fail(403, "wrong_password", "Your current password isn't right.");
       u.password = this.validPassword(body["new"]);
       for (const [k, v] of this.sessions) if (v === u.id) this.sessions.delete(k);
       this.startSession(res, u);
@@ -329,10 +348,11 @@ export class MockApi {
     if (p === "/api/settings") {
       if (m === "GET") return json(res, 200, this.settings.get(u.id) ?? { time_format: "24h", live_format: "ts", autoplay_next: true });
       if (m === "PUT") {
+        const cur = this.settings.get(u.id) ?? { time_format: "24h", live_format: "ts", autoplay_next: true };
         const s: Settings = {
-          time_format: body["time_format"] === "12h" ? "12h" : "24h",
-          live_format: body["live_format"] === "m3u8" ? "m3u8" : "ts",
-          autoplay_next: body["autoplay_next"] !== false,
+          time_format: body["time_format"] === undefined ? cur.time_format : body["time_format"] === "12h" ? "12h" : "24h",
+          live_format: body["live_format"] === undefined ? cur.live_format : body["live_format"] === "m3u8" ? "m3u8" : "ts",
+          autoplay_next: body["autoplay_next"] === undefined ? cur.autoplay_next : body["autoplay_next"] !== false,
         };
         this.settings.set(u.id, s);
         return json(res, 200, s);
@@ -362,13 +382,13 @@ export class MockApi {
       const token = randomBytes(18).toString("base64url");
       const expires = nowS() + 72 * 3600;
       this.invites.set(token, expires);
-      return json(res, 200, { url: `http://${_req.headers.host ?? "localhost"}/app/invite#${token}`, expires_at: expires });
+      return json(res, 200, { url: `http://${_req.headers.host ?? "localhost"}/invite#${token}`, expires_at: expires });
     }
     const um = /^\/api\/admin\/users\/([^/]+)(?:\/(disable|enable))?$/.exec(p);
     if (um) {
       const target = this.users.find((x) => x.id === decodeURIComponent(um[1]!));
       if (!target) throw fail(404, "not_found", "This person isn't on the server any more.");
-      if (target.id === u.id) throw fail(400, "self", "You can't do this to your own account.");
+      if (target.id === u.id) throw fail(409, "cannot_change_self", "You can't do this to your own account.");
       if (um[2] === "disable" && m === "POST") {
         target.disabled = true;
         for (const [k, v] of this.sessions) if (v === target.id) this.sessions.delete(k);
@@ -466,6 +486,8 @@ export class MockApi {
         for (const k of keys) {
           const ch = c.channels.find((x) => x.key === k);
           if (!ch) continue;
+          // The real server leaves out channels whose guide isn't ready yet ("ask again later").
+          if (Date.now() - this.startedAt < 20_000 && (ch.number ?? 0) % 7 === 5) continue;
           const progs = schedule(ch, t, t + 6 * 3600);
           const i = progs.findIndex((pr) => pr.start <= t && pr.end > t);
           out[k] = i >= 0 ? progs.slice(i, i + 2) : [];
@@ -477,7 +499,8 @@ export class MockApi {
       case "/series/categories":
         return json(res, 200, xtream ? c.seriesCategories : []);
       case "/movies": {
-        if (!xtream) return json(res, 200, []);
+        // M3U: the playlist's VOD entries, without categories.
+        if (!xtream) return json(res, 200, this.playlistMovies().map((mv) => this.publicMovie(mv)));
         const cat = q.get("category") ?? "all";
         return json(res, 200, c.movies.filter((mv) => cat === "all" || mv.category === cat).map((mv) => this.publicMovie(mv)));
       }
@@ -492,7 +515,7 @@ export class MockApi {
         const f = fold(text);
         return json(res, 200, {
           channels: c.channels.filter((x) => fold(x.name).includes(f)).slice(0, 50).map((x) => this.publicChannel(x)),
-          movies: xtream ? c.movies.filter((x) => fold(x.name).includes(f)).slice(0, 50).map((x) => this.publicMovie(x)) : [],
+          movies: (xtream ? c.movies : this.playlistMovies()).filter((x) => fold(x.name).includes(f)).slice(0, 50).map((x) => this.publicMovie(x)),
           series: xtream ? c.series.filter((x) => fold(x.name).includes(f)).slice(0, 50).map((x) => this.publicSeries(x)) : [],
         });
       }
@@ -554,16 +577,16 @@ export class MockApi {
     const em = /^\/epg\/channel\/(.+)$/.exec(rest);
     if (em) {
       const ch = this.channel(decodeURIComponent(em[1]!));
-      const from = Number(q.get("from"));
-      const to = Number(q.get("to"));
+      const from = q.has("from") ? Number(q.get("from")) : nowS() - 1800;
+      const to = q.has("to") ? Number(q.get("to")) : nowS() + 12 * 3600;
       if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from || to - from > 48 * 3600) {
         throw fail(400, "bad_range", "Ask for at most 48 hours of guide.");
       }
       return json(res, 200, schedule(ch, from, to));
     }
     const mm = /^\/movies\/(.+)$/.exec(rest);
-    if (mm && xtream) {
-      const mv = c.movies.find((x) => x.id === decodeURIComponent(mm[1]!));
+    if (mm) {
+      const mv = (xtream ? c.movies : this.playlistMovies()).find((x) => x.id === decodeURIComponent(mm[1]!));
       if (!mv) throw fail(404, "not_found", "This film isn't available any more.");
       return json(res, 200, { ...mv.detail, progress: progressFor(`movie:${mv.id}`) });
     }
@@ -584,10 +607,18 @@ export class MockApi {
   }
 
   private play(u: MockUser, res: ServerResponse, b: PlayRequest): void {
-    this.account(u, String(b.account));
-    if (!this.media) throw fail(502, "provider_error", "The mock has no media: install ffmpeg and restart the dev server.");
-    // One stream per user: a new one stops the previous one.
-    for (const [k, s] of this.streams) if (s.owner === u.id) this.streams.delete(k);
+    const acct = this.account(u, String(b.account));
+    if (!this.media) throw fail(503, "ffmpeg_missing", "The mock has no media: install ffmpeg and restart the dev server.");
+    if (acct.kind === "m3u" && (b.kind === "episode" || b.kind === "catchup")) {
+      throw fail(400, "invalid_request", "This provider is a playlist: it has no series or catch-up.");
+    }
+    // One stream per user: a new one replaces the previous one (which then answers 409).
+    for (const [k, s] of this.streams) {
+      if (s.owner === u.id) {
+        this.streams.delete(k);
+        this.replaced.set(k, u.id);
+      }
+    }
     const sid = id();
     if (b.kind === "live") {
       const ch = this.channel(String(b.id));
@@ -620,16 +651,36 @@ export class MockApi {
       if (s && s.owner === u.id) this.streams.delete(sid);
       return json(res, 200, {});
     }
+    if (!s && this.replaced.get(sid) === u.id) {
+      throw fail(409, "stream_replaced", "This stream stopped because a newer one started for your account.");
+    }
     if (!s || s.owner !== u.id || !file || m !== "GET") throw fail(404, "not_found", "This stream has ended.");
     if (s.dropsAfter !== null && Date.now() - s.created > s.dropsAfter) {
       this.streams.delete(sid);
       throw fail(404, "not_found", "This stream has ended.");
     }
     res.setHeader("Cache-Control", "no-store");
-    if (file === "index.m3u8") {
+    const playlists: Record<string, () => string> = s.live
+      ? { "index.m3u8": () => livePlaylist(s.created, Date.now()) }
+      : {
+          "index.m3u8": () => vodMaster(),
+          "video.m3u8": () => vodPlaylist(s.duration, s.firstSeg, "v", converted(s)),
+          "audio-en.m3u8": () => vodPlaylist(s.duration, s.firstSeg, "a", converted(s)),
+          "audio-fr.m3u8": () => vodPlaylist(s.duration, s.firstSeg, "f", converted(s)),
+          "subs-en.m3u8": () => vodPlaylist(s.duration, s.firstSeg, "s", converted(s)),
+        };
+    const pl = playlists[file];
+    if (pl) {
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-      res.end(s.live ? livePlaylist(s.created, Date.now()) : vodPlaylist(s.duration, s.firstSeg));
+      res.end(pl());
+      return;
+    }
+    const vtt = /^s(\d+)\.vtt$/.exec(file);
+    if (vtt && !s.live) {
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "text/vtt; charset=utf-8");
+      res.end(subtitleSegment(Number(vtt[1])));
       return;
     }
     const path = this.media ? segmentFile(this.media, file) : null;
@@ -655,6 +706,11 @@ export class MockApi {
     res.setHeader("Cache-Control", "private, max-age=3600");
     res.end(svg);
   }
+}
+
+/** Segments "converted" so far: the real server's ffmpeg runs ahead of playback; here 4× real time. */
+function converted(s: Stream): number {
+  return 6 + Math.floor(((Date.now() - s.created) / 1000) * 4 / SEGMENT_SECS);
 }
 
 function fold(s: string): string {

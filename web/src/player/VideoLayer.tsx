@@ -6,7 +6,7 @@
 import { signal } from "@preact/signals";
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { current } from "../state/router";
-import { attachVideo, item, phase } from "./playback";
+import { attachVideo, item, osdShown, phase } from "./playback";
 
 /** The placeholder the preview video is drawn over (set by Live TV's preview). */
 export const previewTarget = signal<HTMLElement | null>(null);
@@ -66,7 +66,7 @@ export function VideoLayer() {
   const visible = active && (full || (!!box && phase.value !== "error"));
   const style = full || !box ? {} : { top: `${box.top}px`, left: `${box.left}px`, width: `${box.width}px`, height: `${box.height}px` };
   return (
-    <div class={`video-layer ${full ? "is-full" : "is-preview"} ${visible ? "" : "is-hidden"}`} style={style} aria-hidden={full ? undefined : "true"}>
+    <div class={`video-layer ${full ? "is-full" : "is-preview"} ${visible ? "" : "is-hidden"} ${full && osdShown.value ? "subs-raised" : ""}`} style={style} aria-hidden={full ? undefined : "true"}>
       <video ref={ref} class="video" playsInline preload="none" disablePictureInPicture />
     </div>
   );

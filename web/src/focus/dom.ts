@@ -141,6 +141,11 @@ export function focusInRail(): boolean {
   return !!document.activeElement?.closest(`[data-group="${RAIL_GROUP}"]`);
 }
 
+/** Sets the item a group lands on when the focus moves into it (the rail's current section). */
+export function rememberInGroup(group: string, el: Element | null): void {
+  if (el) memory.groups.set(group, el);
+}
+
 /** Registers a back handler (dialogs, OSD, number entry). The newest runs first. */
 export function pushBack(handler: BackHandler): () => void {
   backHandlers.push(handler);

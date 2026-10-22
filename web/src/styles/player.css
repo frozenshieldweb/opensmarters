@@ -26,6 +26,13 @@
   object-fit: contain;
   background: var(--video);
 }
+/* Subtitles sit above the OSD while it's shown (Chromium and Safari; elsewhere they stay low). */
+.video::-webkit-media-text-track-container {
+  transition: transform var(--osd) var(--cubic-out);
+}
+.subs-raised .video::-webkit-media-text-track-container {
+  transform: translateY(-150px);
+}
 .video::cue {
   font-family: var(--sans);
   font-size: 1.1em;

@@ -792,3 +792,28 @@ for `crate::dvr` only).
 seeds two scheduled recordings (one on a locked "Adult Night" channel), a reminder and a
 locked clip (`dvr::seed_demo`). Engine tests: `tests/dvr.rs`.
 Routes: `recordings[:tab=downloads|recordings|scheduled]`, `settings:recordings`.
+
+## 15. Web edition (`crates/web`)
+
+The web edition ([WEB_PROMPT.md](WEB_PROMPT.md)) doesn't use this app: it has its own
+server, `crates/web` (binary `opensmarters-web`), and a browser UI in `web/`. What it
+shares with the desktop app is `crates/core` (Xtream client models, M3U / XMLTV / HLS
+parsers, stream URL builders, catalogue search, `Redactor`) and `crates/fake-panel`
+(tests and `--demo`). The crate-level rustdoc of `crates/web/src/lib.rs` is the module
+map; the API contract is WEB_PROMPT §4; deployment is [WEB_DEPLOY.md](WEB_DEPLOY.md);
+the threat model is [SECURITY.md §4.12](SECURITY.md#412-web-edition-cratesweb-opensmarters-web).
+
+```bash
+# The server with the synthetic provider (demo / demo-password), on 127.0.0.1:8080:
+OPENSMARTERS_LISTEN=127.0.0.1:8080 cargo run -p opensmarters-web -- --demo
+# Debug builds serve web/dist from disk (rebuild the UI, reload the page); release builds
+# embed it. Without web/dist a built-in page says the UI isn't built.
+cargo clippy -p opensmarters-web --all-targets -- -D warnings; cargo test -p opensmarters-web
+```
+
+Differences from the desktop session worth knowing: provider requests go through the
+server's SSRF-safe client (`net.rs`), never `core::net::HttpClient` directly (the core
+parsers are used on the bytes); M3U favourites keys are `m3u:<FNV-1a hash>` of tvg-id,
+title and group (`#2`, `#3`… for repeats), like the app's `m3u_key` but with a different
+hash, so keys are not shared between the two editions; playback is HLS produced by
+ffmpeg from bytes the server pipes to its stdin (`streams.rs`).

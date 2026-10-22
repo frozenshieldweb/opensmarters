@@ -1,0 +1,22 @@
+# Docker build context (deploy/web/Dockerfile builds from the repository root).
+# Build output, dependencies and local data stay out.
+.git
+.github
+.claude
+**/target
+target/
+**/node_modules
+**/dist
+dist/
+vendor/
+testdata/
+_reference/
+fuzz/target
+fuzz/corpus
+fuzz/artifacts
+tools/assets/raw
+tools/assets/.build
+**/*.log
+.env
+**/.env
+data/

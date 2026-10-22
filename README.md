@@ -75,6 +75,16 @@ Windows 10/11 x64 with a current graphics driver is required. Builds are not sig
 
 Your data lives in `%LOCALAPPDATA%\opensmarters\opensmarters\data`. Passwords are in Windows Credential Manager, under entries ending in `.opensmarters`.
 
+## Web edition
+
+**opensmarters web** is a light, self-hosted version for the browser: one Docker container on your own server (for example with [Dokploy](https://dokploy.com)) serves the player and talks to your provider for you. Provider passwords stay on the server, encrypted; streams are repackaged for the browser with ffmpeg. It is a **private instance** for you and your household: no public sign-up, the administrator invites people. Deployment, environment variables, backups and sizing: [docs/WEB_DEPLOY.md](docs/WEB_DEPLOY.md); design and API: [docs/WEB_PROMPT.md](docs/WEB_PROMPT.md); threat model: [docs/SECURITY.md §4.12](docs/SECURITY.md#412-web-edition-cratesweb-opensmarters-web).
+
+```bash
+docker build -f deploy/web/Dockerfile -t opensmarters-web .
+docker run --rm -p 8080:8080 -e OPENSMARTERS_SECRET_KEY="$(openssl rand -base64 32)" opensmarters-web --demo
+# then open http://localhost:8080 and sign in as demo / demo-password (synthetic data)
+```
+
 ## Keyboard
 
 | | Everywhere | Live TV | Player |
@@ -129,6 +139,7 @@ cargo deny check; cargo audit
 | `crates/afterglow` | The Afterglow theme, icons and painting helpers, shared by the app and the installer |
 | `crates/installer` | `opensmarters-setup`, the per-user Windows installer ([ADR 0002](docs/adr/0002-installer.md)) |
 | `crates/fake-panel` | A synthetic provider for development and tests |
+| `crates/web` | `opensmarters-web`, the web edition's server ([docs/WEB_DEPLOY.md](docs/WEB_DEPLOY.md)); `deploy/web/` has its Dockerfile and Compose file |
 | `site/` | The landing page (static; [site/README.md](site/README.md)) |
 | `tools/assets/` | The launch-asset pipeline (Codex image generation, then a deterministic build into `assets/launch/`) |
 | `docs/` | [Architecture](docs/APP_ARCHITECTURE.md), [design system](docs/DESIGN.md), [protocol](docs/PROTOCOL.md), [security](docs/SECURITY.md), [libmpv](docs/LIBMPV.md), [progress](docs/PROGRESS.md) |

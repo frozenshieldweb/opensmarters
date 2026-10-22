@@ -267,7 +267,7 @@ cache, and the cache is wiped when a PIN is set. The "Forgot PIN" limiter is per
 
 - `Cargo.lock` committed; `cargo deny check` (advisories, licences, bans, sources:
   crates.io only, no git) passes, with five documented Linux-only advisory exceptions.
-- `#![forbid(unsafe_code)]` in `core`, `store`, `app`, `fake-panel`; `unsafe` exists only in
+- `#![forbid(unsafe_code)]` in `core`, `store`, `app`, `fake-panel`, `web`; `unsafe` exists only in
   `crates/player` (FFI), where clippy's `undocumented_unsafe_blocks` is `deny` and every
   block has a `// SAFETY:` comment.
 - Dependency closure on Windows: core ≈ 120 crates, store ≈ 100, player ≈ 90, app ≈ 300
@@ -394,6 +394,62 @@ soon as a certificate is configured. "Delete my data" removes `%LOCALAPPDATA%\op
 as a whole: a recordings folder the user moved *inside* it would go too. A running app is
 detected by its files being in use (the user is asked to close it; setup never closes or
 kills it).
+
+### 4.12 Web edition (`crates/web`, `opensmarters-web`)
+
+The web edition ([WEB_PROMPT.md](WEB_PROMPT.md), deployment in
+[WEB_DEPLOY.md](WEB_DEPLOY.md)) moves the provider connection onto a server that several
+people sign in to over the internet. **New assets:** the instance secret key
+(`OPENSMARTERS_SECRET_KEY`), people's passwords and sessions, every person's provider
+secrets in one database, and the server's network position (it can reach the Docker
+host, the LAN, cloud metadata). **New actors:** anyone on the internet (the sign-in page
+is public), a signed-in household member trying to reach someone else's data or the
+server's network, a hostile provider or playlist that now makes the *server* fetch
+addresses, and a hostile web page open in the viewer's browser.
+
+| Threat | Mitigation | Code |
+|---|---|---|
+| Provider secrets read from the disk or a backup | Passwords, M3U and EPG addresses sealed with XChaCha20-Poly1305 (random 192-bit nonces) under a key derived (keyed BLAKE2b) from the instance secret, with the user id and account id as associated data (a row can't be moved to another person); never returned by the API or put in a URL the browser sees; favourite / progress snapshots (names, artwork addresses) sealed too. A test plants the fake panel's `special` password and an M3U address and scans the whole data folder | `crypto.rs`, `provider.rs` (`seal`, `open`), `tests/web/accounts.rs` |
+| Password guessing | Argon2id (19 MiB, t = 2, p = 1; at most two at once; stored parameters bounded); per-address and per-name lockout after 5 failures, doubling to 15 min (429 + `Retry-After`); one message for every failure; unknown names cost a dummy verification | `auth.rs` |
+| Session theft or fixation | 256-bit random tokens stored only as keyed hashes; cookie `HttpOnly; Secure; SameSite=Strict; Path=/`, 30-day sliding expiry; a new token at every sign-in (the browser's old one ends); every session of a person ends on password change, disable and removal | `auth.rs`, `api/session.rs`, `api/admin.rs` |
+| Cross-site request forgery | Every non-GET API request must carry `X-Opensmarters: 1` (a custom header forces a CORS preflight, which is never granted) on top of `SameSite=Strict`; JSON bodies only (a form post can't reach a handler) | `api/mod.rs` (`guard`, `Body`) |
+| Script injection, framing | Strict CSP on every page (`default-src 'self'`, no inline script or style, `frame-ancestors 'none'`, `base-uri 'none'`, `form-action 'self'`), `nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`; provider text is returned as capped plain text with controls and bidi overrides removed (the UI never renders it as HTML); artwork is re-served only as sniffed PNG / JPEG / GIF / WebP (never SVG) with `default-src 'none'; sandbox` | `ui.rs`, `text.rs`, `images.rs` |
+| Taking over a new instance | The administrator is created with a one-time setup code (random, ≈ 60 bits, logged once at start, or `OPENSMARTERS_SETUP_CODE`), compared in constant time, rate-limited, accepted only while no user exists (checked again in the insert transaction); invitations are 256-bit, stored hashed, single use, 72 h, and the token travels in the link's fragment (never in a server log) | `state.rs`, `api/session.rs`, `api/admin.rs` |
+| One person reaching another's data | Every account query is scoped by the signed-in user's id; favourites and progress are reached only through such an account; streams answer only their owner (404 otherwise). Tested for every endpoint | `db.rs`, `api/*.rs`, `tests/web/accounts.rs`, `tests/web/streams.rs` |
+| Server-side request forgery | One outbound client for **everything** (API, playlists, EPG, artwork, streams, HLS playlists and segments, every redirect): `http`/`https` only, no credentials in URLs, the server resolves names itself and connects only to addresses that pass the policy (no DNS-rebinding window); IP literals and every redirect are checked too. Refused: loopback, private, CGNAT, link-local (cloud metadata), multicast, unspecified, reserved and documentation ranges, the container's default gateway and `host.docker.internal`, in IPv4 and IPv6 including IPv4-mapped, IPv4-compatible, NAT64 and 6to4 forms. `HTTP(S)_PROXY` is ignored. Connect / read / total timeouts and size caps per purpose. `OPENSMARTERS_ALLOW_PRIVATE_PROVIDERS=1` relaxes only the private ranges | `net.rs`, `tests/web/ssrf.rs` |
+| The test / demo loopback exception | `Config::dev_loopback_allow` lists exact `ip:port` pairs on loopback; it is **never read from the environment**: only `--demo` (the in-process fake panel's address) and the tests set it, and it applies only to URLs that name that IP literally (a host name resolving to loopback is still refused) | `config.rs`, `net.rs` (`Policy::check_ip`), `main.rs` |
+| An open image proxy | Image tokens are the provider address encrypted and authenticated with a key only this server has (a synthetic nonce keeps them stable for caching); a session is required; 5 MB, 20 s, ≤ 3 redirects; magic bytes and decoded size checked (≤ 8192 px per side, ≤ 40 MP); disk cache capped at 256 MiB with 7-day expiry; failures remembered for 5 min | `crypto.rs` (`image_token`), `images.rs`, `tests/web/images.rs` |
+| Hostile streams parsed by FFmpeg | The server fetches every byte itself (through the SSRF client) and writes it to ffmpeg's **stdin**: `-protocol_whitelist pipe` for the input and a demuxer whitelist (`mpegts, matroska, mov, avi, flv, mpeg, aac, mp3`), so no playlist, redirect or file reference inside a stream can make ffmpeg open anything; output only into the stream's own folder under `<data>/streams`; ffprobe runs the same way. In the container ffmpeg runs as uid 10001 with no capabilities and a read-only root | `streams.rs` |
+| Exhausting the server | Streams per person / per instance / per provider account; zapping stops the previous stream before opening a new provider connection; a stream nobody fetches for 30 s is stopped (ffmpeg killed, connection closed, folder deleted), a stalled one after 90 s, any after 12 h; films are read at most ~2 minutes ahead of the viewer; request bodies 64 KiB; response caps; bounded caches; ≤ 20 providers and ≤ 5 000 favourites per account | `streams.rs`, `provider.rs`, `images.rs`, `lib.rs` |
+| Secrets in logs | Every log line goes through `RedactingWriter`; each decrypted password, user name, playlist and EPG address is registered with the `Redactor`; URLs are logged only redacted; errors carry no URL | `main.rs`, `provider.rs`, `net.rs` |
+| Spoofed client addresses | `X-Forwarded-For` / `-Proto` / `-Host` are read only from peers in `OPENSMARTERS_TRUSTED_PROXY` (the right-most untrusted address is the client) | `auth.rs` (`client_ip`), `config.rs` |
+| Container escape helpers | Non-root user (uid 10001), `tini` as PID 1 (ffmpeg children reaped), no shell or curl needed (`--healthcheck` is built in); the Compose file adds a read-only root, a small `/tmp` tmpfs, `cap_drop: ALL` and `no-new-privileges` | `deploy/web/Dockerfile`, `deploy/web/compose.yaml` |
+
+Residual risks of the web edition:
+
+- **FFmpeg memory-safety bugs** on hostile streams remain the largest risk (as with
+  libmpv on the desktop), now inside the server's container instead of the viewer's PC.
+- **The server holds what it relays.** While it runs it decrypts provider secrets to
+  build requests and keeps parsed M3U playlists (with credential-bearing stream
+  addresses) in memory for up to 6 hours; whoever controls the host, or has the secret
+  key and the database, can read every provider secret.
+- **A signed-in person can make the server download public addresses** (as their
+  "provider"): bandwidth, not secrets. This is why instances must stay private
+  (WEB_DEPLOY.md, the private-instance rule). With `OPENSMARTERS_ALLOW_PRIVATE_PROVIDERS=1`
+  they can also make it `GET` HTTP services on the LAN (answers are parsed as JSON, M3U,
+  XMLTV, images or media, never reflected raw).
+- Plain-HTTP providers expose credentials between the server and the provider, as on the
+  desktop.
+- The sign-in limiter lives in memory (a restart resets it); there is no second factor.
+- `--demo` starts without a secret key (it makes up a temporary one) and creates a
+  known password: local testing only.
+
+Verification: `cargo test -p opensmarters-web` (unit tests plus `tests/web`: setup,
+sessions, invites, rate limit, CSRF, isolation between two people, every catalogue
+endpoint, SSRF refusals for typed addresses, redirects, playlists, HLS manifests and
+artwork, the image proxy's token and limits, and a real stream through ffmpeg whose
+provider connection is counted by a TCP proxy; the stream tests are skipped with a
+message when ffmpeg isn't on `PATH`).
 
 ## 5. Residual risks and out of scope
 

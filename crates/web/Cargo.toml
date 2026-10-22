@@ -1,0 +1,65 @@
+[package]
+name = "opensmarters-web"
+description = "opensmarters web: the self-hosted web edition's server (JSON API, provider access, HLS through ffmpeg, image proxy, embedded UI)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "opensmarters_web"
+path = "src/lib.rs"
+
+[[bin]]
+name = "opensmarters-web"
+path = "src/main.rs"
+
+[features]
+# `--demo`: the fake panel (synthetic provider) in-process. On by default so the Docker
+# image can serve the demo; build with `--no-default-features` to leave it out.
+default = ["demo"]
+demo = ["dep:fake-panel"]
+
+[dependencies]
+anyhow = "1"
+# Password hashing (Argon2id PHC strings).
+argon2 = { version = "0.6", features = ["zeroize"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "json", "matched-path"] }
+base64 = "0.23"
+# Keyed BLAKE2b: key derivation, session-token hashes, image-token nonces.
+blake2 = { version = "0.11", features = ["zeroize"] }
+bytes = "1"
+# Secrets at rest and image tokens (XChaCha20-Poly1305).
+chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
+chrono = { version = "0.4.42", default-features = false, features = ["std", "clock"] }
+clap = { version = "4", features = ["derive"] }
+fake-panel = { path = "../fake-panel", optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+getrandom = "0.4"
+# Image proxy: header-only dimension checks (no decoding of pixels).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+opensmarters-core = { path = "../core" }
+# rustls only (no native-tls / OpenSSL), like crates/core.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+# The built UI (`web/dist`) embedded at compile time (read from disk in debug builds).
+rust-embed = { version = "8.13", features = ["mime-guess"] }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync", "process", "fs", "io-util"] }
+# gzip for JSON lists and the UI's files (never video or images).
+tower-http = { version = "0.7", default-features = false, features = ["compression-gzip"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "std"] }
+zeroize = "1"
+
+[dev-dependencies]
+fake-panel = { path = "../fake-panel" }
+tempfile = "3"
+
+[lints]
+workspace = true

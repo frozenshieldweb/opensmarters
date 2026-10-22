@@ -8,6 +8,7 @@ members = [
     "crates/fake-panel",
     "crates/afterglow",
     "crates/installer",
+    "crates/web",
 ]
 
 [workspace.package]

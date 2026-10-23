@@ -12,6 +12,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# A rare abort ("unsafe precondition(s) violated") was seen once in a debug test run,
+# without a backtrace; always print one so a recurrence names the library.
+env:
+  RUST_BACKTRACE: full
+
 # Actions are pinned to commit SHAs (the tag is in the comment).
 jobs:
   check:

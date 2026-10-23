@@ -42,6 +42,11 @@ export interface Account {
   expires_at: number | null;
   max_connections: number | null;
   active_connections: number | null;
+  /**
+   * The panel, playlist or guide address is plain http, or the panel sends streams over http:
+   * the password crosses the network unencrypted between the server and the provider.
+   */
+  insecure: boolean;
 }
 
 export type NewAccount =

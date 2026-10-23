@@ -171,6 +171,8 @@ export const api = {
     ),
   epgChannel: (a: string, key: string, from: number, to: number, o?: RequestOptions) =>
     request<Programme[]>("GET", `${acc(a)}/epg/channel/${enc(key)}?from=${from}&to=${to}`, undefined, o),
+  catchup: (a: string, key: string, o?: RequestOptions) =>
+    request<Programme[]>("GET", `${acc(a)}/catchup/${enc(key)}`, undefined, o),
   movieCategories: (a: string, o?: RequestOptions) =>
     request<Category[]>("GET", `${acc(a)}/movies/categories`, undefined, o),
   seriesCategories: (a: string, o?: RequestOptions) =>

@@ -169,6 +169,15 @@ function Providers() {
                   {st.label}
                 </span>
               </div>
+              {a.insecure && (
+                <p class="provider-insecure">
+                  <span class="status-chip st-warning t-caption">
+                    <Icon name="lock-simple-open" />
+                    Unencrypted
+                  </span>
+                  <span class="t-caption c-2">Your password is visible on the network between this server and this provider (http).</span>
+                </p>
+              )}
               <p class="t-caption c-2 provider-card-meta">
                 {dot(
                   a.expires_at ? `${a.expires_at * 1000 < Date.now() ? "Expired" : "Expires"} ${date(a.expires_at)}` : "No expiry date",

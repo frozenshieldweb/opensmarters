@@ -2,7 +2,9 @@
 // Guide (DESIGN.md §6.9, simplified): channels down the side, their programmes along a time
 // line from half an hour ago to six hours ahead (6 px per minute), a now-line, and an info panel
 // for the focused programme. Left/Right move by programme, Up/Down by channel keeping the time.
-// Rows are virtualised; each row's programmes load when it comes into view.
+// Rows are virtualised; each row's programmes load when it comes into view. Enter on what's on
+// now watches the channel; on a programme that has ended, on a channel with catch-up, it plays
+// that programme from its start.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api } from "../api/client";
@@ -18,7 +20,8 @@ import { cap } from "../lib/text";
 import { Button, Empty, ErrorState, Icon, Skeleton, cx } from "../ui/kit";
 import { ChannelLogo } from "../ui/media";
 import { breakpoint, useInitialFocus } from "../ui/hooks";
-import { watchChannel } from "../player/start";
+import { watchCatchup, watchChannel } from "../player/start";
+import { canCatchUp } from "../lib/catchup";
 import { ChipRow } from "./common";
 
 const PX_PER_MIN = 6;
@@ -253,7 +256,9 @@ export function Guide(props: { memo: Memo; category?: string }) {
     const t = Date.now() / 1000;
     if (p.start <= t && p.end > t) watchChannel(a.id, c, channels);
     else if (p.start > t) toast(`${cap(p.title, 60)} starts at ${clock(p.start, fmt)}.`, "info");
-    else toast("This programme has finished. Catch-up isn't in the web edition yet.", "info");
+    else if (canCatchUp(c, p, t)) watchCatchup(a.id, c, p, fmt);
+    else if (c.archive_days) toast("This programme is older than this channel's catch-up.", "info");
+    else toast("This programme has finished, and this channel has no catch-up.", "info");
   };
 
   // Info panel: the focused programme.
@@ -305,7 +310,7 @@ export function Guide(props: { memo: Memo; category?: string }) {
                   data-start={p.start}
                   tabIndex={-1}
                   style={{ transform: `translateX(${x0}px)`, width: `${Math.max(4, w - 2)}px` }}
-                  aria-label={`${c.name}: ${p.title}, ${timeRange(p.start, p.end, fmt)}${live ? ", on now" : ""}`}
+                  aria-label={`${c.name}: ${p.title}, ${timeRange(p.start, p.end, fmt)}${live ? ", on now" : past && canCatchUp(c, p, t) ? ", catch-up" : ""}`}
                   onClick={() => activate(c, p)}
                 >
                   {live && <span class="g-elapsed" style={{ width: `${fraction(p.start, p.end, t) * 100}%` }} />}
@@ -314,7 +319,10 @@ export function Guide(props: { memo: Memo; category?: string }) {
                       class="g-cell-text"
                       style={{ paddingLeft: `${Math.max(0, Math.min(geo.left - x0, w - 72))}px` }}
                     >
-                      <span class="t-body-strong ellipsis">{cap(p.title, 80)}</span>
+                      <span class="t-body-strong ellipsis g-cell-title">
+                        {past && canCatchUp(c, p, t) && <Icon name="clock-counter-clockwise" class="g-catchup" />}
+                        {cap(p.title, 80)}
+                      </span>
                       <span class="t-caption c-3 ellipsis tnum">{timeRange(p.start, p.end, fmt)}</span>
                     </span>
                   )}
@@ -378,13 +386,19 @@ export function Guide(props: { memo: Memo; category?: string }) {
                     : `starts at ${clock(fprog.start, fmt)}`
                   : fprog.end > t
                     ? "on now"
-                    : "finished",
+                    : canCatchUp(fch, fprog, t)
+                      ? "finished · Enter to watch it from the start"
+                      : "finished",
               )}
             </p>
             {fprog.description && bp !== "compact" && <p class="c-2 ellipsis guide-desc">{cap(fprog.description, 300)}</p>}
           </>
         ) : (
-          <p class="c-3 t-caption">{channels.length ? "Move through the guide with the arrow keys. Enter on a programme that's on now to watch it." : " "}</p>
+          <p class="c-3 t-caption">
+            {channels.length
+              ? "Move through the guide with the arrow keys. Enter on a programme that's on now to watch it, or on one that has ended to catch up."
+              : " "}
+          </p>
         )}
       </section>
       <div class="guide-body">
@@ -435,7 +449,7 @@ export function Guide(props: { memo: Memo; category?: string }) {
       {bp !== "compact" && channels.length > 0 && (
         <p class="guide-hint t-caption c-3">
           <Icon name="info" />
-          <span>← → programmes · ↑ ↓ channels · Enter watches what's on now · PageUp/PageDown scroll</span>
+          <span>← → programmes · ↑ ↓ channels · Enter watches what's on now, or catches up on what has ended · PageUp/PageDown scroll</span>
         </p>
       )}
     </div>

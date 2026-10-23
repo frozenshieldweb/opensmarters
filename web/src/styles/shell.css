@@ -193,6 +193,15 @@
 .status-clock {
   color: var(--text);
 }
+.status-insecure {
+  display: inline-flex;
+  padding: 6px;
+  margin: -6px;
+  color: var(--text-3);
+  font-size: 18px;
+  pointer-events: auto;
+  cursor: help;
+}
 
 /* ---- screens -------------------------------------------------------------------------------- */
 .screen {

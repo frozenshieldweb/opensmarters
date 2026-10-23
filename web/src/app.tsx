@@ -19,6 +19,7 @@ import { AddProvider } from "./screens/providers";
 import { Home } from "./screens/home";
 import { Live } from "./screens/live";
 import { Guide } from "./screens/guide";
+import { CatchupScreen } from "./screens/catchup";
 import { Browse } from "./screens/browse";
 import { MovieDetailScreen, SeriesDetailScreen } from "./screens/detail";
 import { Search } from "./screens/search";
@@ -53,6 +54,8 @@ function ScreenFor(props: { entry: Entry }) {
       return <Live key={e.key} memo={memo} category={r.category} />;
     case "guide":
       return <Guide key={e.key} memo={memo} category={r.category} />;
+    case "catchup":
+      return <CatchupScreen key={e.key} memo={memo} account={r.account} channelKey={r.key} />;
     case "movies":
     case "series":
       return <Browse key={e.key} memo={memo} kind={r.name} category={r.category} />;

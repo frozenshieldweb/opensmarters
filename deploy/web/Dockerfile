@@ -43,9 +43,13 @@ COPY . .
 # that toolchain, so the image tag above only saves a download when it matches.
 RUN rustup toolchain install && rustup show active-toolchain
 COPY --from=ui /out/web/dist /src/web/dist
+# Optional: how many compilers run at once. Cargo uses every CPU by default; each job can
+# take about 1 GB, so a server with many cores and little memory should set this
+# (Dokploy: Environment → Build Time Arguments, e.g. CARGO_BUILD_JOBS=2).
+ARG CARGO_BUILD_JOBS
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build -p opensmarters-web --release --locked \
+    cargo build -p opensmarters-web --release --locked ${CARGO_BUILD_JOBS:+--jobs "$CARGO_BUILD_JOBS"} \
  && install -D -m 0755 target/release/opensmarters-web /out/opensmarters-web
 
 # --- 3. The runtime ------------------------------------------------------------------

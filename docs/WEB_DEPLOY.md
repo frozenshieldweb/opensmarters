@@ -19,50 +19,222 @@ account's connections).
 
 ## What you need
 
-- A Linux server with [Dokploy installed](https://docs.dokploy.com/docs/core/installation)
-  (it brings Docker and Traefik). 2 CPU cores and 2 GB of RAM are plenty for a household
-  without video transcoding (see [Sizing](#sizing)).
-- A domain or subdomain (for example `tv.example.com`) with a DNS `A`/`AAAA` record
-  pointing at the server. HTTPS is **required**: sessions use `Secure` cookies, which
-  browsers only keep over HTTPS (or on `localhost`).
+- **A Linux server** (a VPS or a dedicated server; Ubuntu or Debian is what Dokploy's
+  installer expects), reachable from the internet on ports **80** and **443**. **2 GB of
+  RAM** is enough: Dokploy compiles the server when it deploys, which fits in 2 GB as long
+  as at most two compilers run at once (see [step 0](#step-0-prepare-the-server));
+  running it afterwards needs much less (see [Sizing](#sizing)).
+- **A domain or subdomain** for the player, for example `tv.example.com`, with a DNS `A`
+  record (and `AAAA` for IPv6) pointing at the server. HTTPS is **required**: sessions use
+  `Secure` cookies, which browsers only keep over HTTPS (or on `localhost`).
+- About **30 minutes**, most of it waiting for the first build.
 
-## 1. Generate the secret key
+## Deploy with Dokploy, step by step
 
-The secret key encrypts your providers' passwords and playlist addresses at rest and
-signs sessions and image addresses. It is 32 random bytes in base64:
+### Step 0: prepare the server
+
+1. Install Dokploy (it brings Docker, Docker Swarm and Traefik) by following
+   [Dokploy's installation guide](https://docs.dokploy.com/docs/core/installation). At the
+   time of writing that is one command, run as root:
+
+   ```bash
+   curl -sSL https://dokploy.com/install.sh | sh
+   ```
+
+   Then open `http://<server-ip>:3000`, create Dokploy's administrator account, and
+   (recommended) give Dokploy's own panel a domain with HTTPS in its settings.
+2. Make sure ports **80** and **443** are open in the server's firewall (Let's Encrypt
+   uses port 80 to issue the certificate).
+3. **Memory for the build.** Each compiler that runs at once can take up to about 1 GB,
+   and the build runs one per CPU core. Measured: a clean build on 2 cores within 2 GB of
+   memory succeeds; the same build with many cores at once is stopped by the kernel.
+   - **2 cores, 2 GB or more:** nothing to do.
+   - **More cores than gigabytes of RAM** (say 8 cores, 4 GB): set the build argument
+     `CARGO_BUILD_JOBS=2` in [step 4](#step-4-choose-how-it-is-built), or add swap.
+   - **Less than 2 GB:** add swap before the first deployment:
+
+   ```bash
+   sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile
+   sudo mkswap /swapfile && sudo swapon /swapfile
+   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+   ```
+
+4. In your DNS, create the `A` record for `tv.example.com` (your domain) pointing at the
+   server's public IP. It can take a few minutes to take effect.
+
+**Check:** `ping tv.example.com` answers from the server's IP, and Dokploy's panel opens.
+
+### Step 1: generate the secret key
+
+The secret key encrypts your providers' passwords and playlist addresses at rest, and
+signs sessions and image addresses. It is 32 random bytes in base64. On any computer:
 
 ```bash
 openssl rand -base64 32
-# or, once an image exists: docker run --rm opensmarters-web --generate-secret-key
 ```
 
-Keep it in your password manager. If it is lost or changed, everyone is signed out and
-every provider has to be entered again (nothing else is lost).
+Copy the result into your password manager now. **If it is lost or changed, everyone is
+signed out and every provider has to be entered again** (nothing else is lost).
 
-## 2. Create the application in Dokploy
+### Step 2: create the application
 
-1. In Dokploy, open (or create) a **Project**, then **Create Service → Application**.
-   Name it `opensmarters-web`.
-2. **General → Provider:** choose **GitHub** and the repository
-   `frozenshieldweb/opensmarters` (after connecting Dokploy's GitHub app under
-   *Settings → Git*), or choose **Git** and enter
-   `https://github.com/frozenshieldweb/opensmarters.git`. Branch: `main`. Save.
-3. **General → Build Type:** choose **Dockerfile**.
-   - Docker File: `deploy/web/Dockerfile`
-   - Docker Context Path: `.` (the repository root)
-   - Docker Build Stage: leave empty
+1. In Dokploy, open **Projects** → **Create Project**, name it `opensmarters`.
+2. In the project: **Create Service** → **Application**, name it `opensmarters-web`.
 
-   Save.
+**Check:** the application's page opens with its tabs (General, Environment, Domains,
+Deployments, Logs, Advanced…).
 
-## 3. Environment variables
+### Step 3: point it at the source code
 
-In the **Environment** tab, add one `NAME=value` per line:
+In the **General** tab, under the source (**Provider**):
+
+- **GitHub** (recommended, allows automatic deployments): connect Dokploy's GitHub app
+  once under Dokploy's *Settings → Git* if you haven't, then choose the repository
+  `frozenshieldweb/opensmarters` and the branch **`main`**;
+- or **Git**: repository URL `https://github.com/frozenshieldweb/opensmarters.git`,
+  branch **`main`**.
+
+Save.
+
+### Step 4: choose how it is built
+
+Still in **General**, set **Build Type** to **Dockerfile** and fill in:
+
+| Field | Value |
+|---|---|
+| **Dockerfile Path** | `deploy/web/Dockerfile` |
+| **Docker Context Path** | `.` |
+| **Docker Build Stage** | *(leave empty)* |
+
+Save. (The Dockerfile builds the browser interface, then the server, then a small
+runtime image; [How the image is built](#how-the-image-is-built) has the details.)
+
+**Only if the server has more CPU cores than gigabytes of RAM:** open the **Environment**
+tab → **Build Time Arguments** and add `CARGO_BUILD_JOBS=2` (it limits how many compilers
+run at once during the build; it changes nothing at run time).
+
+### Step 5: environment variables
+
+Open the **Environment** tab and paste, with your own values:
 
 ```bash
 OPENSMARTERS_SECRET_KEY=<the key from step 1>
 OPENSMARTERS_PUBLIC_URL=https://tv.example.com
 OPENSMARTERS_TRUSTED_PROXY=private
 ```
+
+**On a server with CPU to spare** (a dedicated server), also add:
+
+```bash
+OPENSMARTERS_TRANSCODE_VIDEO=hevc
+```
+
+Some providers send channels in HEVC, which Firefox and some Chrome setups can't play;
+with this setting the server converts those streams to H.264 (about one CPU core per
+HEVC stream being watched), so every channel plays in every browser. Other streams are
+still copied as they are.
+
+Save. The first three are all you need. `OPENSMARTERS_TRUSTED_PROXY=private` lets the
+server see the visitor's real address behind Traefik (for the sign-in rate limit); the
+public URL is used in invitation links. Every other setting is optional and listed in
+[Environment variables](#environment-variables). Don't put the key in **Build Time
+Arguments**: it is only needed when the container runs.
+
+### Step 6: storage for `/data`
+
+Open **Advanced** → **Volumes** (Mounts) → add a **Volume Mount**:
+
+| Field | Value |
+|---|---|
+| **Volume Name** | `opensmarters-data` |
+| **Mount Path** | `/data` |
+
+Save. **Without it, everything (people, providers, favourites, progress) is lost at the
+next deployment.**
+
+### Step 7: domain and HTTPS
+
+Open **Domains** → **Add Domain**:
+
+| Field | Value |
+|---|---|
+| **Host** | `tv.example.com` |
+| **Path** | `/` |
+| **Container Port** | `8080` |
+| **HTTPS** | on |
+| **Certificate** | `letsencrypt` |
+
+Leave **Internal Path** and **Strip Path** as they are. Save. Traefik receives HTTPS on
+port 443 and forwards plain HTTP to the container's port 8080 on Dokploy's internal
+network; the container port is **not** published to the internet. (Don't add anything
+under **Advanced → Ports**.)
+
+### Step 8: deploy
+
+Press **Deploy** (General tab) and follow the build in **Deployments** (click the running
+deployment to see its log).
+
+- The **first build usually takes 5 to 15 minutes**: the browser interface is built,
+  then the server is compiled in release mode (about 2 minutes on two fast cores; slower
+  virtual CPUs take longer), then ffmpeg is installed in the runtime image. Later builds
+  reuse Docker's cache and are faster.
+- The image has its own health check (`opensmarters-web --healthcheck`); the deployment
+  finishes when the container is running.
+
+**Check:** the deployment ends with *Done*, and **Logs** shows lines like
+`listening addr=0.0.0.0:8080 ui_built=true`.
+
+If the build stops with *Killed*, *signal: 9* or *exit code 137*, the server ran out of
+memory: set `CARGO_BUILD_JOBS=2` (or `1`) as a build argument, or add swap
+([step 0](#step-0-prepare-the-server)), and deploy again.
+
+### Step 9: create the administrator
+
+1. In **Logs**, find the line:
+
+   ```text
+   WARN no administrator yet: open the web page and enter this one-time setup code: ABCD-EFGH-JKLM
+   ```
+
+2. Open `https://tv.example.com`. While nobody has an account, the page shows the
+   **set-up** screen by itself: enter the setup code, your name and a password (at least
+   10 characters).
+3. You're signed in. Add your provider when asked (or later in **Settings → Providers**):
+   Xtream Codes (server, user name, password) or an M3U playlist address with an
+   optional EPG address.
+
+The code works once. Restarting the container before set-up prints a new one. (To choose
+your own code instead, set `OPENSMARTERS_SETUP_CODE` in step 5.)
+
+**Check:** the browser shows the padlock, Live TV lists your channels, and a channel
+plays in the preview.
+
+### Step 10: invite your household
+
+**Settings → Users → Invite** creates a link that works once, for 72 hours. Send it
+privately (the code is after the `#`, so it never reaches a server log). The person
+chooses a name and password, then adds their **own** provider. The same screen can
+disable someone (their sessions and streams end at once), enable them again, or remove
+them with their providers, favourites and progress.
+
+### Step 11 (optional): automatic deployments
+
+To deploy every time `main` changes, turn on **Autodeploy** in the General tab (with the
+GitHub provider; for the Git provider, add the webhook URL from **Deployments** to the
+repository). Each deployment rebuilds the image, so you may prefer to deploy by hand when
+you choose to update.
+
+### A note on hardening
+
+The image runs the server as an unprivileged user (uid 10001) with `tini` as PID 1, and
+the server only listens inside Dokploy's network. Dokploy's **Application** type doesn't
+offer a read-only root filesystem or dropping Linux capabilities. If you want those too,
+deploy `deploy/web/compose.yaml` with Dokploy's **Docker Compose** type instead: it sets
+`read_only`, a `/tmp` tmpfs, `cap_drop: ALL` and `no-new-privileges`. That route needs
+its `ports:` removed, the service attached to Dokploy's `dokploy-network`, and Traefik
+labels for the domain ([Dokploy: Docker Compose domains](https://docs.dokploy.com/docs/core/docker-compose)).
+
+## Environment variables
 
 Every variable the server reads:
 
@@ -80,51 +252,6 @@ Every variable the server reads:
 | `OPENSMARTERS_ALLOW_PRIVATE_PROVIDERS` | `0` | `1` allows providers on private networks (your LAN, `10.x`, `192.168.x`, `fd00::/8`, CGNAT). Loopback, link-local (cloud metadata), the Docker host's gateway and reserved ranges stay refused. |
 | `OPENSMARTERS_SETUP_CODE` | random | A setup code of your choice (8–64 visible characters). Without it, a random one-time code is printed in the log at start while nobody has signed up yet. |
 | `OPENSMARTERS_LOG` | `info` | `error`, `warn`, `info`, `debug` or `trace`. Logs never contain passwords or provider addresses with credentials (they are redacted). |
-
-## 4. A volume for `/data`
-
-In **Advanced → Volumes** (called *Mounts* in some versions), add a **Volume Mount**:
-name `opensmarters-data`, mount path `/data`. Without it, everything (people,
-providers, favourites) is lost at each deployment.
-
-## 5. Domain and HTTPS
-
-In the **Domains** tab, add your domain:
-
-- Host: `tv.example.com`
-- Path: `/`
-- Container Port: `8080`
-- HTTPS: on, Certificate: **Let's Encrypt**
-
-Traefik terminates HTTPS and forwards plain HTTP to the container on Dokploy's network.
-
-## 6. Deploy
-
-Press **Deploy** and follow the build in **Deployments**. The first build takes a while
-(the server is compiled in release mode; 10 to 30 minutes on a small server); later
-builds reuse Docker's cache. The image has a health check (`opensmarters-web
---healthcheck`); Dokploy shows the container as healthy once it answers.
-
-## 7. Create the administrator
-
-Open **Logs** (the container's log) and find the line:
-
-```text
-WARN no administrator yet: open the web page and enter this one-time setup code: ABCD-EFGH-JKLM
-```
-
-Open `https://tv.example.com`, choose **First run**, enter the setup code, your name and
-a password (at least 10 characters). The code works once; a restart before setup prints
-a new one. Then add your provider in **Settings → Providers** (Xtream Codes: server,
-user name, password; or an M3U playlist address with an optional EPG address).
-
-## 8. Invite people
-
-**Settings → Users → Invite** creates a link valid for 72 hours and one sign-up. Send it
-privately (the code is after the `#`, so it never reaches a server log). The person
-chooses their name and password and then adds their own provider. In the same screen you
-can disable someone (their sessions and streams end at once), enable them again or
-remove them (with their providers, favourites and progress).
 
 ## Updating
 
@@ -201,8 +328,8 @@ docker logs opensmarters-web        # the setup code
 
 (Save the key you generated: the providers can't be read with another one.) Or with
 Compose: `deploy/web/compose.yaml` (`docker compose -f deploy/web/compose.yaml up -d
---build`, with `OPENSMARTERS_SECRET_KEY` exported); for Dokploy's *Compose* service type,
-remove its `ports:` and add a domain. Put any reverse proxy in front for HTTPS
+--build`, with `OPENSMARTERS_SECRET_KEY` exported); for Dokploy's *Compose* service type
+see [A note on hardening](#a-note-on-hardening). Put any reverse proxy in front for HTTPS
 (Caddy, nginx, Traefik) and set `OPENSMARTERS_TRUSTED_PROXY` to its address.
 
 ## Trying the demo
@@ -216,11 +343,20 @@ docker run --rm -p 8080:8080 -e OPENSMARTERS_SECRET_KEY="$(openssl rand -base64 
 ```
 
 Open `http://localhost:8080` (localhost is allowed without HTTPS). The demo's test videos
-are generated with ffmpeg on the first start (about 20 seconds). Never use `--demo` on
-an instance people rely on.
+are generated with ffmpeg before the server starts serving (a few seconds, on the first
+start only); its live channels loop like real ones. Never use `--demo` on an instance
+people rely on.
 
 ## Troubleshooting
 
+- **The build stops with *Killed* / *exit code 137*:** not enough memory for the
+  compilers running at once; set the build argument `CARGO_BUILD_JOBS=2` (or `1`), or add
+  swap ([step 0](#step-0-prepare-the-server)).
+- **The domain shows *Bad Gateway* or *404 page not found*:** the container isn't running
+  yet (look at **Logs**), or the domain's **Container Port** isn't `8080`.
+- **No HTTPS certificate (the browser warns):** the DNS record doesn't point at the server
+  yet, or port 80 is closed (Let's Encrypt checks the domain on port 80). Fix it, then
+  save the domain again.
 - **Signing in works but the next page signs you out:** the site isn't served over HTTPS
   (browsers drop `Secure` cookies on plain HTTP except on `localhost`).
 - **"That address is on a private network…":** the provider is on your LAN; set

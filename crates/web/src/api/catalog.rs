@@ -245,11 +245,7 @@ pub async fn epg_channel(
         .get(&key)
         .ok_or_else(|| ApiError::not_found("No such channel."))?;
     let rows: Vec<Programme> = if let Some(sid) = channel.stream_id {
-        let mut rows = p
-            .schedule(sid)
-            .await
-            .map(|r| r.to_vec())
-            .unwrap_or_default();
+        let mut rows = p.schedule(sid).await.unwrap_or_default();
         if rows.is_empty() {
             rows = p
                 .short_epg(sid)
@@ -268,6 +264,30 @@ pub async fn epg_channel(
         .iter()
         .filter(|r| r.end > from && r.start < to)
         .collect();
+    Ok(Json(
+        serde_json::to_value(rows).unwrap_or(Value::Array(Vec::new())),
+    ))
+}
+
+/// `GET …/catchup/{key}`: the channel's programmes that can be replayed (the panel's
+/// archive flag set, ended, within the channel's `archive_days`), newest first. `[]` for
+/// playlists (M3U has no catch-up) and channels without archive; 404 for an unknown key.
+pub async fn catchup(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path((id, key)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let p = provider(&state, &user.user.id, &id).await?;
+    let live = p.live().await?;
+    let channel = live
+        .get(&key)
+        .ok_or_else(|| ApiError::not_found("No such channel."))?;
+    let (Some(stream_id), Some(days), true) =
+        (channel.stream_id, channel.archive_days, p.is_xtream())
+    else {
+        return Ok(Json(Value::Array(Vec::new())));
+    };
+    let rows = p.table(stream_id).await?.archive(days, chrono::Utc::now());
     Ok(Json(
         serde_json::to_value(rows).unwrap_or(Value::Array(Vec::new())),
     ))

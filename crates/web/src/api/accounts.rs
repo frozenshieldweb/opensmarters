@@ -34,13 +34,28 @@ pub fn account_json(a: &AccountRow) -> Value {
         "expires_at": a.expires_at,
         "max_connections": a.max_connections,
         "active_connections": a.active_connections,
+        "insecure": a.insecure.unwrap_or(false),
     })
 }
 
 /// `GET /api/accounts`.
 pub async fn list(State(state): State<AppState>, user: CurrentUser) -> ApiResult<Json<Value>> {
     let id = user.user.id.clone();
-    let rows = state.db.call(move |c| db::list_accounts(c, &id)).await?;
+    let mut rows = state.db.call(move |c| db::list_accounts(c, &id)).await?;
+    // Accounts saved before the flag existed: work it out from their addresses (and the
+    // panel's last login answer, if this server has it) and remember it.
+    for row in rows.iter_mut().filter(|r| r.insecure.is_none()) {
+        let p = prov::Provider::new(&state, row.clone());
+        let Ok(creds) = p.creds() else { continue };
+        let login = p.cache().peek::<opensmarters_core::LoginInfo>("login");
+        let insecure = prov::insecure_of(&creds, login.as_deref());
+        row.insecure = Some(insecure);
+        let (u, a) = (row.user_id.clone(), row.id.clone());
+        state
+            .db
+            .call(move |c| db::set_account_insecure(c, &u, &a, insecure))
+            .await?;
+    }
     Ok(Json(Value::Array(rows.iter().map(account_json).collect())))
 }
 
@@ -171,7 +186,7 @@ async fn check(
             if let Err(why) = info.check(Utc::now()) {
                 return Err(prov::login_error(&LoginFailure::Auth(why)));
             }
-            let facts = AccountFacts {
+            let mut facts = AccountFacts {
                 host: server.host_str().to_owned(),
                 server: Some(server.to_string()),
                 username: Some(username.clone()),
@@ -180,15 +195,15 @@ async fn check(
                 max_connections: info.user_info.max_connections.map(i64::from),
                 active_connections: info.user_info.active_cons.map(i64::from),
                 playlist: None,
+                insecure: false,
             };
-            Ok((
-                Creds::Xtream {
-                    server,
-                    username,
-                    password,
-                },
-                facts,
-            ))
+            let creds = Creds::Xtream {
+                server,
+                username,
+                password,
+            };
+            facts.insecure = prov::insecure_of(&creds, Some(&info));
+            Ok((creds, facts))
         }
         "m3u" => {
             let (cur_url, cur_epg) = match current {
@@ -211,6 +226,7 @@ async fn check(
                 }
             };
             let playlist = prov::fetch_playlist(state, &url).await?;
+            let creds = Creds::M3u { url, epg };
             let facts = AccountFacts {
                 host: parsed.host_str().unwrap_or_default().to_owned(),
                 server: None,
@@ -220,8 +236,9 @@ async fn check(
                 max_connections: None,
                 active_connections: None,
                 playlist: Some(playlist),
+                insecure: prov::insecure_of(&creds, None),
             };
-            Ok((Creds::M3u { url, epg }, facts))
+            Ok((creds, facts))
         }
         _ => Err(invalid(
             "invalid_request",
@@ -247,6 +264,8 @@ struct AccountFacts {
     max_connections: Option<i64>,
     active_connections: Option<i64>,
     playlist: Option<opensmarters_core::m3u::Playlist>,
+    /// An address is plain `http` ([`prov::insecure_of`]).
+    insecure: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -274,6 +293,9 @@ fn row_from(
         max_connections: facts.max_connections,
         active_connections: facts.active_connections,
         created_at,
+        insecure: Some(facts.insecure),
+        // New provider details: the catch-up format is found again.
+        timeshift_format: None,
     })
 }
 
@@ -402,13 +424,14 @@ pub async fn refresh(
     let p = provider(&state, &user.user.id, &id).await?;
     state.providers.drop_account(&p.row.id);
     let mut row = p.row.clone();
-    match p.creds()? {
+    let creds = p.creds()?;
+    match &creds {
         Creds::Xtream {
             server,
             username,
             password,
         } => {
-            let info = prov::fetch_login(&state, &server, &username, &password)
+            let info = prov::fetch_login(&state, server, username, password)
                 .await
                 .map_err(|f| match f {
                     LoginFailure::Net(e) => ApiError::provider(&e),
@@ -418,11 +441,13 @@ pub async fn refresh(
             row.expires_at = info.user_info.exp_date.map(|d| d.timestamp());
             row.max_connections = info.user_info.max_connections.map(i64::from);
             row.active_connections = info.user_info.active_cons.map(i64::from);
+            row.insecure = Some(prov::insecure_of(&creds, Some(&info)));
         }
         Creds::M3u { .. } => {
             let fresh = crate::provider::Provider::new(&state, row.clone());
             fresh.m3u().await?;
             row.status = "active".to_owned();
+            row.insecure = Some(prov::insecure_of(&creds, None));
         }
     }
     let r = row.clone();

@@ -385,3 +385,139 @@ async fn video_the_browser_cannot_play() {
     fetch_hls(&c, r["url"].as_str().unwrap()).await;
     app.shutdown().await;
 }
+
+/// The newest archived programme of a channel with catch-up: `(stream id, start, minutes)`.
+async fn archived(c: &Client, account: &str, cat: &fake_panel::Catalogue) -> (u64, i64, i64) {
+    let ch = cat
+        .live
+        .iter()
+        .find(|ch| ch.tv_archive && ch.epg_channel_id.is_some())
+        .expect("a channel with archive");
+    let list = c
+        .get(&format!("/api/accounts/{account}/catchup/{}", ch.stream_id))
+        .await
+        .ok();
+    let p = &list[0];
+    let (start, end) = (p["start"].as_i64().unwrap(), p["end"].as_i64().unwrap());
+    (ch.stream_id, start, (end - start + 59) / 60)
+}
+
+/// The timeshift requests the panel saw: `(format, status, start, minutes)`.
+fn timeshifts(panel: &fake_panel::Handle) -> Vec<(fake_panel::StartFormat, u16, i64, f64)> {
+    panel
+        .requests()
+        .into_iter()
+        .filter_map(|r| {
+            r.timeshift.map(|t| {
+                (
+                    t.start_format,
+                    r.status,
+                    t.start_timestamp,
+                    t.duration_minutes,
+                )
+            })
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catchup_falls_back_to_the_other_format_once() {
+    use fake_panel::StartFormat::{ColonSeconds, DashMinutes};
+    if !ffmpeg_available() {
+        return;
+    }
+    // The panel plays only the IPTV Smarters start format (YYYY-MM-DD:HH:MM:SS).
+    let panel = media_panel("timeshift-smarters-only").await;
+    let cat = panel.catalogue().clone();
+    let app = app(&[panel.addr()]).await;
+    let c = admin(&app).await;
+    let account = add_xtream(&c, &panel).await;
+    let (sid, start, minutes) = archived(&c, &account, &cat).await;
+    let body = |at: f64| {
+        json!({"account": account, "kind": "catchup", "id": sid.to_string(),
+               "catchup_start": start, "catchup_minutes": minutes, "start": at, "hevc": false})
+    };
+
+    panel.clear_requests();
+    let r = c.post("/api/play", body(0.0)).await.ok();
+    assert_eq!(r["live"], false);
+    assert_eq!(r["start"], 0.0);
+    assert_eq!(r["duration"].as_f64().unwrap(), (minutes * 60) as f64);
+    let text = fetch_hls(&c, r["url"].as_str().unwrap()).await;
+    assert!(text.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "{text}");
+    let seen = timeshifts(&panel);
+    assert_eq!(
+        seen.iter().map(|s| (s.0, s.1)).collect::<Vec<_>>(),
+        vec![(DashMinutes, 503), (ColonSeconds, 200)],
+        "the standard format first, then the other one once"
+    );
+    assert!(
+        seen.iter().all(|s| s.2 == start),
+        "the programme's own start"
+    );
+
+    // Remembered for the account: the next start asks for the format that worked. A
+    // seek asks the panel for the archive from a later minute (2 min 5 s → 2 min).
+    panel.clear_requests();
+    let r = c.post("/api/play", body(125.0)).await.ok();
+    assert_eq!(r["start"], 125.0);
+    assert_eq!(r["duration"].as_f64().unwrap(), (minutes * 60) as f64);
+    fetch_hls(&c, r["url"].as_str().unwrap()).await;
+    let seen = timeshifts(&panel);
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!((seen[0].0, seen[0].1), (ColonSeconds, 200));
+    assert_eq!(seen[0].2, start + 120);
+    assert!((seen[0].3 - (minutes - 2) as f64).abs() < 0.01, "{seen:?}");
+    let sid = r["stream"].as_str().unwrap().to_owned();
+    c.delete(&format!("/api/streams/{sid}")).await.ok();
+    assert_eq!(app.server.state.streams.count(), 0);
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catchup_refused_in_both_formats() {
+    use fake_panel::StartFormat::{ColonSeconds, DashMinutes};
+    // Every timeshift link answers 503 (refused before any video: no ffmpeg needed).
+    let panel = fake_panel::spawn(
+        fake_panel::Config::api_only().with_quirks("timeshift-503".parse().unwrap()),
+    )
+    .await
+    .unwrap();
+    let cat = panel.catalogue().clone();
+    let app = app(&[panel.addr()]).await;
+    let c = admin(&app).await;
+    let account = add_xtream(&c, &panel).await;
+    let (sid, start, minutes) = archived(&c, &account, &cat).await;
+    panel.clear_requests();
+    let r = c
+        .post(
+            "/api/play",
+            json!({"account": account, "kind": "catchup", "id": sid.to_string(),
+                   "catchup_start": start, "catchup_minutes": minutes, "hevc": false}),
+        )
+        .await;
+    assert_eq!((r.status, r.code()), (502, "provider_error"), "{}", r.json);
+    assert_eq!(
+        r.json["error"]["message"],
+        "This programme isn't available from your provider right now."
+    );
+    assert_eq!(
+        timeshifts(&panel)
+            .iter()
+            .map(|s| (s.0, s.1))
+            .collect::<Vec<_>>(),
+        vec![(DashMinutes, 503), (ColonSeconds, 503)],
+        "each format once"
+    );
+    assert_eq!(app.server.state.streams.count(), 0, "nothing left behind");
+    // Nothing worked: nothing is remembered (the standard format is tried first again).
+    let rows = app
+        .server
+        .state
+        .db
+        .call(|conn| opensmarters_web::db::all_accounts(conn))
+        .await
+        .unwrap();
+    assert!(rows.iter().all(|r| r.timeshift_format.is_none()));
+    app.shutdown().await;
+}

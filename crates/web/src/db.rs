@@ -21,7 +21,7 @@ use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// Current schema version.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 const MIGRATION_1: &str = "
 CREATE TABLE users (
@@ -93,6 +93,13 @@ CREATE TABLE settings (
 ) STRICT;
 ";
 
+/// Version 2: per account, whether any of its addresses is unencrypted (`NULL` until it
+/// is next checked: rows from version 1) and the catch-up link format that worked last.
+const MIGRATION_2: &str = "
+ALTER TABLE accounts ADD COLUMN insecure INTEGER CHECK (insecure IN (0, 1));
+ALTER TABLE accounts ADD COLUMN timeshift_format TEXT CHECK (timeshift_format IN ('standard', 'smarters'));
+";
+
 /// Database errors (internal; the API shows a generic message).
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -161,6 +168,11 @@ impl Db {
         if version < 1 {
             conn.execute_batch(&format!(
                 "BEGIN; {MIGRATION_1} PRAGMA user_version = 1; COMMIT;"
+            ))?;
+        }
+        if version < 2 {
+            conn.execute_batch(&format!(
+                "BEGIN; {MIGRATION_2} PRAGMA user_version = 2; COMMIT;"
             ))?;
         }
         Ok(Db {
@@ -523,10 +535,15 @@ pub struct AccountRow {
     pub active_connections: Option<i64>,
     /// Unix seconds.
     pub created_at: i64,
+    /// An address of this account (panel, streams, playlist, guide) is plain `http`;
+    /// `None` until it is checked (rows from schema version 1).
+    pub insecure: Option<bool>,
+    /// The catch-up link format that worked last (`standard` or `smarters`).
+    pub timeshift_format: Option<String>,
 }
 
 const ACCOUNT_COLUMNS: &str = "id, user_id, name, kind, host, server, username, secret, status, \
-     expires_at, max_connections, active_connections, created_at";
+     expires_at, max_connections, active_connections, created_at, insecure, timeshift_format";
 
 fn account_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRow> {
     Ok(AccountRow {
@@ -543,6 +560,8 @@ fn account_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRow> {
         max_connections: r.get("max_connections")?,
         active_connections: r.get("active_connections")?,
         created_at: r.get("created_at")?,
+        insecure: r.get("insecure")?,
+        timeshift_format: r.get("timeshift_format")?,
     })
 }
 
@@ -610,14 +629,16 @@ pub fn upsert_account(c: &Connection, a: &AccountRow) -> Result<(), DbError> {
     let now = now();
     c.execute(
         "INSERT INTO accounts (id, user_id, name, kind, host, server, username, secret, status,
-                               expires_at, max_connections, active_connections, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                               expires_at, max_connections, active_connections, created_at, updated_at,
+                               insecure, timeshift_format)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT (id) DO UPDATE SET
              name = excluded.name, kind = excluded.kind, host = excluded.host,
              server = excluded.server, username = excluded.username, secret = excluded.secret,
              status = excluded.status, expires_at = excluded.expires_at,
              max_connections = excluded.max_connections,
-             active_connections = excluded.active_connections, updated_at = excluded.updated_at
+             active_connections = excluded.active_connections, updated_at = excluded.updated_at,
+             insecure = excluded.insecure, timeshift_format = excluded.timeshift_format
          WHERE accounts.user_id = excluded.user_id",
         params![
             a.id,
@@ -633,8 +654,47 @@ pub fn upsert_account(c: &Connection, a: &AccountRow) -> Result<(), DbError> {
             a.max_connections,
             a.active_connections,
             a.created_at,
-            now
+            now,
+            a.insecure,
+            a.timeshift_format,
         ],
+    )?;
+    Ok(())
+}
+
+/// Records whether an account **of this user** has an unencrypted address.
+///
+/// # Errors
+///
+/// [`DbError`].
+pub fn set_account_insecure(
+    c: &Connection,
+    user_id: &str,
+    account_id: &str,
+    insecure: bool,
+) -> Result<(), DbError> {
+    c.execute(
+        "UPDATE accounts SET insecure = ?3 WHERE id = ?1 AND user_id = ?2",
+        params![account_id, user_id, insecure],
+    )?;
+    Ok(())
+}
+
+/// Remembers the catch-up link format that worked for an account **of this user**
+/// (`standard` or `smarters`).
+///
+/// # Errors
+///
+/// [`DbError`].
+pub fn set_timeshift_format(
+    c: &Connection,
+    user_id: &str,
+    account_id: &str,
+    format: &str,
+) -> Result<(), DbError> {
+    c.execute(
+        "UPDATE accounts SET timeshift_format = ?3 WHERE id = ?1 AND user_id = ?2",
+        params![account_id, user_id, format],
     )?;
     Ok(())
 }
@@ -933,9 +993,27 @@ mod tests {
             max_connections: Some(1),
             active_connections: None,
             created_at: 1,
+            insecure: Some(true),
+            timeshift_format: None,
         };
         upsert_account(&c, &a).unwrap();
         assert!(get_account(&c, "u1", "a1").unwrap().is_some());
+        // The flags are scoped by the owner too.
+        set_timeshift_format(&c, "u2", "a1", "smarters").unwrap();
+        set_account_insecure(&c, "u2", "a1", false).unwrap();
+        let got = get_account(&c, "u1", "a1").unwrap().unwrap();
+        assert_eq!((got.insecure, got.timeshift_format), (Some(true), None));
+        set_timeshift_format(&c, "u1", "a1", "smarters").unwrap();
+        set_account_insecure(&c, "u1", "a1", false).unwrap();
+        let got = get_account(&c, "u1", "a1").unwrap().unwrap();
+        assert_eq!(
+            (got.insecure, got.timeshift_format.as_deref()),
+            (Some(false), Some("smarters"))
+        );
+        assert!(
+            set_timeshift_format(&c, "u1", "a1", "other").is_err(),
+            "only the two known formats"
+        );
         assert!(get_account(&c, "u2", "a1").unwrap().is_none());
         // Another user can't take the row over through an upsert with the same id.
         upsert_account(
@@ -953,5 +1031,32 @@ mod tests {
         assert_eq!(favourite_count(&c, "a1").unwrap(), 1);
         assert!(delete_user(&c, "u1").unwrap());
         assert_eq!(favourite_count(&c, "a1").unwrap(), 0, "cascade");
+    }
+
+    #[test]
+    fn version_1_databases_gain_the_account_flags() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "BEGIN; {MIGRATION_1} PRAGMA user_version = 1; COMMIT;"
+        ))
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (id, name, name_key, password_hash, created_at) VALUES ('u1', 'A', 'a', 'h', 1);
+             INSERT INTO accounts (id, user_id, name, kind, host, secret, created_at, updated_at)
+                 VALUES ('a1', 'u1', 'P', 'm3u', 'h', x'00', 1, 1);",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        let c = db.conn.lock().unwrap();
+        let v: i64 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        let a = get_account(&c, "u1", "a1").unwrap().unwrap();
+        assert_eq!(
+            (a.insecure, a.timeshift_format),
+            (None, None),
+            "not known yet"
+        );
     }
 }

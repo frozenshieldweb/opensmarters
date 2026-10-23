@@ -2,7 +2,7 @@
 // Catch-up for one channel: its archived programmes from the provider, grouped by day on the
 // viewer's clock (Today, Yesterday, then weekday and date), newest first. Enter plays a
 // programme from its start in the player (a duration and seeking, like a film). Reached from
-// Live TV (the preview's Catch-up button) and from the Guide.
+// Live TV (the preview's Catch-up button); the Guide plays programmes that have ended directly.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api } from "../api/client";
@@ -11,7 +11,7 @@ import { accounts, settings } from "../state/session";
 import { useDelayed, useLoad } from "../state/cache";
 import * as catalog from "../state/catalog";
 import { now } from "../state/misc";
-import { back, stack, type Memo } from "../state/router";
+import { back, type Memo } from "../state/router";
 import { clock, dot, plural, runtime, timeRange } from "../lib/format";
 import { groupByDay, type CatchupDay } from "../lib/catchup";
 import { cap } from "../lib/text";
@@ -67,8 +67,7 @@ export function CatchupScreen(props: { memo: Memo; account: string; channelKey: 
     if (acct && channel) watchCatchup(acct.id, channel, p, fmt);
   };
 
-  const below = stack.value[stack.value.length - 2]?.route.name;
-  const backLabel = below === "guide" ? "Guide" : "Live TV";
+  const backLabel = "Live TV";
   const info = (day?.programmes.find((p) => p.start === focused) ?? day?.programmes[0]) || null;
 
   let body;

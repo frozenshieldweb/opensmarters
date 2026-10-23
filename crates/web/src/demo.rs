@@ -9,6 +9,10 @@
 //! panel's new port at every start. `--demo-fresh` skips the person and the provider so
 //! the first-run screens can be tried (the setup code and the panel address are logged).
 //!
+//! Live channels always loop at their real bitrate (`live-endless`), like a real live
+//! stream. Without it a channel is a short clip sent at once: ffmpeg finishes in a few
+//! milliseconds and the browser sees a live stream that has already ended.
+//!
 //! Dev only: `OPENSMARTERS_DEMO_QUIRKS=timeshift-smarters-only` (any comma-separated
 //! `fake_panel::Quirks` names) makes the panel misbehave like real ones, as in the
 //! Windows app's demo.
@@ -29,18 +33,21 @@ pub const DEMO_PASSWORD: &str = "demo-password";
 pub const DEMO_ACCOUNT: &str = "Demo provider";
 
 /// Starts the fake panel; its media is generated with ffmpeg into `data_dir/demo-media`
-/// in the background (streams answer once it is ready).
+/// before it returns (about 4 s on the first start, nothing after), so no stream is ever
+/// asked for before its media exists (in the background, a channel opened in the first
+/// seconds got a 503 and the player showed "couldn't start").
 ///
 /// # Errors
 ///
 /// When the panel can't bind, or `OPENSMARTERS_DEMO_QUIRKS` names an unknown quirk.
 pub async fn start_panel(data_dir: &Path) -> anyhow::Result<fake_panel::Handle> {
-    let quirks = match std::env::var("OPENSMARTERS_DEMO_QUIRKS") {
+    let mut quirks = match std::env::var("OPENSMARTERS_DEMO_QUIRKS") {
         Ok(list) if !list.trim().is_empty() => fake_panel::Quirks::parse_list([list])?,
         _ => fake_panel::Quirks::default(),
     };
+    quirks.live_endless = true;
     let config = fake_panel::Config {
-        media: fake_panel::MediaMode::Background,
+        media: fake_panel::MediaMode::Generate,
         media_dir: data_dir.join("demo-media"),
         quirks,
         ..fake_panel::Config::default()

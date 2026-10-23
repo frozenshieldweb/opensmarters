@@ -10,6 +10,7 @@ export type SettingsSection = "providers" | "playback" | "account" | "users" | "
 export type Route =
   | { name: "home" }
   | { name: "live"; category?: string }
+  | { name: "catchup"; account: string; key: string }
   | { name: "guide"; category?: string }
   | { name: "movies"; category?: string }
   | { name: "series"; category?: string }
@@ -53,6 +54,8 @@ export function urlOf(r: Route): string {
     case "movies":
     case "series":
       return `${BASE}/${r.name}${q("c", r.category)}`;
+    case "catchup":
+      return `${BASE}/catchup/${encodeURIComponent(r.account)}/${encodeURIComponent(r.key)}`;
     case "movie":
       return `${BASE}/movies/${encodeURIComponent(r.id)}`;
     case "show":
@@ -93,6 +96,8 @@ export function parseUrl(pathname: string, search = ""): Route {
       return c ? { name: "live", category: c } : { name: "live" };
     case "guide":
       return c ? { name: "guide", category: c } : { name: "guide" };
+    case "catchup":
+      return b && d ? { name: "catchup", account: b, key: d } : { name: "live" };
     case "movies":
       return b ? { name: "movie", id: b } : c ? { name: "movies", category: c } : { name: "movies" };
     case "series":
@@ -126,6 +131,8 @@ export function parentOf(r: Route): Route | null {
       return { name: "movies" };
     case "show":
       return { name: "series" };
+    case "catchup":
+      return { name: "live" };
     case "provider-new":
     case "provider-edit":
       return { name: "settings", section: "providers" };
@@ -141,6 +148,8 @@ export function sectionOf(r: Route): RouteName | null {
       return "movies";
     case "show":
       return "series";
+    case "catchup":
+      return "live";
     case "provider-new":
     case "provider-edit":
       return "settings";

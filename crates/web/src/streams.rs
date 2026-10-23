@@ -103,6 +103,35 @@ pub struct Started {
     pub start: f64,
 }
 
+/// Why a stream didn't start.
+#[derive(Debug, Clone)]
+pub struct StartError {
+    /// The answer for the browser.
+    pub error: ApiError,
+    /// The provider refused the stream before sending any video: an error status, a
+    /// connection failure, an empty answer, or something that isn't a video (a catch-up
+    /// link in a format the panel doesn't accept looks like this). Limits, unsupported
+    /// formats and failures after ffmpeg started are not refusals.
+    pub refused: bool,
+}
+
+impl From<ApiError> for StartError {
+    fn from(error: ApiError) -> Self {
+        StartError {
+            error,
+            refused: false,
+        }
+    }
+}
+
+/// A `provider_error` before any video arrived is a refusal (see [`StartError::refused`]).
+fn before_video(error: ApiError) -> StartError {
+    StartError {
+        refused: error.code == "provider_error",
+        error,
+    }
+}
+
 /// One running stream.
 #[derive(Debug)]
 pub struct Stream {
@@ -499,6 +528,17 @@ impl StreamManager {
     /// `limit_reached` (503), `provider_error` / `blocked_address` (502),
     /// `unsupported_format` (415), `ffmpeg_missing` (503), `stream_replaced` (409).
     pub async fn start(&self, net: &Net, spec: StartSpec) -> ApiResult<Started> {
+        self.start_detailed(net, spec).await.map_err(|e| e.error)
+    }
+
+    /// Like [`StreamManager::start`], saying whether the provider refused the stream
+    /// before sending any video ([`StartError::refused`]: catch-up then tries the other
+    /// link format).
+    ///
+    /// # Errors
+    ///
+    /// As [`StreamManager::start`].
+    pub async fn start_detailed(&self, net: &Net, spec: StartSpec) -> Result<Started, StartError> {
         let (stream, replaced) = self.reserve(&spec)?;
         let mut reservation = Reservation {
             manager: self,
@@ -517,7 +557,7 @@ impl StreamManager {
                 StatusCode::CONFLICT,
                 "stream_replaced",
                 "Another stream was started in the meantime.",
-            )),
+            ).into()),
         };
         if result.is_ok() {
             reservation.armed = false;
@@ -525,11 +565,16 @@ impl StreamManager {
         result
     }
 
-    async fn setup(&self, net: &Net, spec: &StartSpec, stream: &Arc<Stream>) -> ApiResult<Started> {
+    async fn setup(
+        &self,
+        net: &Net,
+        spec: &StartSpec,
+        stream: &Arc<Stream>,
+    ) -> Result<Started, StartError> {
         tokio::fs::create_dir_all(&stream.dir)
             .await
             .map_err(|_| ApiError::internal("stream folder"))?;
-        let mut source = Source::open(net, spec).await?;
+        let mut source = Source::open(net, spec).await.map_err(before_video)?;
         let skipped = source.skipped_secs();
         let mut head = Vec::new();
         let began = Instant::now();
@@ -551,7 +596,7 @@ impl StreamManager {
                 Ok(Ok(None)) => break,
                 Ok(Err(e)) => {
                     if head.is_empty() {
-                        return Err(open_error(&e));
+                        return Err(before_video(open_error(&e)));
                     }
                     break;
                 }
@@ -559,11 +604,11 @@ impl StreamManager {
             }
         }
         if head.is_empty() {
-            return Err(provider_error(
+            return Err(before_video(provider_error(
                 "Your provider sent no data for this stream.",
-            ));
+            )));
         }
-        let probe = probe(&self.ffprobe, &head).await?;
+        let probe = probe(&self.ffprobe, &head).await.map_err(before_video)?;
         let plan = plan(&probe, spec.hevc, self.transcode)?;
         let ss = (spec.start - skipped).max(0.0);
         let args = ffmpeg_args(&stream.dir, &plan, ss, spec.live);
@@ -606,12 +651,14 @@ impl StreamManager {
             if stream.ended.load(Ordering::Relaxed) || *stream.done_tx.borrow() {
                 return Err(provider_error(
                     "This stream couldn't be prepared for the browser. Try again, or try another channel.",
-                ));
+                )
+                .into());
             }
             if Instant::now() > deadline {
                 return Err(provider_error(
                     "Your provider is too slow to start this stream. Try again in a moment.",
-                ));
+                )
+                .into());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }

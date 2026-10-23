@@ -44,6 +44,7 @@ import pencilSimple from "~icons/regular/pencil-simple";
 import link from "~icons/regular/link";
 import copy from "~icons/regular/copy";
 import lockSimple from "~icons/regular/lock-simple";
+import lockSimpleOpen from "~icons/regular/lock-simple-open";
 import clockCounterClockwise from "~icons/regular/clock-counter-clockwise";
 import star from "~icons/regular/star";
 import userPlus from "~icons/regular/user-plus";
@@ -113,6 +114,7 @@ export const ICONS = {
   "link": link,
   "copy": copy,
   "lock-simple": lockSimple,
+  "lock-simple-open": lockSimpleOpen,
   "clock-counter-clockwise": clockCounterClockwise,
   "star": star,
   "user-plus": userPlus,

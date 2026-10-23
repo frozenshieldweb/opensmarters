@@ -806,6 +806,8 @@ the threat model is [SECURITY.md §4.12](SECURITY.md#412-web-edition-cratesweb-o
 ```bash
 # The server with the synthetic provider (demo / demo-password), on 127.0.0.1:8080:
 OPENSMARTERS_LISTEN=127.0.0.1:8080 cargo run -p opensmarters-web -- --demo
+# Dev only: make the synthetic panel misbehave like real ones (fake_panel::Quirks names):
+OPENSMARTERS_DEMO_QUIRKS=timeshift-smarters-only cargo run -p opensmarters-web -- --demo
 # Debug builds serve web/dist from disk (rebuild the UI, reload the page); release builds
 # embed it. Without web/dist a built-in page says the UI isn't built.
 cargo clippy -p opensmarters-web --all-targets -- -D warnings; cargo test -p opensmarters-web
@@ -817,3 +819,17 @@ parsers are used on the bytes); M3U favourites keys are `m3u:<FNV-1a hash>` of t
 title and group (`#2`, `#3`… for repeats), like the app's `m3u_key` but with a different
 hash, so keys are not shared between the two editions; playback is HLS produced by
 ffmpeg from bytes the server pipes to its stdin (`streams.rs`).
+
+Catch-up works like the desktop's, split across the API: the list is
+`GET …/catchup/{key}` (core's `archive_programmes` on the cached `get_simple_data_table`
+of the channel, `provider.rs` `Table`), and playback is `POST /api/play` with
+`kind: "catchup"`. The timeshift format fallback lives in `api/play.rs`:
+`StreamManager::start_detailed` says whether the provider refused before sending any
+video, the other format is tried once, and the one that worked is stored for the account
+(`accounts.timeshift_format`, schema version 2) instead of being offered for saving like
+the desktop's. A seek asks the panel for the archive from a later minute. The day grouping
+on the viewer's clock is the UI's (`web/src/lib/catchup.ts`, the same rule as
+`screens/catchup/days.rs`). `Account.insecure` is the desktop's SR-12 rule
+(`Session::is_insecure`): an `http` panel, playlist or EPG address, or an `http` stream base
+from `server_info`; it is stored per account (`accounts.insecure`) and drives the
+permanent warning in Settings › Providers and the open lock next to the clock.

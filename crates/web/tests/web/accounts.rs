@@ -40,12 +40,15 @@ async fn xtream_accounts() {
             "expires_at",
             "host",
             "id",
+            "insecure",
             "kind",
             "max_connections",
             "name",
             "status"
         ]
     );
+    // The fake panel is plain http: the UI keeps a warning on it.
+    assert_eq!(a["insecure"], true);
     let id = a["id"].as_str().unwrap().to_owned();
     assert_eq!(
         c.get("/api/accounts").await.ok().as_array().unwrap().len(),
@@ -146,6 +149,70 @@ async fn xtream_accounts() {
         404
     );
     assert_eq!(c.delete(&format!("/api/accounts/{id}")).await.status, 404);
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unencrypted_providers_are_flagged() {
+    let panel = panel().await;
+    let app = app(&[panel.addr()]).await;
+    let c = admin(&app).await;
+    let xtream = add_xtream(&c, &panel).await;
+    let m3u = c
+        .post(
+            "/api/accounts",
+            json!({"kind": "m3u", "m3u_url": panel.url("/get.php?username=demo&password=demo&type=m3u_plus&output=ts")}),
+        )
+        .await
+        .ok();
+    assert_eq!(m3u["insecure"], true, "an http playlist address");
+    let list = c.get("/api/accounts").await.ok();
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["insecure"] == true)
+    );
+    let r = c
+        .post_empty(&format!("/api/accounts/{xtream}/refresh"))
+        .await
+        .ok();
+    assert_eq!(r["insecure"], true);
+    let r = c
+        .patch(
+            &format!("/api/accounts/{xtream}"),
+            json!({"name": "Renamed"}),
+        )
+        .await
+        .ok();
+    assert_eq!(r["insecure"], true);
+
+    // Accounts saved before the flag existed (schema version 1) get it on the next list.
+    app.server
+        .state
+        .db
+        .call(|conn| {
+            conn.execute("UPDATE accounts SET insecure = NULL", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let list = c.get("/api/accounts").await.ok();
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["insecure"] == true),
+        "{list}"
+    );
+    let rows = app
+        .server
+        .state
+        .db
+        .call(|conn| opensmarters_web::db::all_accounts(conn))
+        .await
+        .unwrap();
+    assert!(rows.iter().all(|r| r.insecure == Some(true)), "remembered");
     app.shutdown().await;
 }
 

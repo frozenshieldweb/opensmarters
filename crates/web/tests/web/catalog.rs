@@ -486,3 +486,109 @@ async fn m3u_catalogue() {
     assert!(!arr(&found["channels"]).is_empty());
     app.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catchup_lists() {
+    let panel = panel().await;
+    let cat = panel.catalogue().clone();
+    let app = app(&[panel.addr()]).await;
+    let c = admin(&app).await;
+    let a = add_xtream(&c, &panel).await;
+    let base = format!("/api/accounts/{a}");
+    let arch = cat
+        .live
+        .iter()
+        .find(|ch| ch.tv_archive && ch.epg_channel_id.is_some())
+        .expect("a channel with archive and a guide");
+    let arch_key = arch.stream_id.to_string();
+    let listed = c
+        .get(&format!("{base}/live/channels?category=all"))
+        .await
+        .ok();
+    let row = arr(&listed)
+        .iter()
+        .find(|ch| ch["key"] == arch_key.as_str())
+        .unwrap();
+    assert_eq!(row["archive_days"], arch.tv_archive_duration.max(1));
+
+    // Ended programmes with the panel's archive flag, within archive_days, newest first,
+    // in the guide's Programme shape.
+    let t = chrono::Utc::now().timestamp();
+    let rows = c
+        .get(&format!("{base}/catchup/{}", arch.stream_id))
+        .await
+        .ok();
+    let rows = arr(&rows);
+    assert!(!rows.is_empty());
+    let window = i64::from(arch.tv_archive_duration.max(1)) * 86_400;
+    let mut newer = i64::MAX;
+    for p in rows {
+        let (start, end) = (p["start"].as_i64().unwrap(), p["end"].as_i64().unwrap());
+        assert!(start < newer, "newest first");
+        newer = start;
+        assert!(end <= t + 5, "ended");
+        assert!(start >= t - window - 5, "within archive_days");
+        assert!(end > start);
+        let title = p["title"].as_str().unwrap();
+        assert!(!title.is_empty() && !title.contains('\u{0}'), "{title}");
+        let mut keys: Vec<&String> = p.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["description", "end", "start", "title"]);
+    }
+    // The newest one is what the guide shows for that time too.
+    let guide = c
+        .get(&format!(
+            "{base}/epg/channel/{}?from={}&to={}",
+            arch.stream_id,
+            rows[0]["start"].as_i64().unwrap(),
+            rows[0]["end"].as_i64().unwrap()
+        ))
+        .await
+        .ok();
+    assert!(arr(&guide).iter().any(|g| g == &rows[0]), "{guide}");
+
+    // A channel without archive: nothing. An unknown key: 404. Someone else: 404.
+    let plain = cat
+        .live
+        .iter()
+        .find(|ch| !ch.tv_archive && ch.epg_channel_id.is_some())
+        .unwrap();
+    assert_eq!(
+        c.get(&format!("{base}/catchup/{}", plain.stream_id))
+            .await
+            .ok(),
+        json!([])
+    );
+    let r = c.get(&format!("{base}/catchup/999999")).await;
+    assert_eq!((r.status, r.code()), (404, "not_found"));
+    let bob = invite(&app, &c, "bob", "bob's password").await;
+    assert_eq!(
+        bob.get(&format!("{base}/catchup/{}", arch.stream_id))
+            .await
+            .status,
+        404
+    );
+
+    // M3U playlists have no catch-up: [] for their channels, 404 for unknown keys.
+    let m = c
+        .post(
+            "/api/accounts",
+            json!({"kind": "m3u", "m3u_url": panel.url("/get.php?username=demo&password=demo&type=m3u_plus&output=ts")}),
+        )
+        .await
+        .ok();
+    let mbase = format!("/api/accounts/{}", m["id"].as_str().unwrap());
+    let all = c
+        .get(&format!("{mbase}/live/channels?category=all"))
+        .await
+        .ok();
+    let k = all[0]["key"].as_str().unwrap();
+    assert_eq!(c.get(&format!("{mbase}/catchup/{k}")).await.ok(), json!([]));
+    assert_eq!(
+        c.get(&format!("{mbase}/catchup/m3u:0000000000000000"))
+            .await
+            .status,
+        404
+    );
+    app.shutdown().await;
+}

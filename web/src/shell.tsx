@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // The shell (DESIGN.md §6.1, §8): the side rail (expanded ≥ 1440 px, collapsed 72 px below
 // and expanding over the content when it has the focus, a top bar with a menu below 960 px),
-// the status cluster (clock), and the current screen. Only panels scroll, never the shell.
+// the status cluster (the clock, and a quiet open lock while the current provider is reached
+// over plain http), and the current screen. Only panels scroll, never the shell.
 
 import type { ComponentChildren } from "preact";
 import { account, accounts, selectAccount, settings } from "./state/session";
@@ -154,11 +155,26 @@ function RailBody(props: { onPick?: () => void }) {
   );
 }
 
-/** The clock (and nothing noisy) in the top-right corner (§8.6 header status cluster). */
+/** The tooltip of the header's open lock (as the Windows app's status cluster). */
+export const UNENCRYPTED_TOOLTIP =
+  "Unencrypted connection: your password is visible on the network between this server and your provider. See Settings › Providers.";
+
+/**
+ * The top-right status cluster (§8.6): the clock and, while the current provider is reached
+ * over plain http, a quiet open lock with a tooltip (nothing noisy).
+ */
 export function StatusCluster() {
+  const insecure = !!account.value?.insecure;
   return (
-    <div class="status" aria-hidden="true">
-      <span class="status-clock t-title-sm tnum">{clock(now.value, settings.value.time_format)}</span>
+    <div class="status">
+      {insecure && (
+        <span class="status-insecure" role="img" aria-label={UNENCRYPTED_TOOLTIP} title={UNENCRYPTED_TOOLTIP}>
+          <Icon name="lock-simple-open" />
+        </span>
+      )}
+      <span class="status-clock t-title-sm tnum" aria-hidden="true">
+        {clock(now.value, settings.value.time_format)}
+      </span>
     </div>
   );
 }

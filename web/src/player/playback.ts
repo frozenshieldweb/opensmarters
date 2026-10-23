@@ -8,6 +8,7 @@
 // returns, DELETE /api/streams/{sid} when the player closes or zaps, PUT …/progress every
 // ~10 s and on close for films and episodes. Positions are `start + video.currentTime`: a
 // VOD seek past what's available restarts the stream at the new position (`start`).
+// Catch-up programmes play like films (a duration, seeking) without saved progress.
 
 import { batch, computed, signal } from "@preact/signals";
 import type Hls from "hls.js";
@@ -15,9 +16,10 @@ import type * as HlsModule from "hls.js";
 import type { ErrorData } from "hls.js";
 import workerUrl from "hls.js/dist/hls.worker.js?url";
 import { api, ApiError } from "../api/client";
-import type { Channel, PlayKind, PlayResponse } from "../api/types";
+import type { Channel, PlayKind, PlayResponse, Programme } from "../api/types";
 import { toast } from "../state/misc";
 import type { EpisodeRef } from "../lib/series";
+import { minutesOf } from "../lib/catchup";
 
 export type { EpisodeRef };
 
@@ -44,6 +46,16 @@ export type Item =
       duration: number | null;
       /** The following episodes, in order (next episode at the end). */
       next: EpisodeRef[];
+    }
+  | {
+      /** A past programme from the channel's archive, played from its start. */
+      kind: "catchup";
+      account: string;
+      channel: Channel;
+      programme: Programme;
+      title: string;
+      subtitle: string;
+      duration: number;
     };
 
 export type Phase = "idle" | "starting" | "buffering" | "playing" | "paused" | "ended" | "error";
@@ -168,8 +180,11 @@ function mediaError(e: MediaError | null): PlayError {
 
 // ---- start and stop
 
-function apiError(e: unknown): PlayError {
+function apiError(e: unknown, it?: Item): PlayError {
   if (e instanceof ApiError) {
+    if (it?.kind === "catchup" && e.code === "provider_error") {
+      return { title: "This programme can't be played", message: e.message, retry: true };
+    }
     if (e.code === "limit_reached") return { title: "Stream limit reached", message: e.message, retry: true };
     if (e.code === "provider_error") return { title: "Your provider refused the stream", message: e.message, retry: true };
     if (e.status === 415 || /unsupported|format|codec/.test(e.code)) {
@@ -208,8 +223,14 @@ function playKind(it: Item): PlayKind {
   return it.kind;
 }
 
+/** The id the API knows the item by (catch-up: its channel). */
+function apiId(it: Item): string {
+  return it.kind === "live" || it.kind === "catchup" ? it.channel.key : it.id;
+}
+
+/** What makes an item itself (two programmes of a channel are different items). */
 function itemId(it: Item): string {
-  return it.kind === "live" ? it.channel.key : it.id;
+  return it.kind === "catchup" ? `${it.channel.key}@${it.programme.start}` : apiId(it);
 }
 
 /** Plays `it` (from `start` seconds for films and episodes). */
@@ -237,14 +258,15 @@ export async function play(it: Item, start = 0): Promise<void> {
     res = await api.play({
       account: it.account,
       kind: playKind(it),
-      id: itemId(it),
+      id: apiId(it),
       ...(it.kind !== "live" && start > 0 ? { start: Math.floor(start) } : {}),
       ...(it.kind === "episode" ? { series_id: it.seriesId } : {}),
+      ...(it.kind === "catchup" ? { catchup_start: it.programme.start, catchup_minutes: minutesOf(it.programme) } : {}),
       hevc: canPlayHevc(),
     });
   } catch (e) {
     if (gen !== generation) return;
-    fail(apiError(e));
+    fail(apiError(e, it));
     return;
   }
   if (gen !== generation) {
@@ -258,7 +280,7 @@ export async function play(it: Item, start = 0): Promise<void> {
   position.value = offset;
   await attachSource(res.url, res.live, gen);
   if (gen !== generation) return;
-  if (it.kind !== "live") {
+  if (it.kind === "movie" || it.kind === "episode") {
     progressTimer = setInterval(() => void saveProgress(false), 10_000);
   }
 }
@@ -544,7 +566,8 @@ export function playNext(): void {
 export async function saveProgress(final: boolean): Promise<void> {
   const it = item.value;
   const dur = duration.value;
-  if (!it || it.kind === "live" || !dur) return;
+  // Catch-up has no saved position (the server keeps progress for films and episodes).
+  if (!it || (it.kind !== "movie" && it.kind !== "episode") || !dur) return;
   // The real position, even at the end: a stream that stops early must not count as watched.
   const pos = Math.floor(position.value);
   if (pos <= 0 || (!final && Math.abs(pos - lastSaved) < 5)) return;

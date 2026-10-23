@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Playback: `POST /api/play`, the HLS files, `DELETE /api/streams/{sid}`.
+//!
+//! Catch-up: panels accept one or both of the two timeshift start formats
+//! (`docs/PROTOCOL.md`, "Catch-up"). The account's remembered format is tried first; when
+//! the provider refuses it before sending any video, the other one is tried once, and the
+//! one that worked is remembered for the account. When both are refused the programme
+//! isn't available right now (some panels refuse every catch-up link).
 
 use std::time::Duration;
 
@@ -16,10 +22,11 @@ use serde_json::{Value, json};
 
 use super::{Body, empty, provider, settings};
 use crate::auth::CurrentUser;
+use crate::db;
 use crate::error::{ApiError, ApiResult};
 use crate::provider::{Creds, Provider};
 use crate::state::AppState;
-use crate::streams::{StartSpec, valid_file};
+use crate::streams::{StartSpec, Started, valid_file};
 
 #[derive(Deserialize)]
 pub struct PlayBody {
@@ -45,6 +52,47 @@ struct Target {
     user_agent: Option<String>,
     live: bool,
     duration: Option<f64>,
+    /// Catch-up: the format of `url` and the same programme in the other format.
+    catchup: Option<Catchup>,
+    /// Seconds of the programme the provider's link already skips (catch-up starts
+    /// at a later minute instead of transcoding from the beginning).
+    skipped: f64,
+}
+
+struct Catchup {
+    format: TimeshiftFormat,
+    other: Url,
+}
+
+/// The stored name of a timeshift format.
+fn format_name(f: TimeshiftFormat) -> &'static str {
+    match f {
+        TimeshiftFormat::Standard => "standard",
+        TimeshiftFormat::SmartersCompat => "smarters",
+    }
+}
+
+/// The account's remembered timeshift format (the standard one by default).
+fn remembered(name: Option<&str>) -> TimeshiftFormat {
+    match name {
+        Some("smarters") => TimeshiftFormat::SmartersCompat,
+        _ => TimeshiftFormat::Standard,
+    }
+}
+
+fn other_format(f: TimeshiftFormat) -> TimeshiftFormat {
+    match f {
+        TimeshiftFormat::Standard => TimeshiftFormat::SmartersCompat,
+        TimeshiftFormat::SmartersCompat => TimeshiftFormat::Standard,
+    }
+}
+
+fn catchup_unavailable() -> ApiError {
+    ApiError::new(
+        StatusCode::BAD_GATEWAY,
+        "provider_error",
+        "This programme isn't available from your provider right now.",
+    )
 }
 
 fn no_such(what: &str) -> ApiError {
@@ -101,6 +149,8 @@ async fn target(
                 user_agent: None,
                 live: true,
                 duration: None,
+                catchup: None,
+                skipped: 0.0,
             })
         }
         ("live", false) | ("movie", false) => {
@@ -127,6 +177,8 @@ async fn target(
                 user_agent: entry.user_agent.clone(),
                 live: body.kind == "live",
                 duration: entry.duration.filter(|d| *d > 0.0 && body.kind != "live"),
+                catchup: None,
+                skipped: 0.0,
             })
         }
         ("movie", true) => {
@@ -142,6 +194,8 @@ async fn target(
                 user_agent: None,
                 live: false,
                 duration: info.and_then(|i| i.info.duration_secs).map(|d| d as f64),
+                catchup: None,
+                skipped: 0.0,
             })
         }
         ("episode", true) => {
@@ -164,6 +218,8 @@ async fn target(
                 user_agent: None,
                 live: false,
                 duration: episode.and_then(|e| e.info.duration_secs).map(|d| d as f64),
+                catchup: None,
+                skipped: 0.0,
             })
         }
         ("catchup", true) => {
@@ -180,18 +236,31 @@ async fn target(
             let start_utc = chrono::DateTime::from_timestamp(start, 0)
                 .ok_or_else(|| ApiError::bad_request("catchup_start isn't a valid time."))?;
             let (urls, login) = xtream_urls(p).await?;
-            let local = login.time_zone().to_local(start_utc);
+            // The panel's own wall-clock start of the programme when the schedule has it
+            // (catch-up lists and the guide load it), else the start in its time zone.
+            let local = match p.table(sid).await {
+                Ok(t) => t.local_start(start),
+                Err(_) => None,
+            }
+            .unwrap_or_else(|| login.time_zone().to_local(start_utc));
+            // Seeking ahead asks the panel for the archive from a later minute, so the
+            // server doesn't download and skip everything before it.
+            let offset = position(body.start);
+            let skip_min = ((offset / 60.0).floor() as u32).min(minutes.saturating_sub(1));
+            let at = local + chrono::Duration::minutes(i64::from(skip_min));
+            let left = minutes - skip_min;
+            let format = remembered(p.row.timeshift_format.as_deref());
+            let link = |f| urls.timeshift_at(sid, at, left, f, LiveContainer::Ts);
             Ok(Target {
-                url: urls.timeshift_at(
-                    sid,
-                    local,
-                    minutes,
-                    TimeshiftFormat::Standard,
-                    LiveContainer::Ts,
-                ),
+                url: link(format),
                 user_agent: None,
                 live: false,
                 duration: Some(f64::from(minutes) * 60.0),
+                catchup: Some(Catchup {
+                    format,
+                    other: link(other_format(format)),
+                }),
+                skipped: f64::from(skip_min) * 60.0,
             })
         }
         ("episode" | "catchup", false) => Err(unsupported()),
@@ -199,6 +268,13 @@ async fn target(
             "The kind must be live, movie, episode or catchup.",
         )),
     }
+}
+
+/// A requested start position (seconds), or 0.
+fn position(start: Option<f64>) -> f64 {
+    start
+        .filter(|s| s.is_finite() && *s > 0.0 && *s < 7.0 * 24.0 * 3600.0)
+        .unwrap_or(0.0)
 }
 
 /// `POST /api/play`.
@@ -221,24 +297,51 @@ pub async fn play(
         .peek::<opensmarters_core::LoginInfo>("login")
         .and_then(|l| l.user_info.max_connections)
         .or_else(|| p.row.max_connections.and_then(|m| u32::try_from(m).ok()));
-    let start = body
-        .start
-        .filter(|s| s.is_finite() && *s > 0.0 && *s < 7.0 * 24.0 * 3600.0)
-        .unwrap_or(0.0);
-    let spec = StartSpec {
+    let start = if target.live {
+        0.0
+    } else {
+        position(body.start)
+    };
+    let spec = |url: Url| StartSpec {
         user_id: user.user.id.clone(),
         session: user.session,
         account_id: p.row.id.clone(),
-        provider_key,
+        provider_key: provider_key.clone(),
         provider_limit,
-        url: target.url,
-        user_agent: target.user_agent,
+        url,
+        user_agent: target.user_agent.clone(),
         live: target.live,
-        duration_hint: target.duration,
-        start: if target.live { 0.0 } else { start },
+        duration_hint: if target.skipped > 0.0 {
+            target.duration.map(|d| (d - target.skipped).max(1.0))
+        } else {
+            target.duration
+        },
+        start: start - target.skipped,
         hevc: body.hevc,
     };
-    let started = state.streams.start(&state.net, spec).await?;
+    let mut started = match &target.catchup {
+        None => {
+            state
+                .streams
+                .start(&state.net, spec(target.url.clone()))
+                .await?
+        }
+        Some(c) => {
+            catchup(
+                &state,
+                &p,
+                &user,
+                c,
+                spec(target.url.clone()),
+                spec(c.other.clone()),
+            )
+            .await?
+        }
+    };
+    if target.skipped > 0.0 {
+        started.start += target.skipped;
+        started.duration = target.duration;
+    }
     Ok(Json(json!({
         "stream": started.id,
         "url": format!("/api/streams/{}/index.m3u8", started.id),
@@ -246,6 +349,49 @@ pub async fn play(
         "duration": started.duration,
         "start": started.start,
     })))
+}
+
+/// Starts a catch-up stream in the remembered format, falling back once to the other
+/// format when the provider refuses before sending any video, and remembers the one
+/// that worked for the account.
+async fn catchup(
+    state: &AppState,
+    p: &Provider,
+    user: &CurrentUser,
+    c: &Catchup,
+    first: StartSpec,
+    second: StartSpec,
+) -> ApiResult<Started> {
+    let (started, format) = match state.streams.start_detailed(&state.net, first).await {
+        Ok(s) => (s, c.format),
+        Err(e) if e.refused => {
+            let other = other_format(c.format);
+            tracing::info!(
+                account = %p.row.id,
+                refused = format_name(c.format),
+                trying = format_name(other),
+                "catch-up link refused; trying the other format"
+            );
+            match state.streams.start_detailed(&state.net, second).await {
+                Ok(s) => (s, other),
+                Err(e) if e.refused => return Err(catchup_unavailable()),
+                Err(e) => return Err(e.error),
+            }
+        }
+        Err(e) => return Err(e.error),
+    };
+    if remembered(p.row.timeshift_format.as_deref()) != format {
+        // Best effort: the stream already plays.
+        let (u, a, f) = (user.user.id.clone(), p.row.id.clone(), format_name(format));
+        if let Err(e) = state
+            .db
+            .call(move |conn| db::set_timeshift_format(conn, &u, &a, f))
+            .await
+        {
+            tracing::warn!(error = %e, "couldn't remember the catch-up format");
+        }
+    }
+    Ok(started)
 }
 
 fn owned_stream(

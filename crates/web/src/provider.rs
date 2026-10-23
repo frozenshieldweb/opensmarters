@@ -16,15 +16,17 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
-use chrono::Utc;
+use chrono::{DateTime, NaiveDateTime, Utc};
 use opensmarters_core::catalog::SearchQuery;
+use opensmarters_core::epg::ServerTimeZone;
 use opensmarters_core::m3u::{self, EntryKind, M3uLimits, Playlist};
-use opensmarters_core::model::parse_epg_listings;
+use opensmarters_core::model::{archive_programmes, parse_epg_listings};
 use opensmarters_core::url::Url;
+use opensmarters_core::urls::stream_base;
 use opensmarters_core::xmltv::{self, XmltvLimits};
 use opensmarters_core::{
-    AccountStatus, AuthFailure, Category, EpgListing, LiveStream, LoginInfo, SeriesInfo, ServerUrl,
-    VodInfo, VodStream, de,
+    AccountStatus, ArchiveProgramme, AuthFailure, Category, EpgListing, LiveStream, LoginInfo,
+    SeriesInfo, ServerUrl, VodInfo, VodStream, de,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -283,6 +285,28 @@ pub fn login_error(f: &LoginFailure) -> ApiError {
     }
 }
 
+/// Whether an account sends anything over plain `http` (SECURITY.md SR-12): its panel,
+/// playlist or guide address, or, for Xtream, the stream addresses the panel hands out
+/// (`server_info`, when the login answer is known). The UI keeps a warning on such
+/// providers: their passwords and what is watched cross the network unencrypted between
+/// this server and the provider.
+pub fn insecure_of(creds: &Creds, login: Option<&LoginInfo>) -> bool {
+    let plain = |s: &str| {
+        s.trim()
+            .get(..7)
+            .is_some_and(|p| p.eq_ignore_ascii_case("http://"))
+    };
+    match creds {
+        Creds::Xtream { server, .. } => {
+            !server.is_https()
+                || login.is_some_and(|l| stream_base(&l.server_info, server).scheme() != "https")
+        }
+        Creds::M3u { url, epg } => {
+            plain(url.expose_secret()) || epg.as_ref().is_some_and(|e| plain(e.expose_secret()))
+        }
+    }
+}
+
 /// `active`, `expired`, `banned`, `disabled` or `unknown`.
 pub fn status_of(info: &LoginInfo) -> &'static str {
     let now = info.server_now(Utc::now());
@@ -460,6 +484,40 @@ pub struct Programme {
     pub title: String,
     /// Description.
     pub description: Option<String>,
+}
+
+/// A channel's full schedule as the panel sent it (`get_simple_data_table`), with the
+/// archive flags and the server-local start strings that catch-up needs.
+#[derive(Debug, Default)]
+pub struct Table {
+    /// Listings by start time (repeated starts dropped).
+    pub listings: Vec<EpgListing>,
+    /// The panel's time zone when the table was fetched.
+    pub tz: ServerTimeZone,
+}
+
+impl Table {
+    /// The panel's wall-clock start of the programme starting at `start` (Unix seconds),
+    /// for the timeshift address: the panel's own `start` string when it sent one.
+    pub fn local_start(&self, start: i64) -> Option<NaiveDateTime> {
+        self.listings
+            .iter()
+            .find(|l| l.start.timestamp() == start)
+            .map(|l| l.server_local_start(&self.tz))
+    }
+
+    /// The programmes that can be replayed at `now`: the panel's archive flag set, ended,
+    /// and started at most `days` days ago; newest first.
+    pub fn archive(&self, days: u32, now: DateTime<Utc>) -> Vec<Programme> {
+        let from = now - chrono::Duration::days(i64::from(days));
+        let mut out: Vec<Programme> = archive_programmes(&self.listings, &self.tz, now)
+            .iter()
+            .filter(|p| p.stop <= now && p.start >= from)
+            .map(archived)
+            .collect();
+        out.sort_by_key(|p| std::cmp::Reverse(p.start));
+        out
+    }
 }
 
 /// A parsed M3U account.
@@ -663,6 +721,15 @@ fn programme(l: &EpgListing) -> Programme {
         end: l.stop.timestamp(),
         title: text::line(&l.title, 240),
         description: text::opt_paragraph(Some(&l.description), 1000),
+    }
+}
+
+fn archived(p: &ArchiveProgramme) -> Programme {
+    Programme {
+        start: p.start.timestamp(),
+        end: p.stop.timestamp(),
+        title: text::line(&p.title, 240),
+        description: text::opt_paragraph(Some(&p.description), 1000),
     }
 }
 
@@ -911,9 +978,28 @@ impl Provider {
         self.cache
             .get("login", LOGIN_TTL, || async {
                 let body = self.xtream(&[]).await?;
-                LoginInfo::from_json(&body).map_err(|e| parse_error(&e))
+                let info = LoginInfo::from_json(&body).map_err(|e| parse_error(&e))?;
+                self.note_insecure(&info);
+                Ok(info)
             })
             .await
+    }
+
+    /// Records a change of the account's "unencrypted" flag seen in a fresh login answer
+    /// (a panel that starts or stops handing out `http` stream addresses).
+    fn note_insecure(&self, info: &LoginInfo) {
+        let Ok(creds) = self.creds() else { return };
+        let insecure = insecure_of(&creds, Some(info));
+        if self.row.insecure == Some(insecure) {
+            return;
+        }
+        let db = self.state.db.clone();
+        let (u, a) = (self.row.user_id.clone(), self.row.id.clone());
+        tokio::spawn(async move {
+            let _ = db
+                .call(move |c| crate::db::set_account_insecure(c, &u, &a, insecure))
+                .await;
+        });
     }
 
     /// The parsed M3U playlist (cached 6 h).
@@ -1212,12 +1298,13 @@ impl Provider {
             .await
     }
 
-    /// The full schedule of an Xtream channel (`get_simple_data_table`, cached 10 min).
+    /// The full schedule of an Xtream channel with its archive flags
+    /// (`get_simple_data_table`, cached 10 min).
     ///
     /// # Errors
     ///
     /// Provider errors.
-    pub async fn schedule(&self, stream_id: u64) -> ApiResult<Arc<Vec<Programme>>> {
+    pub async fn table(&self, stream_id: u64) -> ApiResult<Arc<Table>> {
         let key = format!("table:{stream_id}");
         self.cache
             .get(&key, EPG_TTL, || async {
@@ -1233,12 +1320,27 @@ impl Provider {
                 let listing = blocking(move || parse_epg_listings(&body, &tz))
                     .await?
                     .map_err(|e| parse_error(&e))?;
-                let mut rows: Vec<Programme> = listing.items.iter().map(programme).collect();
-                rows.sort_by_key(|p| p.start);
-                rows.dedup_by_key(|p| p.start);
-                Ok(rows)
+                let mut listings = listing.items;
+                listings.sort_by_key(|l| l.start);
+                listings.dedup_by_key(|l| l.start);
+                Ok(Table { listings, tz })
             })
             .await
+    }
+
+    /// The schedule of an Xtream channel for the guide (from [`Provider::table`]).
+    ///
+    /// # Errors
+    ///
+    /// Provider errors.
+    pub async fn schedule(&self, stream_id: u64) -> ApiResult<Vec<Programme>> {
+        Ok(self
+            .table(stream_id)
+            .await?
+            .listings
+            .iter()
+            .map(programme)
+            .collect())
     }
 
     /// The XMLTV guide of an M3U account (its EPG address, else the playlist's
@@ -1373,6 +1475,86 @@ mod tests {
         assert_eq!(data.movies.len(), 1);
         assert_eq!(fnv(&["a", "b"]), fnv(&["a", "b"]));
         assert_ne!(fnv(&["ab", ""]), fnv(&["a", "b"]));
+    }
+
+    #[test]
+    fn archive_window_and_order() {
+        let tz = ServerTimeZone::Utc;
+        let body = br#"{"epg_listings":[
+            {"title":"T2xk","start":"2026-10-10 10:00:00","start_timestamp":1760090400,"stop_timestamp":1760094000,"has_archive":1},
+            {"title":"WWVzdGVyZGF5","start":"2026-10-21 10:00:00","start_timestamp":1761040800,"stop_timestamp":1761044400,"has_archive":1},
+            {"title":"Tm8gYXJjaGl2ZQ==","start_timestamp":1761044400,"stop_timestamp":1761048000,"has_archive":0},
+            {"title":"VG9kYXk=","start":"2026-10-22 08:00:00","start_timestamp":1761120000,"stop_timestamp":1761123600,"has_archive":"1"},
+            {"title":"T24gbm93","start_timestamp":1761123600,"stop_timestamp":1761130800,"has_archive":1}
+        ]}"#;
+        let mut listings = parse_epg_listings(body, &tz).unwrap_or_default().items;
+        listings.sort_by_key(|l| l.start);
+        let table = Table { listings, tz };
+        // 2026-10-22 09:30Z: "On now" hasn't ended; "Old" is 12 days back.
+        let now = DateTime::from_timestamp(1_761_125_400, 0).unwrap_or_default();
+        let got: Vec<(i64, String)> = table
+            .archive(7, now)
+            .into_iter()
+            .map(|p| (p.start, p.title))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (1_761_120_000, "Today".to_owned()),
+                (1_761_040_800, "Yesterday".to_owned())
+            ]
+        );
+        assert_eq!(table.archive(30, now).len(), 3);
+        assert_eq!(
+            table.local_start(1_761_040_800).map(|d| d.to_string()),
+            Some("2026-10-21 10:00:00".to_owned())
+        );
+        assert_eq!(table.local_start(5), None);
+    }
+
+    #[test]
+    fn insecure_addresses() {
+        let xt = |server: &str| Creds::Xtream {
+            server: ServerUrl::parse(server).unwrap_or_else(|_| unreachable!()),
+            username: "u".into(),
+            password: SecretString::from("p".to_owned()),
+        };
+        let m3u = |url: &str, epg: Option<&str>| Creds::M3u {
+            url: SecretString::from(url.to_owned()),
+            epg: epg.map(|e| SecretString::from(e.to_owned())),
+        };
+        assert!(insecure_of(&xt("http://panel.example"), None));
+        assert!(!insecure_of(&xt("https://panel.example"), None));
+        let login = |proto: &str| {
+            LoginInfo::from_json(
+                format!(
+                    r#"{{"user_info":{{"auth":1,"status":"Active"}},"server_info":{{"url":"panel.example","port":"80","https_port":"443","server_protocol":"{proto}"}}}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap_or_else(|_| unreachable!())
+        };
+        // An https panel that hands out http stream addresses.
+        assert!(insecure_of(
+            &xt("https://panel.example"),
+            Some(&login("http"))
+        ));
+        assert!(!insecure_of(
+            &xt("https://panel.example"),
+            Some(&login("https"))
+        ));
+        assert!(insecure_of(&m3u("HTTP://lists.example/a.m3u", None), None));
+        assert!(!insecure_of(
+            &m3u("https://lists.example/a.m3u", None),
+            None
+        ));
+        assert!(insecure_of(
+            &m3u(
+                "https://lists.example/a.m3u",
+                Some(" http://guide.example/x.xml")
+            ),
+            None
+        ));
     }
 
     #[test]

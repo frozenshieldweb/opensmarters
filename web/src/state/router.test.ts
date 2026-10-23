@@ -7,6 +7,8 @@ describe("router URLs", () => {
     { name: "home" },
     { name: "live" },
     { name: "live", category: "news & weather" },
+    { name: "catchup", account: "a1", key: "1001" },
+    { name: "catchup", account: "a/2", key: "m3u:0f3a#2" },
     { name: "guide", category: "7" },
     { name: "movies" },
     { name: "movies", category: "m-drama" },
@@ -34,11 +36,13 @@ describe("router URLs", () => {
     expect(parseUrl("/app/nonsense/1")).toEqual({ name: "home" });
     expect(parseUrl("/invite")).toEqual({ name: "home" });
     expect(parseUrl("/app/settings/secrets")).toEqual({ name: "settings" });
+    expect(parseUrl("/app/catchup/a1")).toEqual({ name: "live" });
   });
 
   it("knows where Back goes from a screen opened directly", () => {
     expect(parentOf({ name: "movie", id: "1" })).toEqual({ name: "movies" });
     expect(parentOf({ name: "show", id: "1" })).toEqual({ name: "series" });
+    expect(parentOf({ name: "catchup", account: "a", key: "1" })).toEqual({ name: "live" });
     expect(parentOf({ name: "provider-edit", id: "a" })).toEqual({ name: "settings", section: "providers" });
     expect(parentOf({ name: "live" })).toEqual({ name: "home" });
     expect(parentOf({ name: "home" })).toBeNull();
@@ -47,6 +51,7 @@ describe("router URLs", () => {
   it("maps screens to their side-rail section", () => {
     expect(sectionOf({ name: "movie", id: "1" })).toBe("movies");
     expect(sectionOf({ name: "show", id: "1" })).toBe("series");
+    expect(sectionOf({ name: "catchup", account: "a", key: "1" })).toBe("live");
     expect(sectionOf({ name: "provider-new" })).toBe("settings");
     expect(sectionOf({ name: "watch" })).toBeNull();
   });

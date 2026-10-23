@@ -8,6 +8,10 @@
 //! provider is the fake panel's Xtream account `demo` / `demo`; it is re-pointed at the
 //! panel's new port at every start. `--demo-fresh` skips the person and the provider so
 //! the first-run screens can be tried (the setup code and the panel address are logged).
+//!
+//! Dev only: `OPENSMARTERS_DEMO_QUIRKS=timeshift-smarters-only` (any comma-separated
+//! `fake_panel::Quirks` names) makes the panel misbehave like real ones, as in the
+//! Windows app's demo.
 
 use std::path::Path;
 
@@ -29,11 +33,16 @@ pub const DEMO_ACCOUNT: &str = "Demo provider";
 ///
 /// # Errors
 ///
-/// When the panel can't bind.
+/// When the panel can't bind, or `OPENSMARTERS_DEMO_QUIRKS` names an unknown quirk.
 pub async fn start_panel(data_dir: &Path) -> anyhow::Result<fake_panel::Handle> {
+    let quirks = match std::env::var("OPENSMARTERS_DEMO_QUIRKS") {
+        Ok(list) if !list.trim().is_empty() => fake_panel::Quirks::parse_list([list])?,
+        _ => fake_panel::Quirks::default(),
+    };
     let config = fake_panel::Config {
         media: fake_panel::MediaMode::Background,
         media_dir: data_dir.join("demo-media"),
+        quirks,
         ..fake_panel::Config::default()
     };
     Ok(fake_panel::spawn(config).await?)
@@ -82,9 +91,10 @@ pub async fn ensure_demo_user(state: &AppState, panel: &fake_panel::Handle) -> a
     let server = opensmarters_core::ServerUrl::parse(panel.base_url())?;
     let uid = user.id.clone();
     let accounts = state.db.call(move |c| db::list_accounts(c, &uid)).await?;
-    let (id, created_at) = match accounts.iter().find(|a| a.name == DEMO_ACCOUNT) {
-        Some(a) => (a.id.clone(), a.created_at),
-        None => (crate::crypto::random_id()?, db::now()),
+    let (id, created_at, timeshift_format) = match accounts.iter().find(|a| a.name == DEMO_ACCOUNT)
+    {
+        Some(a) => (a.id.clone(), a.created_at, a.timeshift_format.clone()),
+        None => (crate::crypto::random_id()?, db::now(), None),
     };
     let creds = Creds::Xtream {
         server: server.clone(),
@@ -105,6 +115,9 @@ pub async fn ensure_demo_user(state: &AppState, panel: &fake_panel::Handle) -> a
         max_connections: Some(2),
         active_connections: Some(0),
         created_at,
+        // The panel is plain http on loopback.
+        insecure: Some(provider::insecure_of(&creds, None)),
+        timeshift_format,
     };
     state.db.call(move |c| db::upsert_account(c, &row)).await?;
     state.providers.drop_account(&id);

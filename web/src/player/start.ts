@@ -3,10 +3,11 @@
 // playback item (title, subtitle, the episodes that follow) and opens the player.
 
 import { api } from "../api/client";
-import type { Channel, ContinueItem, MovieDetail, SeriesDetail } from "../api/types";
+import type { Channel, ContinueItem, MovieDetail, Programme, SeriesDetail } from "../api/types";
 import { cached } from "../state/cache";
 import { current, go } from "../state/router";
-import { dot, runtime } from "../lib/format";
+import { clock, dot, runtime, type TimeFormat } from "../lib/format";
+import { dayLabel, civil, minutesOf } from "../lib/catchup";
 import { cap } from "../lib/text";
 import { play } from "./playback";
 import { episodesAfter } from "../lib/series";
@@ -26,6 +27,24 @@ export function movieDetail(account: string, id: string): Promise<MovieDetail> {
 /** Plays a live channel fullscreen (zapping walks `list`). */
 export function watchChannel(account: string, channel: Channel, list: Channel[]): void {
   void play({ kind: "live", account, channel, list: list.length ? list : [channel] });
+  openPlayer();
+}
+
+/** Plays a past programme of a channel from its archive (catch-up), from `start` seconds. */
+export function watchCatchup(account: string, channel: Channel, p: Programme, fmt: TimeFormat, start = 0): void {
+  const day = dayLabel(civil(p.start), civil(Date.now() / 1000));
+  void play(
+    {
+      kind: "catchup",
+      account,
+      channel,
+      programme: p,
+      title: cap(p.title, 160) || cap(channel.name, 120),
+      subtitle: dot(cap(channel.name, 60), `${day} ${clock(p.start, fmt)}`, runtime(p.end - p.start)),
+      duration: minutesOf(p) * 60,
+    },
+    start,
+  );
   openPlayer();
 }
 

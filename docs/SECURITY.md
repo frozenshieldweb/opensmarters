@@ -439,7 +439,9 @@ Residual risks of the web edition:
   they can also make it `GET` HTTP services on the LAN (answers are parsed as JSON, M3U,
   XMLTV, images or media, never reflected raw).
 - Plain-HTTP providers expose credentials between the server and the provider, as on the
-  desktop.
+  desktop. The UI says so for as long as it lasts (`Account.insecure`: an `http` panel,
+  playlist or EPG address, or a panel that hands out `http` stream addresses): a permanent
+  warning on the provider in Settings › Providers and an open lock next to the clock.
 - The sign-in limiter lives in memory (a restart resets it); there is no second factor.
 - `--demo` starts without a secret key (it makes up a temporary one) and creates a
   known password: local testing only.

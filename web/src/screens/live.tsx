@@ -458,11 +458,26 @@ function Preview(props: { account: string; channel: Channel | null; compact?: bo
         <Button variant="primary" icon="arrows-out" onClick={props.onFullscreen} disabled={!c} fk="pv:full">
           Fullscreen
         </Button>
-        {!props.compact && (
-          <Button variant="secondary" icon="rows" onClick={() => go({ name: "guide" })} fk="pv:guide">
-            Guide
+        {c?.archive_days ? (
+          <Button
+            variant="secondary"
+            icon="clock-counter-clockwise"
+            onClick={() => go({ name: "catchup", account: props.account, key: c.key })}
+            fk="pv:catchup"
+            title={`Past programmes of ${c.name} (${plural(c.archive_days, "day")})`}
+          >
+            Catch-up
           </Button>
-        )}
+        ) : null}
+        {!props.compact &&
+          (breakpoint.value === "wide" ? (
+            <Button variant="secondary" icon="rows" onClick={() => go({ name: "guide" })} fk="pv:guide">
+              Guide
+            </Button>
+          ) : (
+            // Narrower columns: the Guide (also in the side rail) as an icon, so the buttons stay on one line.
+            <IconButton icon="rows" label="Guide" onClick={() => go({ name: "guide" })} fk="pv:guide" />
+          ))}
         <IconButton
           icon="heart"
           fill={fav}

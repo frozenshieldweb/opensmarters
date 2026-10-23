@@ -17,7 +17,13 @@
 // Scripted errors: sign-in failures (401, then 429 after 5), a provider that refuses (server
 // containing "refuse", or username "wrong") or can't be reached (server containing
 // "unreachable"), channel 13 (stream limit reached, 503), channel 14 (provider refused the
-// stream, 502), channel 9 (the stream drops every 20 s: reconnects), and "Θάλασσα HD" (HEVC).
+// stream, 502), channel 9 (the stream drops every 20 s: reconnects), "Θάλασσα HD" (HEVC), and
+// catch-up on channel 6 (refused in both link formats: "This programme isn't available…").
+//
+// Catch-up: news channels whose number is a multiple of 3 keep 7 days (Xtream accounts only);
+// GET …/catchup/{key} lists their ended programmes newest first, and POST /api/play with
+// kind "catchup" plays one like a film. Accounts say `insecure` when an address is http (the
+// demo provider is, so the header shows the open lock).
 
 import { randomBytes } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
@@ -124,8 +130,8 @@ export class MockApi {
       { id: "u3", name: "wren.k", is_admin: false, disabled: true, created_at: t - 86400 * 9, last_seen_at: null, password: "wren-password-1" },
     );
     this.accounts.push(
-      { id: "a1", owner: "u1", name: "Demo provider", kind: "xtream", host: "panel.provider.example", status: "active", expires_at: t + 86400 * 143, max_connections: 2, active_connections: 0 },
-      { id: "a2", owner: "u1", name: "Evening playlist", kind: "m3u", host: "lists.provider.example", status: "unknown", expires_at: null, max_connections: null, active_connections: null },
+      { id: "a1", owner: "u1", name: "Demo provider", kind: "xtream", host: "panel.provider.example", status: "active", expires_at: t + 86400 * 143, max_connections: 2, active_connections: 0, insecure: true },
+      { id: "a2", owner: "u1", name: "Evening playlist", kind: "m3u", host: "lists.provider.example", status: "unknown", expires_at: null, max_connections: null, active_connections: null, insecure: false },
     );
     const f = this.favsOf("u1", "a1");
     for (const n of [1, 2, 3, 4, 5, 9, 31, 62]) f.channel.add(`ch${n}`);
@@ -203,8 +209,9 @@ export class MockApi {
     return c;
   }
 
-  private publicChannel(c: MockChannel): Channel {
-    return { key: c.key, name: c.name, number: c.number, logo: c.logo, categories: c.categories, archive_days: c.archive_days };
+  /** Playlists (M3U) have no catch-up: their channels never say `archive_days`. */
+  private publicChannel(c: MockChannel, xtream = true): Channel {
+    return { key: c.key, name: c.name, number: c.number, logo: c.logo, categories: c.categories, archive_days: xtream ? c.archive_days : null };
   }
 
   /** The films of an M3U playlist (its VOD entries). */
@@ -410,14 +417,17 @@ export class MockApi {
     const name = String(b["name"] ?? "").trim();
     if (!name) throw fail(400, "invalid_name", "Give this provider a name.");
     let host: string;
+    let insecure: boolean;
     if (b["kind"] === "xtream") {
       this.checkProvider(String(b["server"] ?? ""), String(b["username"] ?? ""));
       if (!b["username"] || !b["password"]) throw fail(400, "missing", "Enter your username and password.");
       host = new URL(String(b["server"])).hostname;
+      insecure = /^http:/i.test(String(b["server"]));
     } else if (b["kind"] === "m3u") {
       this.checkProvider(String(b["m3u_url"] ?? ""), undefined);
       if (b["epg_url"]) this.checkProvider(String(b["epg_url"]), undefined);
       host = new URL(String(b["m3u_url"])).hostname;
+      insecure = /^http:/i.test(String(b["m3u_url"])) || /^http:/i.test(String(b["epg_url"] ?? ""));
     } else {
       throw fail(400, "invalid_kind", "Choose Xtream Codes or M3U playlist.");
     }
@@ -431,6 +441,7 @@ export class MockApi {
       expires_at: b["kind"] === "xtream" ? nowS() + 86400 * 90 : null,
       max_connections: b["kind"] === "xtream" ? 1 : null,
       active_connections: b["kind"] === "xtream" ? 0 : null,
+      insecure,
     };
     this.accounts.push(a);
     json(res, 200, this.publicAccount(a));
@@ -444,10 +455,12 @@ export class MockApi {
         if (typeof b["server"] === "string") {
           this.checkProvider(b["server"], typeof b["username"] === "string" ? b["username"] : undefined);
           a.host = new URL(b["server"]).hostname;
+          a.insecure = /^http:/i.test(b["server"]);
         }
         if (typeof b["m3u_url"] === "string") {
           this.checkProvider(b["m3u_url"], undefined);
           a.host = new URL(b["m3u_url"]).hostname;
+          a.insecure = /^http:/i.test(b["m3u_url"]);
         }
         return json(res, 200, this.publicAccount(a));
       }
@@ -477,7 +490,7 @@ export class MockApi {
             : cat === "favourites"
               ? c.channels.filter((ch) => fav.channel.has(ch.key))
               : c.channels.filter((ch) => ch.categories.includes(cat));
-        return json(res, 200, list.map((ch) => this.publicChannel(ch)));
+        return json(res, 200, list.map((ch) => this.publicChannel(ch, xtream)));
       }
       case "/epg/now": {
         const keys = (q.get("keys") ?? "").split(",").filter(Boolean).slice(0, 200);
@@ -514,14 +527,14 @@ export class MockApi {
         if ([...text].length < 2) throw fail(400, "query_too_short", "Type at least 2 characters.");
         const f = fold(text);
         return json(res, 200, {
-          channels: c.channels.filter((x) => fold(x.name).includes(f)).slice(0, 50).map((x) => this.publicChannel(x)),
+          channels: c.channels.filter((x) => fold(x.name).includes(f)).slice(0, 50).map((x) => this.publicChannel(x, xtream)),
           movies: (xtream ? c.movies : this.playlistMovies()).filter((x) => fold(x.name).includes(f)).slice(0, 50).map((x) => this.publicMovie(x)),
           series: xtream ? c.series.filter((x) => fold(x.name).includes(f)).slice(0, 50).map((x) => this.publicSeries(x)) : [],
         });
       }
       case "/favourites":
         return json(res, 200, {
-          channels: c.channels.filter((x) => fav.channel.has(x.key)).map((x) => this.publicChannel(x)),
+          channels: c.channels.filter((x) => fav.channel.has(x.key)).map((x) => this.publicChannel(x, xtream)),
           movies: c.movies.filter((x) => fav.movie.has(x.id)).map((x) => this.publicMovie(x)),
           series: c.series.filter((x) => fav.series.has(x.id)).map((x) => this.publicSeries(x)),
         });
@@ -584,6 +597,19 @@ export class MockApi {
       }
       return json(res, 200, schedule(ch, from, to));
     }
+    const cm = /^\/catchup\/(.+)$/.exec(rest);
+    if (cm) {
+      // Like the server: 404 for an unknown key, [] without archive, ended programmes within
+      // archive_days, newest first.
+      const ch = this.channel(decodeURIComponent(cm[1]!));
+      if (!xtream || !ch.archive_days) return json(res, 200, []);
+      const t = nowS();
+      const from = t - ch.archive_days * 86400;
+      const list = schedule(ch, from, t)
+        .filter((pr) => pr.end <= t && pr.start >= from)
+        .sort((x, y) => y.start - x.start);
+      return json(res, 200, list);
+    }
     const mm = /^\/movies\/(.+)$/.exec(rest);
     if (mm) {
       const mv = (xtream ? c.movies : this.playlistMovies()).find((x) => x.id === decodeURIComponent(mm[1]!));
@@ -637,8 +663,18 @@ export class MockApi {
       const ep = this.cat.episodes.get(String(b.id));
       if (!ep) throw fail(404, "not_found", "This episode isn't available any more.");
       duration = ep.episode.duration_secs ?? 2700;
+    } else if (b.kind === "catchup") {
+      const ch = this.channel(String(b.id));
+      const mins = Number(b.catchup_minutes);
+      if (!Number.isFinite(Number(b.catchup_start)) || !Number.isFinite(mins) || mins < 1 || mins > 1440) {
+        throw fail(400, "invalid_request", "Catch-up needs catchup_start and catchup_minutes (1 to 1440).");
+      }
+      if (!ch.archive_days) throw fail(502, "provider_error", "This programme isn't available from your provider right now.");
+      // Channel 6: the provider refuses both catch-up link formats.
+      if (ch.number === 6) throw fail(502, "provider_error", "This programme isn't available from your provider right now.");
+      duration = mins * 60;
     } else {
-      throw fail(400, "unsupported", "Catch-up isn't available in this mock.");
+      throw fail(400, "invalid_request", "The kind must be live, movie, episode or catchup.");
     }
     const firstSeg = Math.max(0, Math.min(Math.floor((Number(b.start) || 0) / SEGMENT_SECS), Math.floor(duration / SEGMENT_SECS) - 1));
     this.streams.set(sid, { sid, owner: u.id, live: false, duration, firstSeg, created: Date.now(), dropsAfter: null });

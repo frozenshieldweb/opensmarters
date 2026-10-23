@@ -145,6 +145,7 @@ pub fn router() -> Router<AppState> {
         .route("/live/channels", get(catalog::live_channels))
         .route("/epg/now", get(catalog::epg_now))
         .route("/epg/channel/{key}", get(catalog::epg_channel))
+        .route("/catchup/{key}", get(catalog::catchup))
         .route("/movies/categories", get(catalog::movie_categories))
         .route("/movies", get(catalog::movies))
         .route("/movies/{item}", get(catalog::movie))

@@ -146,6 +146,11 @@ export function rememberInGroup(group: string, el: Element | null): void {
   if (el) memory.groups.set(group, el);
 }
 
+/** Sets the item a scope lands on when the focus moves into it (a list's selected entry). */
+export function rememberInScope(scope: string, el: Element | null): void {
+  if (el) memory.scopes.set(scope, el);
+}
+
 /** Registers a back handler (dialogs, OSD, number entry). The newest runs first. */
 export function pushBack(handler: BackHandler): () => void {
   backHandlers.push(handler);

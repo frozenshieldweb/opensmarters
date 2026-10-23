@@ -24,10 +24,12 @@ What the browser can't do, and what the server therefore does:
 2. **Play the streams.** Browsers play HLS through Media Source Extensions (hls.js) or
    natively (Safari), with H.264 video and AAC/MP3 audio. Provider streams are MPEG-TS,
    MKV or HLS, often with AC-3/E-AC-3/DTS audio and sometimes HEVC video. The server
-   **remuxes** every stream to HLS with ffmpeg: video copied, audio transcoded to AAC
-   when it isn't AAC/MP3 (cheap). HEVC is passed through when the browser says it can play
-   it (`MediaSource.isTypeSupported`), else transcoded to H.264 only if the instance allows
-   it (CPU-heavy, off by default), else the player says the format isn't supported.
+   **remuxes** every stream to HLS (fragmented MP4) with ffmpeg: video copied, audio copied
+   when it is AAC and converted to AAC otherwise, MP3 included (cheap; AAC in fragmented MP4
+   is what every browser's Media Source Extensions play). HEVC is passed through when the
+   browser says it can play it (`MediaSource.isTypeSupported`), else transcoded to H.264
+   only if the instance allows it (CPU-heavy, off by default), else the player says the
+   format isn't supported.
 3. **Keep secrets.** The provider credentials (Xtream password, M3U URL) live on the
    server, encrypted at rest, and **never reach the browser**: stream, image and API URLs
    the browser sees are the server's own.
@@ -44,11 +46,11 @@ transcoding a lot, and each viewer uses one of the provider account's connection
   links. The web edition must never be offered as a public service that relays IPTV for
   strangers; the docs say so. (Open registration could come later, with abuse controls.)
 - **Light edition.** In: sign-in, providers (Xtream Codes login or M3U URL with an optional
-  EPG URL), Home, Live TV with now/next, a simple Guide, Movies, Series, Search,
-  Favourites, resume and Continue watching, the player, Settings. Out: recording and
-  downloads, multiscreen, pause and rewind live TV, sleep timer, reminders, parental
-  control, category management, backups, the stream details overlay. Catch-up is optional
-  (do it last if time allows; the URL builder exists in `crates/core`).
+  EPG URL), Home, Live TV with now/next, a simple Guide, **catch-up** (Xtream: a channel's
+  archived programmes by day, played from their start, from Live TV and the Guide), Movies,
+  Series, Search, Favourites, resume and Continue watching, the player, Settings. Out:
+  recording and downloads, multiscreen, pause and rewind live TV, sleep timer, reminders,
+  parental control, category management, backups, the stream details overlay.
 - **Feels like a desktop app.** A full-window single-page app with the Windows app's side
   rail and screens, keyboard and remote navigation everywhere (arrows, Enter, Esc /
   Backspace back, the same player keys), the Afterglow focus ring, no page scrolling of the
@@ -136,7 +138,7 @@ Passwords: at least 10 characters. Names: 2–32 characters, letters, digits, `.
 | `DELETE /api/accounts/{id}` | → `{}` |
 | `POST /api/accounts/{id}/refresh` | → `Account` (drops the cached lists) |
 
-`Account = {id, name, kind, host, status: "active"|"expired"|"banned"|"disabled"|"unknown", expires_at: number|null, max_connections: number|null, active_connections: number|null}`. `host` is the server's host name only (never a URL with credentials, never the M3U URL).
+`Account = {id, name, kind, host, status: "active"|"expired"|"banned"|"disabled"|"unknown", expires_at: number|null, max_connections: number|null, active_connections: number|null, insecure: bool}`. `host` is the server's host name only (never a URL with credentials, never the M3U URL). `insecure` is true when the panel, playlist or EPG address is plain `http`, or when an Xtream panel's `server_info` says streams are served over `http` (the stream addresses carry the password): the UI keeps a warning on such providers (DESIGN.md §6.17). It is stored per account, worked out again at every check (add, edit, refresh) and whenever a fresh login answer changes it.
 
 ### Catalogue (`/api/accounts/{id}/…`)
 | Path | Response |
@@ -145,6 +147,7 @@ Passwords: at least 10 characters. Names: 2–32 characters, letters, digits, `.
 | `GET …/live/channels?category=<id>\|all\|favourites` | `[Channel]` where `Channel = {key, name, number: number\|null, logo: string\|null, categories: [id], archive_days: number\|null}` |
 | `GET …/epg/now?keys=<k1,k2,…>` (≤ 200 keys) | `{"<key>": [Programme, Programme]}` (now and next) |
 | `GET …/epg/channel/{key}?from=<ts>&to=<ts>` (≤ 48 h) | `[Programme]` where `Programme = {start, end, title, description: string\|null}` |
+| `GET …/catchup/{key}` | `[Programme]`: the channel's programmes that can be replayed (the panel's archive flag, ended, within its `archive_days`), newest first; `[]` for M3U accounts and channels without archive; 404 for an unknown key. From `get_simple_data_table`, cached like the guide (10 min) |
 | `GET …/movies/categories`, `…/series/categories` | `[{id, name}]` (Xtream only; M3U accounts: `[]`) |
 | `GET …/movies?category=<id>\|all` | `[Movie]` where `Movie = {id, name, poster: string\|null, year: number\|null, rating: number\|null, added: number\|null}` |
 | `GET …/movies/{id}` | `{id, name, poster, backdrop, year, rating, duration_secs, genre, plot, cast, director, progress: {position, duration}\|null}` |
@@ -166,6 +169,19 @@ the provider's.
 | `POST /api/play` | `{account, kind: "live"\|"movie"\|"episode"\|"catchup", id, start?: seconds, catchup_start?: ts, catchup_minutes?: n, hevc: bool}` → `{stream: sid, url: "/api/streams/<sid>/index.m3u8", live: bool, duration: number\|null, start: number}`; 503 `limit_reached` ("You're already watching on another device" / "The provider allows N streams"), 502 `provider_error` with a plain message (403 from the panel: "Your provider refused the stream. Too many connections may be open; wait a minute and try again.") |
 | `GET /api/streams/{sid}/{file}` | the HLS playlist or segment (owner only; `Cache-Control: no-store`) |
 | `DELETE /api/streams/{sid}` | stops it → `{}` (the UI calls it when the player closes; the 30 s idle stop is the safety net) |
+
+Catch-up (`kind: "catchup"`, Xtream only): `id` is the channel's key, `catchup_start` the
+programme's start and `catchup_minutes` its length rounded up (1–1440); the answer is a
+non-live stream with `duration = catchup_minutes × 60`, and `start` seeks inside the
+programme like a film (the server asks the panel for the archive from that minute instead of
+converting everything before it). Panels accept one or both timeshift start formats
+(PROTOCOL.md, "Catch-up"): the server tries the account's remembered format first (the
+standard `YYYY-MM-DD:HH-MM` by default), falls back **once** to the other when the provider
+refuses before sending any video (an error status, no data, or something that isn't video),
+remembers the one that worked for the account, and when both are refused answers 502
+`provider_error` "This programme isn't available from your provider right now.". The
+timeshift start is the panel's own wall-clock `start` of the programme when its schedule
+has it.
 
 ### Settings
 | Method, path | Body → response |
@@ -230,12 +246,19 @@ the provider's.
   - **Landing (signed out):** hero with the Afterglow art and the Sign in panel.
   - **First run (setup code) and Accept invite.**
   - **Add provider:** the choice of Xtream Codes or M3U playlist; plain explanations; the
-    unencrypted-HTTP warning, as in the Windows app.
+    unencrypted-HTTP warning, as in the Windows app. A saved provider that is unencrypted
+    (`Account.insecure`) keeps a permanent warning chip in Settings › Providers, and the
+    header shows a quiet open lock with a tooltip while it is the current one.
   - **Home:** Continue watching, Live favourites, Recently added movies and series.
   - **Live TV:** categories column (All, Favourites, then the provider's), a virtualised
     channel list with logos, numbers and now/next with progress, an inline preview, Enter to
     go fullscreen, PageUp/PageDown or Ctrl+↑/↓ to zap, digits for a channel number.
-  - **Guide:** channels with their programmes for the next hours (a simple timeline).
+  - **Guide:** channels with their programmes for the next hours (a simple timeline). Enter
+    on a programme that has ended, on a channel with catch-up, plays it from its start.
+  - **Catch-up** (per channel, from the Live TV preview's Catch-up button):
+    the archived programmes grouped by day on the viewer's clock (Today, Yesterday, then
+    weekday and date), newest first; Enter plays one from its start as a non-live stream
+    (seeking as for films).
   - **Movies / Series:** categories column, a virtualised poster grid (sort: provider order,
     name, recently added, rating), a detail page with Play / Resume / Favourite; seasons and
     episodes; next episode at the end.

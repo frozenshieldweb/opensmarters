@@ -53,7 +53,7 @@ windows-native-keyring-store = "1.1"
 # Safe SHGetKnownFolderPath wrapper: %LOCALAPPDATA%\Programs, Start menu, Desktop, system folders.
 known-folders = "1.4"
 # The payload: pure-Rust xz (LZMA2) decoder; the encoder is used by opensmarters-pack.
-lzma-rust2 = { version = "0.23", default-features = false, features = ["std", "encoder", "optimization", "xz"] }
+lzma-rust2 = { version = "0.24", default-features = false, features = ["std", "encoder", "optimization", "xz"] }
 # Start menu / desktop shortcuts (pure-Rust .lnk writer).
 mslnk = "0.1.8"
 # "Change…" folder picker and the --help message box (already used by the app).
@@ -73,7 +73,7 @@ tempfile = "3"
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
-lzma-rust2 = { version = "0.23", default-features = false, features = ["std", "encoder", "optimization", "xz"] }
+lzma-rust2 = { version = "0.24", default-features = false, features = ["std", "encoder", "optimization", "xz"] }
 sha2 = "0.11"
 
 [lints]

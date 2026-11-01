@@ -43,7 +43,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 opensmarters-core = { path = "../core" }
 # rustls only (no native-tls / OpenSSL), like crates/core.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 # The built UI (`web/dist`) embedded at compile time (read from disk in debug builds).
 rust-embed = { version = "8.13", features = ["mime-guess"] }
 secrecy = "0.10"
